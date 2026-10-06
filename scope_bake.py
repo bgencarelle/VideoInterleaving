@@ -12,9 +12,12 @@ Library format (one directory per baked image folder, all mmap-able):
     flags.npy         (P,)  uint8   1 = closed silhouette loop (matte edge)
     names.json                      source filenames, bake provenance
 """
+import copy
 import json
 from pathlib import Path
+import threading
 
+from numba import njit
 import numpy as np
 
 Q = 32767.0
@@ -103,6 +106,9 @@ class XYLibrary:
 
     def __init__(self, path, flip_y=True):
         p = Path(path)
+        # Baked arrays are immutable for this library lifetime. Reopening a bake
+        # creates a new version even when its path/index is unchanged.
+        self.prepared_source_version = object()
         self.flip_y = flip_y
         self.verts = np.load(p / "verts.npy", mmap_mode="r")
         self.poly = np.load(p / "poly_starts.npy")
@@ -222,16 +228,50 @@ def _walk(P, w, n, oversample=1):
     return _walk_raw(P, w, n)
 
 
+@njit(cache=True, nogil=True, fastmath=False)
+def _walk_raw_numba_kernel(P, weights, n):
+    """Sample a weighted polyline at uniformly spaced cumulative weights."""
+    count = len(weights)
+    cumulative = np.empty(count + 1, dtype=np.float64)
+    cumulative[0] = 0.0
+    for i in range(count):
+        cumulative[i + 1] = cumulative[i] + weights[i]
+
+    out = np.empty((n, P.shape[1]), dtype=np.float64)
+    if n == 0:
+        return out
+
+    step = cumulative[count] / n
+    segment = 0
+    for sample in range(n):
+        t = step * sample
+        # `side="right"` in searchsorted means an exact boundary belongs to
+        # the following segment. Since t is monotonic, advance once rather
+        # than doing a binary search for every output sample.
+        while segment < count - 1 and cumulative[segment + 1] <= t:
+            segment += 1
+        fraction = (t - cumulative[segment]) / weights[segment]
+        for axis in range(P.shape[1]):
+            out[sample, axis] = (
+                P[segment, axis]
+                + fraction * (P[segment + 1, axis] - P[segment, axis]))
+    return out
+
+
+def _warm_walk_raw_numba(n, point_dtype=np.float32):
+    """Compile the selected raster sampler signature before stream start."""
+    points = np.zeros((2, 2), dtype=point_dtype)
+    weights = np.ones(1, dtype=np.float64)
+    _walk_raw_numba_kernel(points, weights, max(0, int(n)))
+
+
 def _walk_raw(P, w, n):
     """Sample n points along polyline P, spending time per arbitrary weights w.
     Same machinery as rasterize, but the weights are brightness rather than
     length -- that substitution is what turns dwell time into intensity."""
     w = np.maximum(np.asarray(w, np.float64), 1e-12)
-    cum = np.concatenate([[0.0], np.cumsum(w)])
-    t = np.linspace(0.0, cum[-1], n, endpoint=False)
-    i = np.clip(np.searchsorted(cum, t, side="right") - 1, 0, len(w) - 1)
-    f = ((t - cum[i]) / w[i])[:, None]
-    return P[i] + f * (P[i + 1] - P[i])
+    P = np.ascontiguousarray(P)
+    return _walk_raw_numba_kernel(P, w, int(n))
 
 
 def _box(img, rows, cols):
@@ -294,6 +334,7 @@ class SweepSource:
                       seconds, not a few frames.  0 disables.
         """
         self.lum_fn = lum_fn
+        self._config_lock = threading.RLock()
         self.auto_levels = float(auto_levels)
         self._lv = None                     # running (lo, hi)
         self._lum_shape = None
@@ -323,6 +364,14 @@ class SweepSource:
         self._last = None
         self._grid_key = None
         self._grid = None
+        self._composite_cache_key = None
+        self._composite_grid_hits = 0
+        self._composite_grid_misses = 0
+        self._composite_grid_bypasses = 0
+        self._live_prepared_key = None
+        self._live_grid_hits = 0
+        self._live_grid_misses = 0
+        self._live_grid_bypasses = 0
         self.passes = 0
         self.row_switches = 0
 
@@ -331,21 +380,62 @@ class SweepSource:
         angle = int(degrees) % 360
         if angle % 90:
             raise ValueError("scope rotation must be a multiple of 90 degrees")
-        self.rotation = angle
-        if grid is not None:
-            self.grid_rows, self.grid_cols = map(int, grid)
-        self._out = np.zeros((0, 2), np.float32)
-        self._plan = None
-        self._budgets = None
-        self._row_i = 0
-        self._last = None
-        self._lum_shape = None
-        self._grid_key = None
-        self._grid = None
+        with self._config_lock:
+            self.rotation = angle
+            if grid is not None:
+                self.grid_rows, self.grid_cols = map(int, grid)
+            self._out = np.zeros((0, 2), np.float32)
+            self._plan = None
+            self._budgets = None
+            self._row_i = 0
+            self._last = None
+            self._lum_shape = None
+            self._grid_key = None
+            self._grid = None
+            self._composite_cache_key = None
+            self._live_prepared_key = None
+
+    def configure(self, **values):
+        """Publish live tuning atomically at a generator-chunk boundary."""
+        allowed = {
+            "gamma", "floor", "trim", "density", "rows_override", "invert",
+            "grid_rows", "grid_cols", "levels", "precondition",
+        }
+        unknown = set(values) - allowed
+        if unknown:
+            raise TypeError("unsupported SweepSource setting(s): "
+                            + ", ".join(sorted(unknown)))
+        with self._config_lock:
+            values = {
+                name: value for name, value in values.items()
+                if not np.array_equal(getattr(self, name), value)
+            }
+            if not values:
+                return
+            for name, value in values.items():
+                setattr(self, name, value)
+            if set(values) & {
+                    "density", "rows_override", "invert", "grid_rows",
+                    "grid_cols", "levels", "precondition"}:
+                self._grid_key = None
+                self._grid = None
+                self._composite_cache_key = None
+                self._live_prepared_key = None
+                self._lum_shape = None
+            if set(values) & {
+                    "gamma", "trim", "floor", "density", "rows_override",
+                    "grid_rows", "grid_cols", "levels", "precondition"}:
+                self._plan = None
+                self._budgets = None
 
     def _live(self):
         """Grid + axes for a live luminance source."""
-        lum = np.asarray(self.lum_fn(), dtype=np.float32)
+        snapshot = getattr(self.lum_fn, "prepared_snapshot", None)
+        if callable(snapshot):
+            source, source_version = snapshot()
+        else:
+            source, source_version = self.lum_fn(), None
+        lum = np.asarray(source, dtype=np.float32)
         if lum.ndim == 3:
             lum = lum.mean(axis=2)
         if lum.max() > 1.5:
@@ -356,6 +446,27 @@ class SweepSource:
             lum = np.rot90(lum, k=self.rotation // 90)
             lum = np.ascontiguousarray(lum)
         h, w = lum.shape
+        settings = (
+            (h, w), self.rotation, self.invert, self.n_pass,
+            float(self.density), self.rows_override, self.grid_rows,
+            self.grid_cols,
+            None if self.levels is None else tuple(map(float, self.levels)),
+            float(self.precondition))
+        live_key = None
+        if source_version is not None and self.auto_levels <= 0:
+            try:
+                hash(source_version)
+                live_key = (source_version, settings)
+            except TypeError:
+                pass
+        if live_key is None:
+            self._live_grid_bypasses += 1
+        elif live_key == self._live_prepared_key and self._grid is not None:
+            self._live_grid_hits += 1
+            return self._grid
+        else:
+            self._live_grid_misses += 1
+
         if self._grid is None or self._lum_shape != (h, w):
             self._lum_shape = (h, w)
             aspect = h / float(w)
@@ -395,18 +506,60 @@ class SweepSource:
         g = _precondition_grid(g, self.precondition)
         xs, ys = self._axes
         self._grid = (g, xs, ys)
+        self._live_prepared_key = live_key
         return self._grid
+
+    def preparation_stats(self):
+        """One-entry live/composite grid cache counters and retained bytes."""
+        retained = (0 if self._grid is None else
+                    sum(int(np.asarray(a).nbytes) for a in self._grid))
+        return dict(
+            hits=self._live_grid_hits + self._composite_grid_hits,
+            misses=self._live_grid_misses + self._composite_grid_misses,
+            bypasses=self._live_grid_bypasses + self._composite_grid_bypasses,
+            live_grid_hits=self._live_grid_hits,
+            live_grid_misses=self._live_grid_misses,
+            live_grid_bypasses=self._live_grid_bypasses,
+            composite_grid_hits=self._composite_grid_hits,
+            composite_grid_misses=self._composite_grid_misses,
+            composite_grid_bypasses=self._composite_grid_bypasses,
+            entries=int(self._live_prepared_key is not None or
+                        self._composite_cache_key is not None),
+            bytes=retained)
 
     # -- geometry -------------------------------------------------------
     def _composite(self, st):
-        key = (id(st.get("main")), st.get("mi"), id(st.get("float")),
-               st.get("fi"), self.invert, self.rotation)
-        if key == self._grid_key and self._grid is not None:
-            return self._grid
         ml, fl = st.get("main"), st.get("float")
-        tm = ml.thumb(st["mi"]) if ml is not None and len(ml) else None
-        tf = fl.thumb(st["fi"]) if fl is not None and len(fl) else None
+        mi, fi = st.get("mi", 0), st.get("fi", 0)
+        versions = tuple(
+            getattr(lib, "prepared_source_version", None)
+            if lib is not None else None for lib in (ml, fl))
+        settings = (
+            self.invert, self.rotation,
+            None if self.bbox is None else tuple(self.bbox),
+            self.n_pass, float(self.density), self.rows_override,
+            self.grid_rows, self.grid_cols,
+            None if self.levels is None else tuple(map(float, self.levels)),
+            float(self.precondition))
+        key = (id(ml), mi, id(fl), fi, versions, settings)
+        versioned = all(lib is None or version is not None
+                        for lib, version in zip((ml, fl), versions))
+        cache_key = key if versioned else None
+        if (cache_key is not None and cache_key == self._composite_cache_key
+                and self._grid is not None):
+            self._composite_grid_hits += 1
+            return self._grid
+        if cache_key is None:
+            self._composite_grid_bypasses += 1
+        else:
+            self._composite_grid_misses += 1
+        self._grid_key = key
+        self._composite_cache_key = cache_key
+        tm = ml.thumb(mi) if ml is not None and len(ml) else None
+        tf = fl.thumb(fi) if fl is not None and len(fl) else None
         if tm is None and tf is None:
+            self._grid = None
+            self._composite_cache_key = None
             return None
 
         def split(t):
@@ -460,7 +613,6 @@ class SweepSource:
         g = _precondition_grid(g, self.precondition)
         sx = 1.0 if w >= h else w / float(h)
         sy = 1.0 if h >= w else h / float(w)
-        self._grid_key = key
         self._grid = (g, np.linspace(-sx, sx, cls), -np.linspace(-sy, sy, rws))
         return self._grid
 
@@ -527,6 +679,13 @@ class SweepSource:
 
     # -- audio callback interface --------------------------------------
     def __call__(self, n):
+        # The source worker, not the audio callback, owns this lock. GUI/input
+        # tuning takes effect atomically between generated blocks rather than
+        # mixing old/new parameters partway through a trajectory chunk.
+        with self._config_lock:
+            return self._generate(n)
+
+    def _generate(self, n):
         while len(self._out) < n:
             st = self.state_fn() if self.state_fn is not None else None
             if self._plan is None or self._row_i >= len(self._plan):
@@ -971,9 +1130,10 @@ class TraceEmitter:
 
     def __init__(self, samplerate, samples, *, gamma=2.2, trim=0.02,
                  density=1.0, rows=None, fields=1, border=0.0, oversample=1,
-                 sweep="alternate", dc_comp=None, grid=None, levels=None,
-                 autofit=True, row_bias=1.0, precondition=0.0,
-                 yt_timing=None, yt_trigger_samples=0):
+                  sweep="alternate", dc_comp=None, grid=None, levels=None,
+                  autofit=True, row_bias=1.0, precondition=0.0,
+                 yt_timing=None, yt_trigger_samples=0,
+                 close_frame=False):
         self.samplerate = samplerate
         self.n = int(samples)
         self.gamma, self.trim, self.density = gamma, trim, density
@@ -987,15 +1147,26 @@ class TraceEmitter:
             raise ValueError("Y-T timing must be fixed or dwell")
         self.yt_timing = yt_timing
         self.yt_trigger_samples = int(yt_trigger_samples)
+        self.close_frame = bool(close_frame)
         self._rev, self._end, self._field = False, None, 0
+        _warm_walk_raw_numba(
+            self.n,
+            point_dtype=(np.float64 if self.yt_timing == "fixed"
+                         else np.float32))
 
     def reset(self):
         """Drop chain state. Call after a device swap: the beam is not where
         the chain thinks it is, and continuing would jump the full screen."""
         self._rev, self._end, self._field = False, None, 0
 
-    def emit(self, lum, levels=None):
-        """One trace, or None if there is nothing to draw."""
+    def emit(self, lum, levels=None, *, field=None, commit=True, start=None,
+             prepared_grid=None):
+        """One trace, or None if there is nothing to draw.
+
+        ``commit=False`` renders a candidate without advancing the sweep or
+        interlace state. The caller can pass the accepted output endpoint to
+        :meth:`accept` after it has been queued for presentation.
+        """
         if lum is None:
             return None
         alt = self.sweep_mode == "alternate"
@@ -1003,30 +1174,51 @@ class TraceEmitter:
         if self.grid:
             kw["grid_rows"], kw["grid_cols"] = self.grid
         lv = levels if levels is not None else self.levels
+        if alt:
+            start = self._end if start is None else start
+        else:
+            start = None
         frame = render_luma(
-            lum, self.n, gamma=self.gamma, trim=self.trim,
+            lum, self.n,
+            gamma=self.gamma, trim=self.trim,
             density=self.density, rows=self.rows, autofit=self.autofit,
             oversample=self.oversample, border=self.border,
             row_bias=self.row_bias, precondition=self.precondition,
-            fields=self.fields, field=self._field % self.fields,
+            fields=self.fields,
+            field=(self._field if field is None else int(field)) % self.fields,
             levels=lv, palindrome=(self.sweep_mode == "palindrome"),
             reverse=(alt and self._rev),
-            start=self._end if alt else None,
-            close=(self.sweep_mode == "retrace"),
+            start=start,
+            # With the trigger marker enabled, Scope supplies an off-picture
+            # retrace at each trace boundary. Without it, a missed producer
+            # deadline makes Scope replay this whole trace; a short dim close
+            # path then bounds the loop seam. The next trace still chains from
+            # this endpoint.
+            close=(self.sweep_mode == "retrace" or
+                   (alt and self.close_frame)),
+            loop_anchor=(alt and self.close_frame),
             yt_fixed=(self.yt_timing == "fixed"),
-            yt_trigger_samples=self.yt_trigger_samples, **kw)
+            yt_trigger_samples=self.yt_trigger_samples,
+            prepared_grid=prepared_grid, **kw)
         if frame is None:
             return None
-        self._field += 1
-        if alt:
-            self._rev = not self._rev
-            # captured BEFORE compensation: the chain continues from where the
-            # geometry says the beam is, not from the boosted sample
-            self._end = frame[-1]
         if self.dc_comp:
             from scope_out import precompensate_hpf
             frame = precompensate_hpf(frame, self.dc_comp, self.samplerate)
+        if alt:
+            if start is not None:
+                from scope_out import anchor_periodic_frame
+                frame = anchor_periodic_frame(frame, start)
+        if commit:
+            self.accept(frame[-1])
         return frame
+
+    def accept(self, endpoint):
+        """Commit progression after a rendered trace was accepted for output."""
+        self._field += 1
+        if self.sweep_mode == "alternate":
+            self._rev = not self._rev
+            self._end = np.asarray(endpoint, dtype=np.float32)[:2].copy()
 
 
 def _stochastic_probability(lum, gamma, trim, edge_gain):
@@ -1105,6 +1297,45 @@ class StochasticEmitter:
         self._handoff_pending = False
         self._lowpass = None
         self._lowpass_cutoff = None
+
+    def checkpoint(self):
+        """Capture mutable trajectory/filter state for an output transaction."""
+        lowpass = self._lowpass
+        return {
+            "end": self._end,
+            "shape": self._shape,
+            "pixel": self._pixel,
+            "visited": (None if self._visited is None
+                        else self._visited.copy()),
+            "count": self._count,
+            "phase": self._phase,
+            "idle_phase": self._idle_phase,
+            "handoff_pending": self._handoff_pending,
+            "rng_state": copy.deepcopy(self.rng.bit_generator.state),
+            "lowpass": lowpass,
+            "lowpass_cutoff": self._lowpass_cutoff,
+            "lowpass_state": (
+                None if lowpass is None else
+                (lowpass.enabled, lowpass.a, lowpass.z.copy())),
+        }
+
+    def restore(self, checkpoint):
+        """Restore a candidate that was not accepted by the output queue."""
+        self._end = checkpoint["end"]
+        self._shape = checkpoint["shape"]
+        self._pixel = checkpoint["pixel"]
+        self._visited = checkpoint["visited"]
+        self._count = checkpoint["count"]
+        self._phase = checkpoint["phase"]
+        self._idle_phase = checkpoint["idle_phase"]
+        self._handoff_pending = checkpoint["handoff_pending"]
+        self.rng.bit_generator.state = copy.deepcopy(checkpoint["rng_state"])
+        self._lowpass = checkpoint["lowpass"]
+        self._lowpass_cutoff = checkpoint["lowpass_cutoff"]
+        lowpass_state = checkpoint["lowpass_state"]
+        if self._lowpass is not None and lowpass_state is not None:
+            self._lowpass.enabled, self._lowpass.a = lowpass_state[:2]
+            self._lowpass.z[:] = lowpass_state[2]
 
     def start_at(self, point):
         """Resume after a mode handoff at the beam's actual position.
@@ -1186,7 +1417,7 @@ class StochasticEmitter:
                 self._pixel = (int(self.rng.integers(w)),
                                int(self.rng.integers(h)))
 
-    def _find_white(self, prob):
+    def _find_white(self, prob, cdf=None):
         """Osci's global rejection fallback, with a bounded exact fallback."""
         h, w = prob.shape
         for _ in range(100):
@@ -1198,12 +1429,19 @@ class StochasticEmitter:
         # Rejection can miss a very small bright feature 100 times.  Sampling
         # proportional to p is the same accepted distribution without letting
         # sparse images become a CPU or blank-frame lottery.
+        if callable(cdf):
+            cdf = cdf()
         weights = prob.ravel()
-        total = float(weights.sum())
+        if cdf is None:
+            cumulative = np.cumsum(weights)
+            total = float(weights.sum())
+        else:
+            cumulative, total = cdf
+            total = float(total)
         if total <= 1e-12:
             return self._pixel
-        flat = int(np.searchsorted(np.cumsum(weights),
-                                   self.rng.random() * total, side="right"))
+        flat = int(np.searchsorted(
+            cumulative, self.rng.random() * total, side="right"))
         flat = min(flat, weights.size - 1)
         return flat % w, flat // w
 
@@ -1211,7 +1449,7 @@ class StochasticEmitter:
         return (max(1, int(round(width / 120.0))) if int(self.stride) <= 0
                 else max(1, int(self.stride)))
 
-    def _advance(self, prob):
+    def _advance(self, prob, cdf=None):
         h, w = prob.shape
         reseed_targets = max(1, round(
             min(self.walk_hz, float(self.samplerate))
@@ -1258,7 +1496,7 @@ class StochasticEmitter:
                 break
 
         if found is None:
-            found = self._find_white(prob)
+            found = self._find_white(prob, cdf=cdf)
         self._pixel = found
         if local:
             self._visited[found[1], found[0]] = True
@@ -1269,7 +1507,7 @@ class StochasticEmitter:
             lum, self.gamma, self.trim, self.edge_gain)
         return self.emit_probability(prob)
 
-    def emit_probability(self, probability):
+    def emit_probability(self, probability, *, cdf=None):
         """Walk an already-combined probability field.
 
         Fusion uses this entry point because each component has already had
@@ -1304,7 +1542,7 @@ class StochasticEmitter:
             self._handoff_pending = False
         for i in range(begin, self.n):
             if self._phase >= 1.0:
-                self._advance(prob)
+                self._advance(prob, cdf=cdf)
                 self._phase -= 1.0
             # Scalar assignment avoids allocating a two-element NumPy array on
             # every target sample -- material on a Pi at 48,000 calls/second.
@@ -1354,6 +1592,21 @@ def _stipple_importance(lum, gamma=2.0, trim=0.02, edge_gain=0.0):
     return importance if total > 1e-12 else None
 
 
+def _stipple_image_samples(importance, points):
+    """Systematic image-importance quantiles, independent of endpoint/tour."""
+    if importance is None:
+        return None
+    weights = importance.ravel()
+    total = float(weights.sum())
+    if total <= 1e-12:
+        return None
+    count = max(8, int(points))
+    marks = (np.arange(count, dtype=np.float64) + 0.5) * total / count
+    flat = np.searchsorted(np.cumsum(weights), marks, side="left")
+    flat = np.clip(flat, 0, weights.size - 1)
+    return np.unique(flat, return_counts=True)
+
+
 def _greedy_nearest_order(points, start):
     """Exact greedy Euclidean ordering with reusable distance work arrays."""
     points = np.asarray(points, dtype=np.float64)
@@ -1381,6 +1634,34 @@ def _greedy_nearest_order(points, start):
     return order
 
 
+def _stipple_candidate_samples(cloud, points, gamma, trim, edge_gain):
+    """Return systematic candidate indices/dwell, excluding endpoint tour state."""
+    if cloud is None:
+        return None
+    xy = np.asarray(cloud["xy"], dtype=np.float64)
+    lum = np.clip(np.asarray(cloud["luminance"], dtype=np.float64), 0, 1)
+    edge = np.clip(np.asarray(cloud["edge"], dtype=np.float64), 0, 1)
+    correction = np.maximum(
+        np.asarray(cloud["correction"], dtype=np.float64), 0.0)
+    if not len(xy) or not (len(xy) == len(lum) == len(correction)):
+        return None
+    importance = np.where(
+        lum > max(0.0, float(trim)),
+        lum ** max(0.01, float(gamma)), 0.0)
+    if edge_gain > 0.0:
+        importance += float(edge_gain) * edge
+    importance *= correction
+    total = float(importance.sum())
+    if total <= 1e-12:
+        return None
+    count = max(8, int(points))
+    marks = ((np.arange(count, dtype=np.float64) + 0.5)
+             * total / count)
+    chosen = np.searchsorted(np.cumsum(importance), marks, side="left")
+    chosen = np.clip(chosen, 0, len(xy) - 1)
+    return np.unique(chosen, return_counts=True)
+
+
 class StippleEmitter(StochasticEmitter):
     """Stable luminance-weighted points joined by an unrestricted local tour.
 
@@ -1399,36 +1680,41 @@ class StippleEmitter(StochasticEmitter):
             edge_gain=edge_gain, dc_comp=dc_comp, level=level, border=border)
         self.points = max(8, int(points))
 
-    def _sample_pixels(self, importance):
+    def _sample_pixels(self, importance, *, prepared_samples=None,
+                       tour_cache=None, source_key=None):
         h, w = importance.shape
-        weights = importance.ravel()
-        total = float(weights.sum())
-        if total <= 1e-12:
+        samples = (prepared_samples if prepared_samples is not None else
+                   _stipple_image_samples(importance, self.points))
+        if samples is None:
             return None
-        count = self.points
-        # Systematic resampling: deterministic, exact visit-density weighting,
-        # and much less clumpy than independent random draws.
-        marks = (np.arange(count, dtype=np.float64) + 0.5) * total / count
-        flat = np.searchsorted(np.cumsum(weights), marks, side="left")
-        flat = np.clip(flat, 0, weights.size - 1)
-        unique, dwell = np.unique(flat, return_counts=True)
+        unique, dwell = samples
         pixels = np.column_stack([unique % w, unique // w]).astype(np.float64)
 
-        # Greedy Euclidean tour. This is intentionally not the old cardinal-
-        # direction spiral; diagonal neighbours are neighbours too.
         if self._end is not None:
             start = np.asarray(self._xy_to_pixel(self._end, (h, w)), np.float64)
         else:
             start = pixels[np.argmax(dwell)]
-        order = _greedy_nearest_order(pixels, start)
+        settings = ("image", self.points, (h, w), float(self.level),
+                    float(self.gamma), float(self.trim), float(self.edge_gain))
+        order = (tour_cache.stipple_order(
+            pixels, start, source_key, settings=settings)
+                 if tour_cache is not None else
+                 _greedy_nearest_order(pixels, start))
         return np.repeat(pixels[order], dwell[order], axis=0)
 
     def emit(self, lum):
         importance = _stipple_importance(
             lum, self.gamma, self.trim, self.edge_gain)
+        return self.emit_importance(importance)
+
+    def emit_importance(self, importance, *, prepared_samples=None,
+                        tour_cache=None, source_key=None):
+        """Render prepared image importance with the current endpoint/tour."""
         if importance is None:
             return None
-        pixels = self._sample_pixels(importance)
+        pixels = self._sample_pixels(
+            importance, prepared_samples=prepared_samples,
+            tour_cache=tour_cache, source_key=source_key)
         if pixels is None or not len(pixels):
             return None
         h, w = importance.shape
@@ -1461,32 +1747,19 @@ class StippleEmitter(StochasticEmitter):
         self._handoff_pending = False
         return out
 
-    def emit_candidates(self, cloud):
+    def emit_candidates(self, cloud, prepared_samples=None, *,
+                        tour_cache=None, source_key=None):
         """Render a compact baked candidate cloud with live tone controls."""
         if cloud is None:
             return None
         xy = np.asarray(cloud["xy"], dtype=np.float64)
-        lum = np.clip(np.asarray(cloud["luminance"], dtype=np.float64), 0, 1)
-        edge = np.clip(np.asarray(cloud["edge"], dtype=np.float64), 0, 1)
-        correction = np.maximum(
-            np.asarray(cloud["correction"], dtype=np.float64), 0.0)
-        if not len(xy) or not (len(xy) == len(lum) == len(correction)):
+        samples = (prepared_samples if prepared_samples is not None else
+                   _stipple_candidate_samples(
+                       cloud, self.points, self.gamma, self.trim,
+                       self.edge_gain))
+        if samples is None:
             return None
-        importance = np.where(
-            lum > max(0.0, float(self.trim)),
-            lum ** max(0.01, float(self.gamma)), 0.0)
-        if self.edge_gain > 0.0:
-            importance += float(self.edge_gain) * edge
-        importance *= correction
-        total = float(importance.sum())
-        if total <= 1e-12:
-            return None
-
-        marks = ((np.arange(self.points, dtype=np.float64) + 0.5)
-                 * total / self.points)
-        chosen = np.searchsorted(np.cumsum(importance), marks, side="left")
-        chosen = np.clip(chosen, 0, len(xy) - 1)
-        unique, dwell = np.unique(chosen, return_counts=True)
+        unique, dwell = samples
         points = xy[unique]
 
         aspect = max(float(cloud.get("aspect", 1.0)), 1e-9)
@@ -1498,7 +1771,13 @@ class StippleEmitter(StochasticEmitter):
         ]) * self.level
 
         start = self._end if self._end is not None else display[np.argmax(dwell)]
-        order = _greedy_nearest_order(display, start)
+        settings = ("candidates", self.points, float(self.gamma),
+                    float(self.trim), float(self.edge_gain), aspect,
+                    float(self.level))
+        order = (tour_cache.stipple_order(
+            display, start, source_key, settings=settings)
+                 if tour_cache is not None else
+                 _greedy_nearest_order(display, start))
         route = np.repeat(display[order], dwell[order], axis=0)
         if self._end is not None:
             route = np.vstack([self._end, route])
@@ -1566,13 +1845,24 @@ class TriangleMixScheduler:
         return max(spans)
 
     def next_mode(self):
+        mode = self.peek_next_mode()
+        self.advance()
+        return mode
+
+    def peek_next_mode(self):
+        """Return the next route without advancing output state."""
+        error = self._raster_error + self.raster_duty
+        if error >= 1.0 - 1e-12:
+            return "raster"
+        return ("vector", "stochastic", "stipple")[self._outer % 3]
+
+    def advance(self):
+        """Commit one route after its trace was accepted for output."""
         self._raster_error += self.raster_duty
         if self._raster_error >= 1.0 - 1e-12:
             self._raster_error -= 1.0
-            return "raster"
-        mode = ("vector", "stochastic", "stipple")[self._outer % 3]
-        self._outer += 1
-        return mode
+        else:
+            self._outer += 1
 
 
 def stochastic_luma(lum, n, *, rng=None, gamma=2.0, trim=0.02,
@@ -1600,7 +1890,7 @@ def stochastic_luma(lum, n, *, rng=None, gamma=2.0, trim=0.02,
 
 
 def composite_luma(main_lib, main_idx, float_lib, float_idx, bbox=None,
-                   raw=False, invert=False):
+                   raw=False, invert=False, thumbnails=None):
     """The interleaved composite as a luminance array, and nothing else.
 
     Split out of raster_frame so there is ONE place that decides what the
@@ -1611,8 +1901,13 @@ def composite_luma(main_lib, main_idx, float_lib, float_idx, bbox=None,
     the third channel of new bakes for directionless stochastic motion; legacy
     two-channel bakes fall back to their raster luminance.
     """
-    tm = main_lib.thumb(main_idx) if main_lib is not None and len(main_lib) else None
-    tf = float_lib.thumb(float_idx) if float_lib is not None and len(float_lib) else None
+    if thumbnails is None:
+        tm = (main_lib.thumb(main_idx)
+              if main_lib is not None and len(main_lib) else None)
+        tf = (float_lib.thumb(float_idx)
+              if float_lib is not None and len(float_lib) else None)
+    else:
+        tm, tf = thumbnails
     if tm is None and tf is None:
         return None
 
@@ -1870,6 +2165,14 @@ class PositionMultiplexer:
         self.phase = 0
         self.components = None
         self.credit = None
+
+    def checkpoint(self):
+        return (self.phase, self.components,
+                None if self.credit is None else self.credit.copy())
+
+    def restore(self, checkpoint):
+        self.phase, self.components, credit = checkpoint
+        self.credit = None if credit is None else credit.copy()
 
     def emit(self, vector=None, raster=None, stochastic=None,
              components="vrs", weights=None):
@@ -2292,40 +2595,19 @@ def render_yt_grid(g, n, *, aspect=1.0, gamma=2.2, trim=0.02, floor=0.012,
     return np.ascontiguousarray(out)
 
 
-def render_luma(lum, n, gamma=2.2, floor=0.012, level=0.9, rows=None,
-                cols=None, density=1.0, trim=0.02, stretch=True, bbox=None,
-                autofit=True, oversample=1, grid_rows=None, grid_cols=None,
-                border=0.0, row_bias=1.0, subcell=True,
-                levels=None, fields=1, field=0, palindrome=False,
-                reverse=False, start=None, close=None, overscan=1.0,
-                precondition=0.0, yt_fixed=False, yt_trigger_samples=0):
-    """
-    Render a luminance image to XY samples.  This is the whole display engine:
-    everything above it just decides what the image is.
-
-    lum: 2D float array in [0,1].  Anything that can produce one of those --
-    a video frame, a screen grab, a plot -- can be drawn on a scope with this.
-
-    Beam sweeps rows and lingers where the image is bright, so brightness is
-    dwell time; that is how a 2-channel DAC with no intensity input paints
-    greyscale.  See raster_frame for the VideoInterleaving compositing that
-    feeds it.
-    """
+def prepare_render_grid(lum, n, *, density=1.0, trim=0.02, rows=None,
+                        cols=None, autofit=True, grid_rows=None,
+                        grid_cols=None, row_bias=1.0, levels=None,
+                        stretch=True, fields=1, precondition=0.0,
+                        yt_fixed=False):
+    """Prepare reusable tone/grid arrays; contains no beam or field state."""
     h, w = lum.shape
     aspect = h / float(w)
     if density < 0.25:
-        # guard against division blow-up, but say so rather than clamp silently
         print(f"[SCOPE] density {density} clamped to 0.25 -- below that the grid "
               "outruns the sample count so far that most cells go unvisited")
         density = 0.25
     fields = max(1, int(fields))
-    # Size the grid for the WHOLE picture, not one field.  A field draws
-    # rows[field::fields] using n samples, so a complete picture costs
-    # n*fields samples spread over `fields` traces -- that total is the
-    # budget the grid must match.  Sizing from n alone shrank the grid by
-    # sqrt(fields) and handed the freed samples back as pointless extra
-    # dwell, which is why interlacing bought refresh at the cost of
-    # resolution instead of for free.
     cells = max(64.0, n * fields / density)
     if rows and cols:
         rows, cols = int(rows), int(cols)
@@ -2340,14 +2622,10 @@ def render_luma(lum, n, gamma=2.2, floor=0.012, level=0.9, rows=None,
         rows = max(6, int(round(cols * aspect)))
 
     if grid_rows and grid_cols:
-        # calibrated once for the whole run: a grid that changes size between
-        # frames re-quantizes every cell boundary and shows as popping
         rows, cols = int(grid_rows), int(grid_cols)
         autofit = False
 
     if autofit and trim > 0 and not yt_fixed:
-        # One cheap probe pass: measure what fraction of the grid survives
-        # trim, then grow the grid so the SURVIVING cells match the budget.
         probe = _box(lum, rows, cols)
         lit0 = probe[probe > 0.01]
         if lit0.size > 16:
@@ -2356,7 +2634,7 @@ def render_luma(lum, n, gamma=2.2, floor=0.012, level=0.9, rows=None,
                 probe = np.clip((probe - lo0) / (hi0 - lo0), 0.0, 1.0)
         frac = float((probe > trim).mean())
         if 0.05 < frac < 0.95:
-            grow = min(1.0 / np.sqrt(frac), 2.5)      # cap the correction
+            grow = min(1.0 / np.sqrt(frac), 2.5)
             rows = max(6, min(int(round(rows * grow)), lum.shape[0]))
             cols = max(8, min(int(round(cols * grow)), lum.shape[1]))
 
@@ -2365,8 +2643,6 @@ def render_luma(lum, n, gamma=2.2, floor=0.012, level=0.9, rows=None,
     g = _box(lum, rows, cols)
     rows, cols = g.shape
     if levels is not None:
-        # fixed tone mapping: a per-frame stretch drifts, pushing cells across
-        # the trim threshold so they wink in and out as flecks
         lo, hi = levels
         if hi > lo:
             g = np.clip((g - lo) / (hi - lo), 0.0, 1.0)
@@ -2376,8 +2652,46 @@ def render_luma(lum, n, gamma=2.2, floor=0.012, level=0.9, rows=None,
             lo, hi = np.percentile(lit, 2), np.percentile(lit, 98)
             if hi > lo:
                 g = np.clip((g - lo) / (hi - lo), 0.0, 1.0)
-
     g = _precondition_grid(g, precondition)
+
+    sx = 1.0 if w >= h else w / float(h)
+    sy = 1.0 if h >= w else h / float(w)
+    xs = np.linspace(-sx, sx, cols)
+    ys = -np.linspace(-sy, sy, rows)
+    return g, xs, ys
+
+
+def render_luma(lum, n, gamma=2.2, floor=0.012, level=0.9, rows=None,
+                cols=None, density=1.0, trim=0.02, stretch=True, bbox=None,
+                autofit=True, oversample=1, grid_rows=None, grid_cols=None,
+                border=0.0, row_bias=1.0, subcell=True,
+                levels=None, fields=1, field=0, palindrome=False,
+                reverse=False, start=None, close=None, overscan=1.0,
+                precondition=0.0, yt_fixed=False, yt_trigger_samples=0,
+                loop_anchor=False, prepared_grid=None):
+    """
+    Render a luminance image to XY samples.  This is the whole display engine:
+    everything above it just decides what the image is.
+
+    lum: 2D float array in [0,1].  Anything that can produce one of those --
+    a video frame, a screen grab, a plot -- can be drawn on a scope with this.
+
+    Beam sweeps rows and lingers where the image is bright, so brightness is
+    dwell time; that is how a 2-channel DAC with no intensity input paints
+    greyscale.  See raster_frame for the VideoInterleaving compositing that
+    feeds it.
+    """
+    h, w = lum.shape
+    aspect = h / float(w)
+    fields = max(1, int(fields))
+    if prepared_grid is None:
+        prepared_grid = prepare_render_grid(
+            lum, n, density=density, trim=trim, rows=rows, cols=cols,
+            autofit=autofit, grid_rows=grid_rows, grid_cols=grid_cols,
+            row_bias=row_bias, levels=levels, stretch=stretch,
+            fields=fields, precondition=precondition, yt_fixed=yt_fixed)
+    g, xs, ys = prepared_grid
+    rows, cols = g.shape
 
     if yt_fixed:
         return render_yt_grid(g, n, aspect=aspect, gamma=gamma, trim=trim,
@@ -2390,8 +2704,6 @@ def render_luma(lum, n, gamma=2.2, floor=0.012, level=0.9, rows=None,
     # raster must match or the same frame is a different shape in each mode.
     sx = 1.0 if w >= h else w / float(h)
     sy = 1.0 if h >= w else h / float(w)
-    xs = np.linspace(-sx, sx, cols)
-    ys = -np.linspace(-sy, sy, rows)            # screen y-down -> scope y-up
 
     # Build the serpentine row by row, keeping only the lit span of each row.
     # Empty rows are skipped outright; the beam jumps to the next row of
@@ -2496,7 +2808,21 @@ def render_luma(lum, n, gamma=2.2, floor=0.012, level=0.9, rows=None,
         P = np.vstack([P, P[-2::-1]])
         wgt = np.concatenate([wgt, wgt[::-1]])
         trav = np.concatenate([trav, trav[::-1]])
-    elif close:
+    elif loop_anchor and start is not None:
+        # A closed repeatable trace must also hand off continuously to the
+        # next trace. Make the prior trace endpoint the actual first vertex
+        # (not merely an orientation hint), then close the path back to it
+        # after overscan/border geometry has been appended below.
+        anchor = np.asarray(start, dtype=np.float32).reshape(1, 2)
+        if abs(float(level)) > 1e-12:
+            anchor = anchor * (float(overscan) / float(level))
+        else:
+            anchor.fill(0.0)
+        entry_weight = max(float(wgt.sum()) * 0.004, 1e-9)
+        P = np.vstack((anchor, P))
+        wgt = np.concatenate((np.asarray([entry_weight], dtype=wgt.dtype), wgt))
+        trav = np.concatenate((np.ones(1, dtype=bool), trav))
+    elif close and not loop_anchor:
         P = np.vstack([P, P[0]])
         wgt = np.concatenate([wgt, [wgt.sum() * 0.004]])   # fast dim retrace
         trav = np.concatenate([trav, [True]])
@@ -2506,6 +2832,14 @@ def render_luma(lum, n, gamma=2.2, floor=0.012, level=0.9, rows=None,
 
     if border > 0.0:
         P, wgt = _append_border(P, wgt, sx, sy, border)
+
+    if loop_anchor:
+        # Put the repeat seam after all optional geometry. In particular,
+        # _append_border appends its own perimeter, which must not leave an
+        # otherwise closed frame open at the callback repeat boundary.
+        P = np.vstack((P, P[0]))
+        wgt = np.concatenate((wgt, [wgt.sum() * 0.004]))
+        trav = np.concatenate((trav, np.ones(1, dtype=bool)))
 
     out = _walk(P, wgt, n, oversample=oversample) * level
     # deliberately not mean-centred: the output AC-couples anyway, and

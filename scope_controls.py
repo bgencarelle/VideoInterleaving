@@ -55,6 +55,7 @@ class KeyMap:
     def __init__(self, state):
         self.state = state
         self.dirty = False          # set when the grid must be recalibrated
+        self.changed = False        # any renderer setting needs to be applied
         self.transform_dirty = False
         self.quit = False
         self.message = ""
@@ -89,6 +90,7 @@ class KeyMap:
             self.state["gamma"] = new
         if recal:
             self.dirty = True
+        self.changed = True
         shown = "auto" if new is None and name == "rows" else (
             "off" if new is None else (f"{new:g}"))
         self.message = f"{name} = {shown}"
@@ -126,6 +128,7 @@ class KeyMap:
             self.state[attr] = value
         if recal:
             self.dirty = True
+        self.changed = True
         shown = ("auto" if name == "rows" and value is None else
                  "off" if name == "lowpass" and value is None else
                  f"{value:g}" if value is not None else "off")
@@ -152,6 +155,7 @@ class KeyMap:
         if gamma_key in self.state:
             self.state["gamma"] = self.state[gamma_key]
         self.dirty = True
+        self.changed = True
         self.message = "mode = " + mode.upper()
         return True
 
@@ -195,10 +199,12 @@ class KeyMap:
             if gamma_key in s:
                 s["gamma"] = s[gamma_key]
             self.dirty = True
+            self.changed = True
             self.message = "fusion = " + s["fusion_components"].upper()
         elif ch == "i":
             s["invert"] = not s.get("invert", False)
             self.dirty = True
+            self.changed = True
             self.message = "inverse = " + ("on" if s["invert"] else "off")
         elif ch in ("r", "R"):
             s["rotation"] = (int(s.get("rotation", 0)) + 90) % 360
@@ -219,10 +225,12 @@ class KeyMap:
             order = ["alternate", "palindrome", "retrace"]
             i = order.index(s.get("sweep", "alternate")) if s.get("sweep") in order else 0
             s["sweep"] = order[(i + 1) % len(order)]
+            self.changed = True
             self.message = "sweep = " + s["sweep"]
         elif ch == "a":
             s["autofit"] = not s.get("autofit", True)
             self.dirty = True
+            self.changed = True
             self.message = "autofit = " + ("on" if s["autofit"] else "off")
         elif ch == "p":
             self.message = "\n" + as_flags(s)

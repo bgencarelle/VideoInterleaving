@@ -14,6 +14,11 @@ WINDOW_SIZE = (1280, 800)
 MIN_WINDOW_SIZE = (900, 600)
 PREVIEW_SIZE = 680
 MAX_PREVIEW_RENDER_SIZE = 1600
+# CPU/GL work is optional and must not crowd the independently scheduled DAC
+# producer, especially on software-rendered desktops. Input events are still
+# polled at the engine tick; only visible UI/preview refresh is capped here.
+GUI_REDRAW_HZ = 5.0
+PREVIEW_RENDER_HZ = 2.0
 SLIDER_ROW_HEIGHT = 54
 SLIDER_RANGES = {
     "ips": (1.0, 60.0, 1.0),
@@ -412,7 +417,8 @@ class ScopeGUI:
                 render_pending = (seq != self._rendered_seq
                                  or changed_exposure or changed_size)
                 render_due = (time.monotonic() - getattr(
-                    self, "_last_preview_render", 0.0) >= 1.0 / 15.0)
+                    self, "_last_preview_render", 0.0)
+                    >= 1.0 / PREVIEW_RENDER_HZ)
                 if self._preview_points is not None and render_pending and render_due:
                     try:
                         frame = preview_frame(self._preview_points,
@@ -445,7 +451,7 @@ class ScopeGUI:
         if self.close_requested:
             return []
         now = time.monotonic()
-        if now - self._last_draw >= 1.0 / 30.0:
+        if now - self._last_draw >= 1.0 / GUI_REDRAW_HZ:
             self._draw()
             self._last_draw = now
         actions, self._actions = self._actions, []
@@ -762,6 +768,11 @@ class ScopeGUI:
                        f"{float(metrics.get('buffer_capacity_ms', 0.0)):.1f}ms")
         buffer_kind = metrics.get("buffer_kind", "queue")
         dac_latency = float(metrics.get("dac_latency_ms", 0.0) or 0.0)
+        schedule_offset = metrics.get("adoption_dac_schedule_offset_ms")
+        try:
+            schedule_text = f"{float(schedule_offset):+.1f}ms"
+        except (TypeError, ValueError):
+            schedule_text = "--"
         errors = (f"xruns {metrics.get('dropouts', 0)}/"
                   f"{metrics.get('underruns', 0)}")
         draw.text((panel[0] + unit(18), stats_y),
@@ -771,9 +782,10 @@ class ScopeGUI:
                       self.small, panel[2] - panel[0] - unit(36)),
                   fill=(158, 190, 205), font=self.small)
         draw.text((panel[0] + unit(18), stats_y + unit(21)),
-                  self._fit_text(
-                      f"{metrics.get('fields', 1)} fields  ·  {buffer_kind} "
-                      f"{buffer_text}  ·  DAC {dac_latency:.1f}ms  ·  {errors}",
+                   self._fit_text(
+                       f"{metrics.get('fields', 1)} fields  ·  {buffer_kind} "
+                       f"{buffer_text}  ·  stream {dac_latency:.1f}ms  ·  "
+                       f"scheduled DAC {schedule_text}  ·  {errors}",
                       self.tiny, panel[2] - panel[0] - unit(36)),
                   fill=(218, 153, 122) if (metrics.get("dropouts", 0)
                                             or metrics.get("underruns", 0))

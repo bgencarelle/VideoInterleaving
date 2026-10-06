@@ -125,9 +125,12 @@ class ScopeGuiControlTests(unittest.TestCase):
         self.controls.set_value("gamma", 3.1)
         self.assertAlmostEqual(self.state["raster_gamma"], 3.1)
         self.assertFalse(self.controls.dirty)
+        self.assertTrue(self.controls.changed)
+        self.controls.changed = False
         self.controls.set_value("lowpass", 6000)
         self.assertEqual(self.state["lowpass"], 6000.0)
         self.assertFalse(self.controls.dirty)
+        self.assertTrue(self.controls.changed)
         self.controls.set_value("lowpass", 0)
         self.assertIsNone(self.state["lowpass"])
 

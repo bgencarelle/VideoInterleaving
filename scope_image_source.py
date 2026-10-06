@@ -6,11 +6,24 @@ on a small worker pool and exposes the same ``thumb()`` interface as an
 ``XYLibrary``. Geometry remains an offline-bake feature.
 """
 from collections import OrderedDict
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import CancelledError, ThreadPoolExecutor
+from dataclasses import dataclass
 from pathlib import Path
 import threading
+import time
 
 import numpy as np
+
+
+@dataclass(frozen=True)
+class DecodedImagePair:
+    """An immutable, atomically decoded main/float image pair."""
+
+    main: np.ndarray
+    floating: np.ndarray
+    requested_at_ns: int
+    decode_started_at_ns: int
+    ready_at_ns: int
 
 
 class _ThumbShape:
@@ -63,7 +76,7 @@ class RuntimeThumbnailLibrary:
 
 
 class RuntimeScopeImageSource:
-    """Decode source images on demand and prefetch the current pair ahead.
+    """Decode complete source pairs off-thread with bounded prefetch.
 
     ``main_paths`` and ``float_paths`` use make_file_lists' existing ordering,
     so the image-clock and folder-selector choices agree with the other modes.
@@ -73,7 +86,7 @@ class RuntimeScopeImageSource:
     """
 
     def __init__(self, main_paths, float_paths, *, width=128, workers=2,
-                 cache_size=16):
+                 cache_size=16, max_pending_pairs=None):
         self.main_paths = self._normalize_paths(main_paths, "main")
         self.float_paths = self._normalize_paths(float_paths, "float")
         if not self.main_paths or not self.float_paths:
@@ -91,11 +104,26 @@ class RuntimeScopeImageSource:
         self.float_libs = [RuntimeThumbnailLibrary(self, "float", i)
                            for i in range(len(self.float_paths[0]))]
         self.cache_size = max(2, int(cache_size))
+        self.cache_pair_limit = max(1, self.cache_size // 2)
+        self.max_pending_pairs = max(
+            max(1, int(workers)),
+            int(max_pending_pairs if max_pending_pairs is not None
+                else max(1, int(workers)) * 2))
         self._cache = OrderedDict()
-        self._pending = {}
-        self._lock = threading.Lock()
+        self._pending_pairs = OrderedDict()
+        self._failed_pairs = OrderedDict()
+        self._lock = threading.RLock()
         self._pool = ThreadPoolExecutor(
             max_workers=max(1, int(workers)), thread_name_prefix="scope-images")
+        self._stats = {
+            "pair_requests": 0,
+            "pair_ready": 0,
+            "pair_misses": 0,
+            "decode_failures": 0,
+            "prefetch_evictions": 0,
+            "queue_full": 0,
+        }
+        self._retry_failed_after_ns = 1_000_000_000
 
     @staticmethod
     def _normalize_paths(paths, layer):
@@ -190,62 +218,168 @@ class RuntimeScopeImageSource:
         thumb.setflags(write=False)
         return thumb
 
-    def _load(self, key):
-        layer, folder, index = key
-        return self._decode(self._path(layer, folder, index))
+    def _pair_key(self, index, main_folder, float_folder):
+        return (int(index) % self.frames,
+                int(main_folder) % len(self.main_paths[0]),
+                int(float_folder) % len(self.float_paths[0]))
 
-    def _request(self, key):
+    def _load_pair(self, key, requested_at_ns):
+        index, main_folder, float_folder = key
+        started_ns = time.monotonic_ns()
+        main = self._decode(self._path("main", main_folder, index))
+        floating = self._decode(self._path("float", float_folder, index))
+        return DecodedImagePair(
+            main, floating, int(requested_at_ns), started_ns,
+            time.monotonic_ns())
+
+    def _request_pair(self, key, *, priority):
+        """Submit one pair while keeping running plus queued work bounded."""
         with self._lock:
-            cached = self._cache.get(key)
-            if cached is not None:
-                self._cache.move_to_end(key)
-                return None
-            future = self._pending.get(key)
-            if future is not None:
-                return future
-            future = self._pool.submit(self._load, key)
-            self._pending[key] = future
+            if key in self._cache or key in self._pending_pairs:
+                return True
+            failed = self._failed_pairs.get(key)
+            if failed is not None:
+                if time.monotonic_ns() - failed[1] < self._retry_failed_after_ns:
+                    return False
+                self._failed_pairs.pop(key, None)
+
+            if len(self._pending_pairs) >= self.max_pending_pairs:
+                evicted = False
+                if priority:
+                    # Superseded queued lookahead is disposable; keep already
+                    # running decodes bounded and let them finish harmlessly.
+                    for old_key, old_future in tuple(self._pending_pairs.items()):
+                        if old_future.running():
+                            continue
+                        if old_future.cancel():
+                            self._pending_pairs.pop(old_key, None)
+                            self._stats["prefetch_evictions"] += 1
+                            evicted = True
+                            break
+                if not evicted:
+                    self._stats["queue_full"] += 1
+                    return False
+
+            self._stats["pair_requests"] += 1
+            requested_at_ns = time.monotonic_ns()
+            future = self._pool.submit(self._load_pair, key, requested_at_ns)
+            self._pending_pairs[key] = future
 
         def complete(done):
             try:
-                image = done.result()
-            except Exception:
-                image = None
+                pair = done.result()
+            except CancelledError:
+                return
+            except Exception as exc:
+                with self._lock:
+                    if self._pending_pairs.get(key) is done:
+                        self._pending_pairs.pop(key, None)
+                    self._failed_pairs[key] = (
+                        f"{type(exc).__name__}: {exc}", time.monotonic_ns())
+                    self._failed_pairs.move_to_end(key)
+                    while len(self._failed_pairs) > self.cache_pair_limit:
+                        self._failed_pairs.popitem(last=False)
+                    self._stats["decode_failures"] += 1
+                return
+
             with self._lock:
-                if self._pending.get(key) is done:
-                    self._pending.pop(key, None)
-                if image is not None:
-                    self._cache[key] = image
-                    self._cache.move_to_end(key)
-                    while len(self._cache) > self.cache_size:
-                        self._cache.popitem(last=False)
+                if self._pending_pairs.get(key) is done:
+                    self._pending_pairs.pop(key, None)
+                self._failed_pairs.pop(key, None)
+                self._cache[key] = pair
+                self._cache.move_to_end(key)
+                while len(self._cache) > self.cache_pair_limit:
+                    self._cache.popitem(last=False)
 
         future.add_done_callback(complete)
-        return future
+        return True
 
     def thumb(self, layer, folder, index):
-        key = (layer, int(folder), int(index) % self.frames)
-        future = self._request(key)
-        if future is not None:
-            return future.result()
-        with self._lock:
-            image = self._cache.get(key)
-            if image is not None:
-                self._cache.move_to_end(key)
-                return image
-            # A completed failed prefetch was removed; retry synchronously so
-            # the caller receives the actual decode exception.
-            future = self._pool.submit(self._load, key)
-            self._pending[key] = future
-        return future.result()
+        """Synchronous compatibility access for startup/calibration callers.
 
-    def prefetch(self, index, main_folder, float_folder):
-        """Queue the current and next image pair without unbounded work."""
+        Playback uses :meth:`ready_pair` and never calls this method on the
+        render worker. A synchronous decode here preserves the array-like
+        ``XYLibrary.thumb`` contract for calibration and external callers.
+        """
+        folder = int(folder) % (len(self.main_paths[0]) if layer == "main"
+                                else len(self.float_paths[0]))
         index = int(index) % self.frames
-        following = (index + 1) % self.frames
-        for frame in (index, following):
-            self._request(("main", int(main_folder), frame))
-            self._request(("float", int(float_folder), frame))
+        with self._lock:
+            for key in reversed(self._cache):
+                pair_index, main_folder, float_folder = key
+                if pair_index != index:
+                    continue
+                if layer == "main" and main_folder == folder:
+                    self._cache.move_to_end(key)
+                    return self._cache[key].main
+                if layer == "float" and float_folder == folder:
+                    self._cache.move_to_end(key)
+                    return self._cache[key].floating
+        return self._decode(self._path(layer, folder, index))
+
+    def ready_pair(self, index, main_folder, float_folder):
+        """Return both cached thumbnails, or request them and return ``None``.
+
+        A partially decoded pair is never exposed. The returned record also
+        carries monotonic decode timestamps for presentation-age accounting.
+        """
+        key = self._pair_key(index, main_folder, float_folder)
+        with self._lock:
+            pair = self._cache.get(key)
+            if pair is not None:
+                self._cache.move_to_end(key)
+                self._stats["pair_ready"] += 1
+                return pair
+            self._stats["pair_misses"] += 1
+        self._request_pair(key, priority=True)
+        return None
+
+    @staticmethod
+    def _lookahead(index, direction, frames, count, *, pingpong=True):
+        """Return distinct upcoming indices in the requested playback direction."""
+        if frames <= 1 or count <= 0:
+            return ()
+        current = int(index) % frames
+        step = -1 if int(direction) < 0 else 1
+        result = []
+        for _ in range(int(count)):
+            following = current + step
+            if pingpong:
+                if following < 0:
+                    step = 1
+                    following = 1
+                elif following >= frames:
+                    step = -1
+                    following = frames - 2
+            else:
+                following %= frames
+            if following not in result and following != index:
+                result.append(following)
+            current = following
+        return tuple(result)
+
+    def prefetch(self, index, main_folder, float_folder, *, direction=1,
+                 lookahead=2, pingpong=True):
+        """Prioritize the current pair, then bounded directional lookahead."""
+        index = int(index) % self.frames
+        main_folder = int(main_folder) % len(self.main_paths[0])
+        float_folder = int(float_folder) % len(self.float_paths[0])
+        self._request_pair((index, main_folder, float_folder), priority=True)
+        for frame in self._lookahead(index, direction, self.frames, lookahead,
+                                     pingpong=pingpong):
+            self._request_pair((frame, main_folder, float_folder), priority=False)
+
+    def snapshot(self):
+        """Return bounded decode/cache activity and queue state."""
+        with self._lock:
+            return {
+                **self._stats,
+                "cache_pairs": len(self._cache),
+                "cache_pair_limit": self.cache_pair_limit,
+                "pending_pairs": len(self._pending_pairs),
+                "pending_pair_limit": self.max_pending_pairs,
+                "failed_pairs": len(self._failed_pairs),
+            }
 
     def close(self):
         self._pool.shutdown(wait=True, cancel_futures=True)

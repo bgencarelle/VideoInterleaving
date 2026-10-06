@@ -1,6 +1,7 @@
 import copy
 from pathlib import Path
 import tempfile
+import time
 import unittest
 from unittest.mock import patch
 
@@ -183,6 +184,16 @@ class CameraDevicePickerTests(unittest.TestCase):
 
 
 class VideoSourceTransportTests(unittest.TestCase):
+    class FakeClock:
+        def __init__(self):
+            self.now = 10.0
+
+        def __call__(self):
+            return self.now
+
+        def advance(self, seconds):
+            self.now += float(seconds)
+
     class FakeCapture:
         def __init__(self):
             self.index = 0
@@ -271,6 +282,179 @@ class VideoSourceTransportTests(unittest.TestCase):
         self.assertAlmostEqual(float(frame[0, 0]), 12.0 / 255.0)
         self.assertEqual(source.playback()["position"], 1.2)
         source.close()
+
+    def test_media_clock_drops_late_frames_and_preserves_transport_time(self):
+        from tools.scope_screen import VideoFileSource
+
+        cv2 = self.FakeCV2()
+        clock = self.FakeClock()
+        source = VideoFileSource("clip.mp4", downto=16, cv2_module=cv2,
+                                 clock=clock)
+        try:
+            first = source.read_latest_due()
+            self.assertAlmostEqual(float(first[0, 0]), 0.0)
+            clock.advance(0.25)
+            due = source.read_latest_due()
+            self.assertAlmostEqual(float(due[0, 0]), 2.0 / 255.0)
+            self.assertAlmostEqual(
+                source.timing_snapshot()["media_position_s"], 0.2)
+
+            clock.advance(0.25)
+            due = source.read_latest_due()
+            self.assertAlmostEqual(float(due[0, 0]), 5.0 / 255.0)
+            source.transport("pause")
+            reads = cv2.capture.reads
+            clock.advance(1.0)
+            paused = source.read_latest_due()
+            np.testing.assert_array_equal(paused, due)
+            self.assertEqual(cv2.capture.reads, reads)
+
+            source.transport("seek", 1.2)
+            # Seeking does not replace the last complete picture with a
+            # synthetic black placeholder while the new frame is pending.
+            np.testing.assert_array_equal(source.last, due)
+            sought = source.read_latest_due()
+            self.assertAlmostEqual(float(sought[0, 0]), 12.0 / 255.0)
+            self.assertTrue(source.playback()["paused"])
+            source.transport("play")
+            clock.advance(0.25)
+            resumed = source.read_latest_due()
+            self.assertAlmostEqual(float(resumed[0, 0]), 14.0 / 255.0)
+
+            clock.advance(3.0)
+            looped = source.read_latest_due()
+            self.assertAlmostEqual(float(looped[0, 0]), 4.0 / 255.0)
+            self.assertAlmostEqual(
+                source.timing_snapshot()["media_position_s"], 0.4)
+        finally:
+            source.close()
+
+    def test_paused_seek_publishes_first_frame_after_off_boundary_target(self):
+        from tools.scope_screen import VideoFileSource
+
+        class ForwardSeekCapture(self.FakeCapture):
+            def set(self, prop, value):
+                cv2 = VideoSourceTransportTests.FakeCV2
+                if prop == cv2.CAP_PROP_POS_MSEC:
+                    # Model a decoder that lands on the first frame after a
+                    # non-frame-aligned seek position.
+                    self.index = int(np.ceil(float(value) / 100.0))
+                    return True
+                return super().set(prop, value)
+
+        cv2 = self.FakeCV2()
+        cv2.capture = ForwardSeekCapture()
+        source = VideoFileSource("clip.mp4", downto=16, cv2_module=cv2)
+        try:
+            before = source()
+            source.transport("pause")
+            source.transport("seek", 1.55)
+            np.testing.assert_array_equal(source.last, before)
+
+            sought = source.read_latest_due()
+            self.assertAlmostEqual(float(sought[0, 0]), 16.0 / 255.0)
+            self.assertAlmostEqual(
+                source.timing_snapshot()["media_position_s"], 1.6)
+            self.assertTrue(source.playback()["paused"])
+        finally:
+            source.close()
+
+
+class LatestCaptureSnapshotTests(unittest.TestCase):
+    def test_raw_pipe_reader_returns_only_complete_frames(self):
+        from tools.scope_screen import _read_exact
+
+        class ChunkedPipe:
+            def __init__(self, chunks):
+                self.chunks = list(chunks)
+
+            def read(self, _count):
+                return self.chunks.pop(0) if self.chunks else b""
+
+        self.assertEqual(
+            _read_exact(ChunkedPipe([b"a", b"bc", b"def"]), 6),
+            b"abcdef")
+        self.assertIsNone(_read_exact(ChunkedPipe([b"abc"]), 6))
+
+    def test_reader_publishes_matching_latest_pixels_and_timestamps(self):
+        from tools.scope_screen import Throttled
+
+        class TimedReader:
+            def __init__(self):
+                self.sequence = 0
+                self.metadata = {}
+
+            def __call__(self):
+                self.sequence += 1
+                self.metadata = {
+                    "source_kind": "test-capture",
+                    "source_sequence": self.sequence,
+                    "requested_at_ns": time.monotonic_ns(),
+                    "decode_started_at_ns": time.monotonic_ns(),
+                    "ready_at_ns": time.monotonic_ns(),
+                    "media_position_s": None,
+                }
+                return np.full((4, 4), self.sequence, dtype=np.float32)
+
+            def timing_snapshot(self):
+                return dict(self.metadata)
+
+        reader = TimedReader()
+        latest = Throttled(reader, fps=200.0, source_kind="test")
+        try:
+            deadline = time.monotonic() + 1.0
+            while latest.captures < 2 and time.monotonic() < deadline:
+                time.sleep(0.002)
+            frame, _version, metadata = latest.timed_snapshot()
+            self.assertGreaterEqual(latest.captures, 2)
+            self.assertTrue(np.all(frame == metadata["source_sequence"]))
+            self.assertLessEqual(metadata["requested_at_ns"],
+                                 metadata["decode_started_at_ns"])
+            self.assertLessEqual(metadata["decode_started_at_ns"],
+                                 metadata["ready_at_ns"])
+            self.assertEqual(latest.snapshot_metrics()["source_kind"],
+                             "test-capture")
+        finally:
+            latest.close()
+
+    def test_drain_reader_continuously_consumes_paced_capture_frames(self):
+        from tools.scope_screen import Throttled
+
+        class PacedReader:
+            def __init__(self):
+                self.sequence = 0
+                self.metadata = {}
+
+            def __call__(self):
+                time.sleep(0.002)
+                self.sequence += 1
+                now = time.monotonic_ns()
+                self.metadata = {
+                    "source_kind": "ffmpeg-test",
+                    "source_sequence": self.sequence,
+                    "requested_at_ns": now - 2_000_000,
+                    "decode_started_at_ns": now - 1_000_000,
+                    "ready_at_ns": now,
+                    "media_position_s": None,
+                }
+                return np.full((4, 4), self.sequence, dtype=np.float32)
+
+            def timing_snapshot(self):
+                return dict(self.metadata)
+
+        reader = PacedReader()
+        latest = Throttled(reader, fps=1.0, drain=True)
+        try:
+            deadline = time.monotonic() + 0.2
+            while latest.captures < 10 and time.monotonic() < deadline:
+                time.sleep(0.002)
+            frame, _version, metadata = latest.timed_snapshot()
+            self.assertGreaterEqual(latest.captures, 10)
+            self.assertTrue(np.all(frame == metadata["source_sequence"]))
+            self.assertLessEqual(latest.snapshot_metrics()["polls"],
+                                 latest.captures + 1)
+        finally:
+            latest.close()
 
 
 if __name__ == "__main__":

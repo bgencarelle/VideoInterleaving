@@ -168,6 +168,47 @@ def mirror_frame(frame, mirror):
     return np.ascontiguousarray(out)
 
 
+def anchor_periodic_frame(frame, start, *, slope_fraction=0.25):
+    """Join a periodic trace to ``start`` without a one-sample correction.
+
+    Circular filters (including oversample decimation and DC compensation)
+    can move sample zero even when the source path begins exactly at the prior
+    beam endpoint. Apply the same translation to both sides of the loop seam,
+    tapering it to zero over a short window at each end. Thus sample zero is
+    exact, the periodic seam is unchanged, and the added per-sample motion is
+    bounded relative to the trace's existing largest step.
+    """
+    src = np.asarray(frame, dtype=np.float32)
+    if src.ndim != 2 or src.shape[1] != 2:
+        raise ValueError(f"frame must have shape (N, 2), got {src.shape}")
+    if not len(src):
+        return np.ascontiguousarray(src)
+    target = np.asarray(start, dtype=np.float32).reshape(2)
+    delta = target.astype(np.float64) - src[0].astype(np.float64)
+    distance = float(np.linalg.norm(delta))
+    if distance <= 1e-8:
+        return np.ascontiguousarray(src)
+    if len(src) < 4:
+        out = src.copy()
+        out[0] = target
+        return out
+
+    points = src.astype(np.float64)
+    step = np.linalg.norm(np.diff(points, axis=0), axis=1)
+    seam = float(np.linalg.norm(points[0] - points[-1]))
+    baseline = max(float(step.max(initial=0.0)), seam, 1e-9)
+    fraction = max(float(slope_fraction), 1e-6)
+    width = int(np.ceil(distance / (fraction * baseline)))
+    width = max(1, min(width, (len(src) - 1) // 2))
+
+    weights = np.zeros(len(src), dtype=np.float64)
+    weights[:width + 1] = 1.0 - np.arange(width + 1) / width
+    weights[-width:] = np.arange(1, width + 1) / width
+    points += weights[:, None] * delta
+    points[0] = target
+    return np.ascontiguousarray(points, dtype=np.float32)
+
+
 TRIGGER_SHAPES = ("ramp", "step")
 
 
@@ -398,6 +439,33 @@ def required_output_channels(channel_pair=(1, 2), x_only=False):
     """Minimum output-channel count needed by a selected scope channel pair."""
     pair = parse_channel_pair(channel_pair)
     return pair[0] if x_only else max(pair)
+
+
+def predict_dac_monotonic_ns(time_info, callback_monotonic_ns,
+                             sample_offset, samplerate):
+    """Map a callback-relative output DAC time to host monotonic nanoseconds.
+
+    PortAudio's ``currentTime`` and ``outputBufferDacTime`` share a stream
+    clock. Callback-entry monotonic time anchors that stream clock to the host.
+    This predicts a scheduled DAC time; it cannot measure actual converter
+    presentation.
+    """
+    try:
+        current_time = float(time_info.currentTime)
+        dac_time = float(time_info.outputBufferDacTime)
+        rate = float(samplerate)
+        offset = float(sample_offset)
+    except (AttributeError, TypeError, ValueError):
+        return None
+    if not all(np.isfinite(value) for value in
+               (current_time, dac_time, rate, offset)) or rate <= 0:
+        return None
+    delta_s = dac_time - current_time + offset / rate
+    # Reject implausible stream-clock mappings rather than allowing corrupt
+    # backend timestamps to create an unbounded reservation.
+    if abs(delta_s) > 2.0:
+        return None
+    return int(callback_monotonic_ns + round(delta_s * 1e9))
 
 
 def resolve_device(spec, min_channels=2):
@@ -922,11 +990,26 @@ class Scope:
         self._frame = rasterize([], self.samples_per_frame)  # idle circle, never a parked dot
         if self.trigger:
             self._frame = np.vstack((self._marker, self._frame))
-        self._pending = None
+        self._pending_record = None
         self._lock = threading.Lock()
         self._pos = 0
         self.frames_drawn = 0     # complete traces emitted
         self.frames_dropped = 0   # indices superseded before they were drawn
+        self.frames_accepted = 0  # complete frames queued by show_frame()
+        self.frames_adopted = 0   # queued frames adopted at callback boundaries
+        self.last_accepted_identity = None
+        self.last_adopted_identity = None
+        self.last_adopted_monotonic_ns = None
+        self.last_adopted_record = None
+        self.last_adopted_dac_prediction_ns = None
+        self.last_adopted_dac_schedule_offset_ms = None
+        self.last_accepted_endpoint = None
+        self._frame_identity = None
+        self._adoption_history = [None] * 512
+        self._dac_adoption_history = [None] * 512
+        self._adoption_sequence = 0
+        self.distinct_source_adoptions = 0
+        self.last_adopted_source_identity = None
         self.beams_unparked = 0   # frames that arrived stationary and were rung
         self.dac_dropouts = 0     # callbacks PortAudio flagged; each one is a
                                   # block of silence it filled in for us, which
@@ -1057,6 +1140,7 @@ class Scope:
             start += period
 
     def _callback(self, outdata, frames, time_info, status):
+        callback_monotonic_ns = time.monotonic_ns()
         # PortAudio fills a missed block with SILENCE, and silence is a
         # stationary full-brightness beam at screen centre. We
         # cannot retrieve those samples, but an underrun that is never counted
@@ -1133,12 +1217,52 @@ class Scope:
             if self._pos >= n:
                 self._pos = 0
                 self.frames_drawn += 1
-                p = self._pending          # atomic under the GIL; last write wins
-                self._pending = None
-                if p is not None:
+                pending = self._pending_record  # frame and identity swap atomically
+                self._pending_record = None
+                if pending is not None:
+                    p, identity = pending
                     self._frame = p
+                    self._frame_identity = identity
+                    self.last_adopted_identity = identity
+                    adopted_at_ns = time.monotonic_ns()
+                    self.last_adopted_monotonic_ns = adopted_at_ns
+                    self.last_adopted_record = (identity, adopted_at_ns)
+                    dac_prediction_ns = predict_dac_monotonic_ns(
+                        time_info, callback_monotonic_ns, filled,
+                        self.samplerate)
+                    self.last_adopted_dac_prediction_ns = dac_prediction_ns
+                    self.last_adopted_dac_schedule_offset_ms = (
+                        (dac_prediction_ns - adopted_at_ns) / 1e6
+                        if dac_prediction_ns is not None else None)
+                    sequence = self._adoption_sequence + 1
+                    self._adoption_history[(sequence - 1)
+                                           % len(self._adoption_history)] = (
+                                               sequence, identity, adopted_at_ns)
+                    self._dac_adoption_history[(sequence - 1)
+                                               % len(self._dac_adoption_history)] = (
+                                                   sequence, identity, adopted_at_ns,
+                                                   dac_prediction_ns)
+                    self._adoption_sequence = sequence
+                    if isinstance(identity, tuple) and len(identity) >= 5:
+                        source_identity = tuple(identity[2:5])
+                        if source_identity != self.last_adopted_source_identity:
+                            self.distinct_source_adoptions += 1
+                            self.last_adopted_source_identity = source_identity
+                    self.frames_adopted += 1
         if last_point is not None:
             self._last_out = last_point.copy()
+
+    @property
+    def _pending(self):
+        """Compatibility view of the pending frame samples."""
+        record = self._pending_record
+        return None if record is None else record[0]
+
+    @_pending.setter
+    def _pending(self, frame):
+        # Retain the old test/utility injection point while keeping frame and
+        # presentation identity in one atomic callback-visible record.
+        self._pending_record = None if frame is None else (frame, None)
 
     def ready(self):
         """True when the last queued frame has been taken by the callback.
@@ -1148,7 +1272,31 @@ class Scope:
         never drawn.  Gating on this keeps the producer exactly one trace
         ahead, which is also what stops the chained sweep from breaking.
         """
-        return self._pending is None
+        return self._pending_record is None
+
+    def adoption_snapshot(self):
+        """Return the bounded recent callback-adoption history."""
+        end = self._adoption_sequence
+        start = max(1, end - len(self._adoption_history) + 1)
+        records = []
+        for sequence in range(start, end + 1):
+            record = self._adoption_history[
+                (sequence - 1) % len(self._adoption_history)]
+            if record is not None and record[0] == sequence:
+                records.append((record[1], record[2]))
+        return tuple(records)
+
+    def dac_adoption_snapshot(self):
+        """Return bounded callback adoption/DAC-schedule pairs, if available."""
+        end = self._adoption_sequence
+        start = max(1, end - len(self._dac_adoption_history) + 1)
+        records = []
+        for sequence in range(start, end + 1):
+            record = self._dac_adoption_history[
+                (sequence - 1) % len(self._dac_adoption_history)]
+            if record is not None and record[0] == sequence:
+                records.append((record[1], record[2], record[3]))
+        return tuple(records)
 
     def set_rotation(self, degrees):
         """Set output rotation, matching local mode's quarter-turn control."""
@@ -1267,7 +1415,7 @@ class Scope:
             Scope._tap["seq"] += 1
             Scope._tap["data"] = pts
 
-    def show_frame(self, frame):
+    def show_frame(self, frame, handoff=None, identity=None):
         """Queue a raw (n, 2) sample frame for the next frame boundary.
 
         Raster mode bypasses rasterize() because uneven dwell IS the image, so
@@ -1275,7 +1423,7 @@ class Scope:
         waiting, it is discarded rather than queued: the scope should show the
         index that is current NOW, never fall behind replaying stale ones.
         """
-        if self._pending is not None:
+        if self._pending_record is not None:
             self.frames_dropped += 1
         f = mirror_frame(rotate_frame(frame, self.rotation), self.mirror)
         # Before the filters, not after: lowpass ringing and the Y-T marker
@@ -1294,17 +1442,36 @@ class Scope:
             # them.
             #
             # PREPEND, do not overwrite. The marker gets its own samples, so
-            # the picture arrives whole and frame[0] -- which scope_display
-            # sets to the exact beam handoff point -- is still the first thing
-            # drawn after it. The cost moves from 0.75% of the picture to 0.75%
-            # of the refresh rate.
-            f = np.vstack((self._marker, clip_for_trigger(f)))
+            # the picture arrives whole. Clip before handoff correction so the
+            # requested beam point obeys the same trigger-safe limits.
+            f = clip_for_trigger(f)
+        if handoff is not None and len(f):
+            target = mirror_frame(
+                rotate_frame(np.asarray(handoff, dtype=np.float32).reshape(1, 2),
+                             self.rotation), self.mirror)[0]
+            if self.trigger:
+                target = clip_for_trigger(target.reshape(1, 2))[0]
+            f = anchor_periodic_frame(f, target)
+            if self.trigger:
+                f = clip_for_trigger(f)
+        end = f[-1].copy() if len(f) else self._last_out.copy()
+        if self.trigger:
+            # Keep the trigger marker outside the picture's sample budget.
+            f = np.vstack((self._marker, f))
         if Scope._tap_until > time.monotonic():
             try:
                 self._capture(f)
             except Exception:
                 pass                       # a preview must never break audio
-        self._pending = f
+        self.frames_accepted += 1
+        self.last_accepted_identity = identity
+        self._pending_record = (f, identity)
+        # Return the processed endpoint in the caller's pre-output-transform
+        # coordinates so a chained renderer follows the waveform actually queued.
+        end = mirror_frame(end.reshape(1, 2), self.mirror)
+        end = rotate_frame(end, (-self.rotation) % 360)
+        self.last_accepted_endpoint = end[0].copy()
+        return self.last_accepted_endpoint.copy()
 
     def show(self, polylines):
         """Call this once per drawn frame from your render loop."""

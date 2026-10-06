@@ -30,11 +30,14 @@ import os
 import threading
 import time
 from pathlib import Path
+from types import MappingProxyType
 
 import numpy as np
 
 import settings
 import scope_out as _scope_out
+from scope_frame_scheduler import FieldGroupLatch, ScopeFrameScheduler
+from scope_prepared_cache import PreparedImageCache
 
 _REQUIRED_SCOPE_OUT_API = 7
 _scope_out_api = getattr(_scope_out, "SCOPE_OUT_API_VERSION", 0)
@@ -1482,6 +1485,10 @@ def run_scope(clock_source=None):
     prev_index = -1
     prev_key = None
     prefetched_key = None
+    prefetched_direction = 1
+    source_selected_key = None
+    source_selected_at_ns = None
+    source_direction = 1
     mix_scheduler = TriangleMixScheduler(mix_duty)
     mix_last_mode = None
     # One emitter, shared with scope_screen.py. Tuning and sweep state live on
@@ -1494,9 +1501,11 @@ def run_scope(clock_source=None):
         dc_comp=dc_comp, autofit=autofit, row_bias=row_bias,
         precondition=raster_precondition,
         yt_timing=yt_timing,
+        close_frame=not scope.trigger,
         yt_trigger_samples=0,   # Scope prepends the marker its own window
         grid=_rotation_grid(cal, rotation),
         levels=(cal.get("levels") if cal else None))
+    _configure_raster_emitter_fields(emitter, render_mode, fields)
     stochastic_emitter = StochasticEmitter(
         scope.samplerate, scope.samples_per_frame,
         gamma=walk_gamma, trim=trim, radius=walk_radius, stride=walk_stride,
@@ -1508,19 +1517,38 @@ def run_scope(clock_source=None):
         edge_gain=walk_edge, dc_comp=dc_comp, border=border)
     fusion_multiplexer = PositionMultiplexer()
 
-    field_i = 0                     # free-running; survives a slipped deadline
-    mix_field_i = 0                 # advances only on the RASTER traces of mix
+    prepared_cache = PreparedImageCache()
+
+    field_group = FieldGroupLatch(fields)
+    mix_field_group = FieldGroupLatch(fields)
     sweep = {"rev": False, "end": None}
     beam_end = None                 # actual last sample handed to the DAC
+    render_generation = 0
+    requested_presentation = None
     last_report = time.time()
     last_monitor = 0.0
+    last_monitor_adopted = 0
+    last_source_metrics_at = time.monotonic()
+    last_source_adoptions = int(scope.distinct_source_adoptions)
+
+    def clear_frame_requests(wait=True):
+        """Cancel queued work and force the current key to be republished."""
+        nonlocal prev_key
+        if frame_producer is not None:
+            frame_producer.clear(wait=wait)
+        prev_key = None
 
     def apply_timing_request(request):
         """Reopen the stream and rebuild timing-dependent render state."""
         nonlocal scope, cal, sweep, fps, samples, fields, tap_traces, IPS
         nonlocal tick, emitter, stochastic_emitter, stipple_emitter
-        nonlocal fusion_multiplexer, beam_end, field_i, mix_field_i
-        nonlocal mix_last_mode, prev_key, dev, _dev_name
+        nonlocal fusion_multiplexer, beam_end
+        nonlocal mix_last_mode, prev_key, dev, _dev_name, render_generation
+
+        # A queued job retains its Scope and renderer objects. Drain it before
+        # replacing either, so the producer can never publish to a closed
+        # stream or carry state across a new sample budget.
+        clear_frame_requests(wait=True)
 
         next_ips = int(round(request["ips"] if request["ips"] is not None
                              else IPS))
@@ -1568,8 +1596,10 @@ def run_scope(clock_source=None):
             sweep=sweep_mode, dc_comp=dc_comp, autofit=autofit,
             row_bias=row_bias, precondition=raster_precondition,
             yt_timing=yt_timing, yt_trigger_samples=0,
+            close_frame=not scope.trigger,
             grid=_rotation_grid(cal, rotation),
             levels=(cal.get("levels") if cal else None))
+        _configure_raster_emitter_fields(emitter, render_mode, fields)
         stochastic_emitter = StochasticEmitter(
             scope.samplerate, scope.samples_per_frame,
             gamma=walk_gamma, trim=trim, radius=walk_radius,
@@ -1582,9 +1612,10 @@ def run_scope(clock_source=None):
             edge_gain=walk_edge, dc_comp=dc_comp, border=border)
         fusion_multiplexer.reset()
         beam_end = None
-        field_i = mix_field_i = 0
+        _configure_field_groups(field_group, mix_field_group, fields)
         mix_last_mode = None
         prev_key = None
+        render_generation += 1
         dev = "null" if getattr(scope, "null", False) else scope.stream.device
         _dev_name = _dev_name_of(scope)
         live_state.update(fps=fps, ips=IPS, fields=fields)
@@ -1610,12 +1641,221 @@ def run_scope(clock_source=None):
         except Exception:
             pass
 
+    def presentation_identity(request, mode, field, decoded_pair=None):
+        index, main_folder, float_folder = request["key"]
+        source_kind = "runtime-images" if live_images is not None else "bake"
+        return (request["generation"], mode, int(index), int(main_folder),
+                int(float_folder), int(field), int(request["fields"]),
+                source_kind, request.get("source_selected_at_ns"),
+                (decoded_pair.requested_at_ns
+                 if decoded_pair is not None else None),
+                (decoded_pair.decode_started_at_ns
+                 if decoded_pair is not None else None),
+                (decoded_pair.ready_at_ns
+                 if decoded_pair is not None else None))
+
+    def commit_accepted_trace(request, endpoint, mode, *, group=None,
+                              mix_mode=None):
+        """Commit producer progression only after Scope queued a trace."""
+        nonlocal beam_end, mix_last_mode
+        if endpoint is None:
+            endpoint = request["scope"].last_accepted_endpoint
+        if endpoint is not None:
+            beam_end = np.asarray(endpoint, dtype=np.float32)[:2].copy()
+        has_raster = (mode == "raster" or
+                      (mode == "fusion"
+                       and "r" in request["fusion_components"]))
+        if has_raster and beam_end is not None:
+            request["emitter"].accept(beam_end)
+            request["sweep"]["rev"] = request["emitter"]._rev
+            request["sweep"]["end"] = request["emitter"]._end
+        if group is not None:
+            group.accept()
+        if mix_mode is not None:
+            mix_scheduler.advance()
+            if mix_mode == "raster":
+                mix_field_group.accept()
+            mix_last_mode = mix_mode
+
+    def checkpoint_render_state(request, mode):
+        """Checkpoint mutable non-raster emitters for failed queue recovery."""
+        checkpoints = []
+        if mode == "stochastic":
+            emitter = request["stochastic_emitter"]
+            checkpoints.append((emitter, emitter.checkpoint()))
+        elif mode == "stipple":
+            emitter = request["stipple_emitter"]
+            checkpoints.append((emitter, emitter.checkpoint()))
+        elif mode == "fusion":
+            if "s" in request["fusion_components"]:
+                emitter = request["stochastic_emitter"]
+                checkpoints.append((emitter, emitter.checkpoint()))
+            mux = request["fusion_multiplexer"]
+            checkpoints.append((mux, mux.checkpoint()))
+        return checkpoints
+
+    def restore_render_state(checkpoints):
+        for renderer, checkpoint in reversed(checkpoints):
+            renderer.restore(checkpoint)
+
+    def render_frame_request(request):
+        """Render latest state; progression commits only on queueing."""
+
+        if request["mix"]:
+            mix_mode = mix_scheduler.peek_next_mode()
+            active = request
+            field = 0
+            if mix_mode == "raster":
+                field, active = mix_field_group.begin(request)
+            active_scope = active["scope"]
+            decoded_pair = None
+            if live_images is not None:
+                decoded_pair = live_images.ready_pair(
+                    active["index"], active["key"][1], active["key"][2])
+                if decoded_pair is None:
+                    return
+            state_checkpoint = checkpoint_render_state(active, mix_mode)
+
+            def render_active():
+                return _emit(
+                    active["scope"], active["ml"], active["fl"],
+                    active["index"], mix_mode, active["sweep"],
+                    active["sweep_mode"], active["gamma"], active["trim"],
+                    active["density"], active["rows"],
+                    active["min_feature"], active["autofit"],
+                    active["lowpass"], active["oversample"], active["cal"],
+                    dc_comp=active["dc_comp"], border=active["border"],
+                    invert=active["invert"], emitter=active["emitter"],
+                    stochastic_emitter=active["stochastic_emitter"],
+                    stipple_emitter=active["stipple_emitter"],
+                    beam_start=beam_end,
+                    mode_handoff=(mix_last_mode is not None
+                                  and mix_mode != mix_last_mode),
+                    field=field, fields=active["fields"],
+                    rotation=active["rotation"],
+                    presentation=presentation_identity(
+                        active, mix_mode, field, decoded_pair),
+                    # Whole-application P0 measurements showed no gain from
+                    # caching stochastic preparation in its walk-dominated
+                    # renderer. Keep the shared cache for raster/stipple and
+                    # for the other reusable stages in a fused frame.
+                    prepared_cache=(None if mix_mode == "stochastic"
+                                    else prepared_cache),
+                    source_thumbnails=(
+                        (decoded_pair.main, decoded_pair.floating)
+                        if decoded_pair is not None else None),
+                    defer_state=(mix_mode == "raster"))
+
+            def commit_active(endpoint):
+                commit_accepted_trace(
+                    active, endpoint, mix_mode, mix_mode=mix_mode)
+
+            _execute_frame_transaction(
+                active_scope, render_active, state_checkpoint,
+                restore_render_state, commit_active)
+            return
+
+        mode = request["mode"]
+        active = request
+        field = 0
+        if mode == "raster":
+            field, active = field_group.begin(request)
+        active_scope = active["scope"]
+        decoded_pair = None
+        if live_images is not None:
+            decoded_pair = live_images.ready_pair(
+                active["index"], active["key"][1], active["key"][2])
+            if decoded_pair is None:
+                return
+        state_checkpoint = checkpoint_render_state(active, mode)
+
+        def render_active():
+            return _emit(
+                active["scope"], active["ml"], active["fl"],
+                active["index"], mode, active["sweep"],
+                active["sweep_mode"], active["gamma"], active["trim"],
+                active["density"], active["rows"], active["min_feature"],
+                active["autofit"], active["lowpass"],
+                active["oversample"], active["cal"],
+                dc_comp=active["dc_comp"], border=active["border"],
+                invert=active["invert"], emitter=active["emitter"],
+                stochastic_emitter=active["stochastic_emitter"],
+                stipple_emitter=active["stipple_emitter"],
+                fusion_multiplexer=active["fusion_multiplexer"],
+                beam_start=beam_end,
+                fusion_components=active["fusion_components"],
+                stochastic_gamma=active["stochastic_gamma"],
+                stochastic_edge=active["stochastic_edge"], field=field,
+                fields=active["fields"], rotation=active["rotation"],
+                presentation=presentation_identity(
+                    active, mode, field, decoded_pair),
+                # The random walk dominates stochastic render cost; measured
+                # cache hits did not improve end-to-end timing and added a
+                # small cost. Keep its preparation uncached in application mode.
+                prepared_cache=(None if mode == "stochastic"
+                                else prepared_cache),
+                source_thumbnails=(
+                    (decoded_pair.main, decoded_pair.floating)
+                    if decoded_pair is not None else None),
+                defer_state=(mode in ("raster", "fusion")))
+
+        def commit_active(endpoint):
+            commit_accepted_trace(
+                active, endpoint, mode,
+                group=field_group if mode == "raster" else None)
+
+        _execute_frame_transaction(
+            active_scope, render_active, state_checkpoint,
+            restore_render_state, commit_active)
+
+    def publish_frame_request(ml, fl, index, key, selected_at_ns):
+        """Publish an immutable view of the latest desired frame state."""
+        request = MappingProxyType({
+            "scope": scope, "ml": ml, "fl": fl, "index": index,
+            "key": key, "generation": render_generation,
+            "source_selected_at_ns": selected_at_ns,
+            "mode": render_mode, "mix": bool(mix_hz), "sweep": sweep,
+            "sweep_mode": sweep_mode, "gamma": gamma, "trim": trim,
+            "density": density, "rows": rows,
+            "min_feature": min_feature, "autofit": autofit,
+            "lowpass": lowpass, "oversample": oversample, "cal": cal,
+            "dc_comp": dc_comp, "border": border, "invert": invert,
+            "emitter": emitter, "stochastic_emitter": stochastic_emitter,
+            "stipple_emitter": stipple_emitter,
+            "fusion_multiplexer": fusion_multiplexer,
+            "fusion_components": fusion_components,
+            "stochastic_gamma": walk_gamma, "stochastic_edge": walk_edge,
+            "fields": fields, "rotation": rotation,
+        })
+        repeat = bool(mix_hz or render_mode != "vector")
+        version = (
+            render_generation, key, render_mode, bool(mix_hz), sweep_mode,
+            gamma, trim, density, rows, min_feature, bool(autofit),
+            lowpass, oversample, dc_comp, border, bool(invert), fields,
+            fusion_components, walk_gamma, walk_radius, walk_stride,
+            walk_edge, walk_reseed_ms, walk_hz, stipple_points, rotation,
+            mix_duty)
+        request = MappingProxyType({**request, "version": version})
+        frame_producer.publish(
+            scope, lambda request=request: render_frame_request(request),
+            version=request["version"], repeat=repeat)
+
     # NOT `with scope:` -- the device can be changed at runtime, which means
     # rebinding `scope`.  A with-block would call __exit__ on the object it
     # entered, i.e. the already-closed old stream, and raise on the way out.
-    scope.stream.start()
+    if lowpass and lowpass_circular is not None:
+        # Stochastic/fusion modes use a stateful causal filter. Compile its
+        # fixed array signature before the callback starts, not on the first
+        # filtered picture after a live mode switch.
+        from scope_lowpass import warm_cascaded_one_pole
+        warm_cascaded_one_pole(order=4, channels=2)
+    # GUI and producer startup are inside the cleanup scope so a partial start
+    # cannot leave either a PortAudio stream or a worker behind.
+    frame_producer = None
     gui = None
     try:
+        scope.stream.start()
+        frame_producer = ScopeFrameScheduler()
         if gui_enabled:
             from scope_gui import ScopeGUI
             gui = ScopeGUI(live_state, start_image_only=start_image_only,
@@ -1727,6 +1967,7 @@ def run_scope(clock_source=None):
                 _want = False
             if _want is not False:
                 try:
+                    clear_frame_requests(wait=True)
                     scope, cal, sweep = _swap_device(
                         scope, _want, source, fps, samples,
                         main_libs, float_libs, density, trim, rows, fields,
@@ -1746,9 +1987,11 @@ def run_scope(clock_source=None):
                         sweep=sweep_mode, dc_comp=dc_comp, autofit=autofit,
                         row_bias=row_bias, precondition=raster_precondition,
                         yt_timing=yt_timing,
+                        close_frame=not scope.trigger,
                         yt_trigger_samples=0,   # Scope prepends the marker its own window
                         grid=_rotation_grid(cal, rotation),
                         levels=(cal.get("levels") if cal else None))
+                    _configure_raster_emitter_fields(emitter, render_mode, fields)
                     stochastic_emitter = StochasticEmitter(
                         scope.samplerate, scope.samples_per_frame,
                         gamma=walk_gamma, trim=trim, radius=walk_radius,
@@ -1761,6 +2004,9 @@ def run_scope(clock_source=None):
                         edge_gain=walk_edge, dc_comp=dc_comp, border=border)
                     fusion_multiplexer.reset()
                     beam_end = None
+                    _configure_field_groups(field_group, mix_field_group, fields)
+                    mix_last_mode = None
+                    render_generation += 1
                     with _device_lock:
                         _device_request["message"] = f"now on {_dev_name_of(scope)}"
                     _dev_name = _dev_name_of(scope)
@@ -1823,6 +2069,7 @@ def run_scope(clock_source=None):
                             _timing_request["message"] = _reason
                         if gui is not None:
                             gui.message = _reason
+            mode_changed = False
             if keys is not None:
                 for ch in term.read():
                     if keys.feed(ch) and keys.message:
@@ -1832,25 +2079,27 @@ def run_scope(clock_source=None):
                     break
                 if keys.transform_dirty:
                     keys.transform_dirty = False
+                    clear_frame_requests(wait=True)
                     rotation = _quarter_turn(live_state.get("rotation", 0))
                     # Rebuild in image space. The Scope output transform stays
                     # at zero so X remains the fast raster/trigger axis.
-                    scope.set_rotation(0)
-                    # Mirror needs no rebuild -- it is a sign flip at the
-                    # output -- but it rides the same dirty flag so one
-                    # keypress cannot leave the two transforms disagreeing.
-                    mirror = bool(live_state.get("mirror", False))
-                    scope.set_mirror(mirror)
-                    emitter.reset()
-                    emitter.grid = _rotation_grid(cal, rotation)
-                    stochastic_emitter.reset()
-                    stipple_emitter.reset()
-                    fusion_multiplexer.reset()
-                    beam_end = None
-                    sweep = {"rev": False, "end": None}
-                    field_i = 0
-                    mix_field_i = 0
-                    mix_last_mode = None
+                    with frame_producer.state_lock:
+                        scope.set_rotation(0)
+                        # Mirror needs no rebuild -- it is a sign flip at the
+                        # output -- but it rides the same dirty flag so one
+                        # keypress cannot leave the two transforms disagreeing.
+                        mirror = bool(live_state.get("mirror", False))
+                        scope.set_mirror(mirror)
+                        emitter.reset()
+                        emitter.grid = _rotation_grid(cal, rotation)
+                        stochastic_emitter.reset()
+                        stipple_emitter.reset()
+                        fusion_multiplexer.reset()
+                        beam_end = None
+                        sweep = {"rev": False, "end": None}
+                        field_group.reset()
+                        mix_field_group.reset()
+                        mix_last_mode = None
                     if realtime:
                         gen.set_rotation(rotation,
                                          grid=_rotation_grid(cal, rotation))
@@ -1861,8 +2110,20 @@ def run_scope(clock_source=None):
                     except Exception:
                         pass
                     prev_key = None          # queue the current image rotated
-                if keys.dirty:
+                    render_generation += 1
+                if keys.dirty or keys.changed:
+                    _recalibrate = bool(keys.dirty)
                     keys.dirty = False
+                    keys.changed = False
+                    clear_frame_requests(wait=True)
+                    # A tuning/configuration generation change must not finish
+                    # half of the old interlace picture with the new grid or
+                    # tone settings. Restart the group at field zero; source
+                    # index changes alone continue to use the pinned group.
+                    with frame_producer.state_lock:
+                        field_group.reset()
+                        mix_field_group.reset()
+                        emitter._field = 0
                     trim = live_state["trim"]; density = live_state["density"]
                     rows = live_state["rows"]; autofit = live_state["autofit"]
                     next_mode = live_state["mode"]
@@ -1875,15 +2136,14 @@ def run_scope(clock_source=None):
                         # A chain endpoint belongs to the beam, not to a render
                         # mode. Do not resume either procedural emitter from the
                         # stale position it had before cycling away from it.
-                        emitter.reset()
-                        stochastic_emitter.reset()
-                        stipple_emitter.reset()
-                        fusion_multiplexer.reset()
+                        with frame_producer.state_lock:
+                            emitter.reset()
+                            stochastic_emitter.reset()
+                            stipple_emitter.reset()
+                            fusion_multiplexer.reset()
+                            field_group.reset()
+                            mix_field_group.reset()
                     invert = next_invert
-                    if realtime and invert_changed:
-                        gen.invert = invert
-                        gen._grid = None
-                        gen._grid_key = None
                     render_mode = next_mode
                     use_raster = render_mode == "raster"
                     use_stochastic = render_mode == "stochastic"
@@ -1891,13 +2151,12 @@ def run_scope(clock_source=None):
                     use_fusion = render_mode == "fusion"
                     fusion_components = next_fusion
                     if mode_changed:
-                        field_i = 0
                         tap_traces = fields if use_raster else 1
                         try:
                             scope.set_tap_fields(tap_traces)
                         except Exception:
                             pass
-                    if use_raster or mix_hz:
+                    if _recalibrate and (use_raster or mix_hz):
                         try:
                             cal = calibrate(main_libs, float_libs,
                                             scope.samples_per_frame,
@@ -1914,6 +2173,7 @@ def run_scope(clock_source=None):
                         except Exception as e:
                             print(f"  recalibration failed: {e}", flush=True)
                     prev_key = None          # force a redraw with the new values
+                    render_generation += 1
                 active_gamma = live_state["gamma"]
                 if (render_mode in ("stochastic", "stipple")
                         or (render_mode == "fusion" and "s" in fusion_components)):
@@ -1928,44 +2188,65 @@ def run_scope(clock_source=None):
                 # now, so a key that only updated a local would silently stop
                 # working -- which is the same class of bug as the two paths
                 # drifting, just inside one file.
-                emitter.gamma = gamma
-                emitter.trim = trim
-                emitter.density = density
-                emitter.rows = rows
-                emitter.autofit = autofit
-                emitter.sweep_mode = sweep_mode
-                if cal:
-                    emitter.grid = _rotation_grid(cal, rotation)
-                    emitter.levels = cal.get("levels")
-                if realtime:
-                    gen.gamma = gamma
-                    gen.trim = trim
-                    gen.density = density
-                    gen.rows_override = rows
-                    gen.invert = invert
+                with frame_producer.state_lock:
+                    if mode_changed:
+                        _configure_raster_emitter_fields(
+                            emitter, render_mode, fields)
+                    emitter.gamma = gamma
+                    emitter.trim = trim
+                    emitter.density = density
+                    emitter.rows = rows
+                    emitter.autofit = autofit
+                    emitter.sweep_mode = sweep_mode
                     if cal:
-                        gen.grid_rows, gen.grid_cols = _rotation_grid(
-                            cal, rotation)
-                        gen.levels = cal.get("levels")
-                    gen._grid = None
-                    gen._grid_key = None
-                stochastic_emitter.gamma = walk_gamma
-                stochastic_emitter.trim = trim
-                stipple_emitter.gamma = walk_gamma
-                stipple_emitter.trim = trim
+                        emitter.grid = _rotation_grid(cal, rotation)
+                        emitter.levels = cal.get("levels")
+                    if realtime:
+                        _gen_settings = {
+                            "gamma": gamma, "trim": trim,
+                            "density": density, "rows_override": rows,
+                            "invert": invert,
+                        }
+                        if cal:
+                            (_gen_settings["grid_rows"],
+                             _gen_settings["grid_cols"]) = _rotation_grid(
+                                 cal, rotation)
+                            _gen_settings["levels"] = cal.get("levels")
+                        gen.configure(**_gen_settings)
+                    stochastic_emitter.gamma = walk_gamma
+                    stochastic_emitter.trim = trim
+                    stipple_emitter.gamma = walk_gamma
+                    stipple_emitter.trim = trim
 
-            index, _ = update_index(png_paths_len, PINGPONG)
+            index, index_direction = update_index(png_paths_len, PINGPONG)
             if index != prev_index:
                 # sole caller of the stateful selector in this mode
                 update_folder_selection(index, float_folder_count,
                                         main_folder_count)
+                if index_direction in (-1, 1):
+                    source_direction = int(index_direction)
+                elif not PINGPONG:
+                    source_direction = 1
+                elif prev_index >= 0:
+                    source_direction = 1 if index > prev_index else -1
                 prev_index = index
             mf, ff = folder_dictionary["Main_and_Float_Folders"]
             key = (index, mf, ff)
+            if key != source_selected_key:
+                source_selected_key = key
+                source_selected_at_ns = time.monotonic_ns()
+            requested_presentation = (
+                render_generation, "MIX" if mix_hz else render_mode,
+                int(index), int(mf), int(ff), int(fields))
 
-            if live_images is not None and key != prefetched_key:
-                live_images.prefetch(index, mf, ff)
+            if (live_images is not None
+                    and (key != prefetched_key
+                         or source_direction != prefetched_direction)):
+                live_images.prefetch(index, mf, ff,
+                                     direction=source_direction,
+                                     pingpong=PINGPONG)
                 prefetched_key = key
+                prefetched_direction = source_direction
 
             now = time.time()
             ml = main_libs[mf % main_folder_count]
@@ -1978,121 +2259,53 @@ def run_scope(clock_source=None):
                     live.update(main=ml, mi=index, float=fl, fi=index)
                     prev_key = key
             elif mix_hz:
-                # Same ready() gate as plain raster, for the same reason: the
-                # old wall-clock pacer drifted against the actual trace rate,
-                # so frames were occasionally queued two-deep and the second
-                # replaced the first.  Losing a frame that way costs a whole
-                # interlace field, and it also desynchronised the mix scheduler
-                # from the traces the beam really drew.
-                if scope.ready():
-                    mix_mode = mix_scheduler.next_mode()
-                    _end = _emit(
-                        scope, ml, fl, index,
-                        mix_mode, sweep, sweep_mode,
-                        gamma, trim, density, rows, min_feature, autofit,
-                        lowpass, oversample, cal, dc_comp=dc_comp,
-                        border=border, invert=invert, emitter=emitter,
-                        stochastic_emitter=stochastic_emitter,
-                        stipple_emitter=stipple_emitter,
-                        beam_start=beam_end,
-                        mode_handoff=(mix_last_mode is not None
-                                      and mix_mode != mix_last_mode),
-                        field=mix_field_i % fields, fields=fields,
-                        rotation=rotation)
-                    if _end is not None:
-                        beam_end = _end
-                    if mix_mode == "raster":
-                        mix_field_i += 1
-                    mix_last_mode = mix_mode
-                    prev_key = key
+                # The worker owns trace production and waits for callback
+                # consumption. Main/UI work can continue without replacing an
+                # in-flight frame; only the desired image/config snapshot is
+                # latest-wins.
+                publish_frame_request(ml, fl, index, key,
+                                      source_selected_at_ns)
+                prev_key = key
             elif use_raster:
-                # One frame per TRACE, gated on the callback having taken the
-                # last one.  Three things fall out of this that the
-                # emit-on-index-change version got wrong:
-                #   - interlaced fields are handed over in order, so both
-                #     halves of the picture actually reach the beam;
-                #   - the chained alternating sweep gets the fresh frame it
-                #     assumes, instead of the callback looping a frame whose
-                #     close segment was deliberately omitted -- that loop is a
-                #     full-screen jump with no samples budgeted for it, i.e. a
-                #     bright flyback line on every repeat;
-                #   - a frame is never queued on top of an unconsumed one, so
-                #     sweep["end"] can no longer advance to the end of a frame
-                #     the beam never drew.
-                if scope.ready():
-                    _end = _emit(
-                        scope, ml, fl, index, "raster", sweep, sweep_mode,
-                        gamma, trim, density, rows, min_feature, autofit,
-                        lowpass, oversample, cal, dc_comp=dc_comp,
-                        border=border, invert=invert, emitter=emitter,
-                        stochastic_emitter=stochastic_emitter,
-                        beam_start=beam_end,
-                        field=field_i % fields, fields=fields,
-                        rotation=rotation)
-                    if _end is not None:
-                        beam_end = _end
-                    field_i += 1
-                    prev_key = key
+                publish_frame_request(ml, fl, index, key,
+                                      source_selected_at_ns)
+                prev_key = key
             elif use_stochastic:
-                # Like raster, stochastic is a continuing beam walk, so hand it
-                # a fresh endpoint-chained trace whenever the callback is ready.
-                if scope.ready():
-                    _end = _emit(
-                        scope, ml, fl, index, "stochastic", sweep, sweep_mode,
-                        gamma, trim, density, rows, min_feature, autofit,
-                        lowpass, oversample, cal, dc_comp=dc_comp,
-                        border=border, invert=invert, emitter=emitter,
-                        stochastic_emitter=stochastic_emitter,
-                        beam_start=beam_end, rotation=rotation)
-                    if _end is not None:
-                        beam_end = _end
-                    prev_key = key
+                publish_frame_request(ml, fl, index, key,
+                                      source_selected_at_ns)
+                prev_key = key
             elif use_stipple:
-                if scope.ready():
-                    _end = _emit(
-                        scope, ml, fl, index, "stipple", sweep, sweep_mode,
-                        gamma, trim, density, rows, min_feature, autofit,
-                        lowpass, oversample, cal, dc_comp=dc_comp,
-                        border=border, invert=invert, emitter=emitter,
-                        stochastic_emitter=stochastic_emitter,
-                        stipple_emitter=stipple_emitter,
-                        beam_start=beam_end, rotation=rotation)
-                    if _end is not None:
-                        beam_end = _end
-                    prev_key = key
+                publish_frame_request(ml, fl, index, key,
+                                      source_selected_at_ns)
+                prev_key = key
             elif use_fusion:
-                if scope.ready():
-                    _end = _emit(
-                        scope, ml, fl, index, "fusion", sweep, sweep_mode,
-                        gamma, trim, density, rows, min_feature, autofit,
-                        lowpass, oversample, cal, dc_comp=dc_comp,
-                        border=border, invert=invert, emitter=emitter,
-                        stochastic_emitter=stochastic_emitter,
-                        fusion_multiplexer=fusion_multiplexer,
-                        beam_start=beam_end,
-                        fusion_components=fusion_components,
-                        stochastic_gamma=walk_gamma,
-                        stochastic_edge=walk_edge, rotation=rotation)
-                    if _end is not None:
-                        beam_end = _end
-                    prev_key = key
+                publish_frame_request(ml, fl, index, key,
+                                      source_selected_at_ns)
+                prev_key = key
             else:
+                # Match the one-pending-frame admission used by the raster and
+                # other frame modes. The index clock may advance while the DAC
+                # is drawing, but replacing an unconsumed vector trace discards
+                # a complete picture and advances beam state past output that
+                # was never presented. When ready again, publish the latest
+                # selected index; intermediate wall-clock indices are skipped.
                 if key != prev_key:
-                    _end = _emit(
-                        scope, ml, fl, index, "vector", sweep, sweep_mode,
-                        gamma, trim, density, rows, min_feature, autofit,
-                        lowpass, oversample, cal, dc_comp=dc_comp,
-                        border=border, invert=invert, emitter=emitter,
-                        stochastic_emitter=stochastic_emitter,
-                        beam_start=beam_end, rotation=rotation)
-                    if _end is not None:
-                        beam_end = _end
+                    publish_frame_request(ml, fl, index, key,
+                                          source_selected_at_ns)
                     prev_key = key
 
             if monitor is not None and now - last_monitor >= 1.0:
                 last_monitor = now
                 try:
                     from lightweight_monitor import monitor_data as _md
+                    _adopted_identity = scope.last_adopted_identity
+                    _displayed_index = (
+                        int(_adopted_identity[2])
+                        if isinstance(_adopted_identity, tuple)
+                        and len(_adopted_identity) >= 3 else 0)
+                    _accepted_in_interval = (
+                        scope.frames_adopted > last_monitor_adopted)
+                    last_monitor_adopted = scope.frames_adopted
                     # trim/density/gamma are live-tunable, so re-publish them
                     _md["scope_trim"] = round(trim, 3)
                     _md["scope_density"] = round(density, 3)
@@ -2125,8 +2338,88 @@ def run_scope(clock_source=None):
                               * (tap_traces if mix_hz else _active_fields), 1), 1)
                     _md["scope_traces_drawn"] = int(scope.frames_drawn)
                     _md["scope_indices_skipped"] = int(scope.frames_dropped)
+                    if live_images is not None:
+                        _md["scope_runtime_image_source"] = live_images.snapshot()
+                    _source_metrics_at = time.monotonic()
+                    _source_adoptions = int(scope.distinct_source_adoptions)
+                    _source_interval = max(
+                        _source_metrics_at - last_source_metrics_at, 1e-6)
+                    if _source_adoptions >= last_source_adoptions:
+                        _source_delta = _source_adoptions - last_source_adoptions
+                    else:  # output device/timing replacement created a new Scope
+                        _source_delta = _source_adoptions
+                    _md["scope_fresh_source_adoptions_per_second"] = (
+                        _source_delta / _source_interval)
+                    last_source_metrics_at = _source_metrics_at
+                    last_source_adoptions = _source_adoptions
+                    _adopted_at_ns = scope.last_adopted_monotonic_ns
+                    _adopted_identity = scope.last_adopted_identity
+                    if (isinstance(_adopted_identity, tuple)
+                            and len(_adopted_identity) >= 12
+                            and _adopted_identity[7] == "runtime-images"
+                            and _adopted_at_ns is not None):
+                        _selected_ns, _requested_ns, _decode_started_ns, _ready_ns = (
+                            _adopted_identity[8:12])
+                        _md["scope_source_age_ms"] = (
+                            max(0.0, (_adopted_at_ns - _selected_ns) / 1e6)
+                            if _selected_ns is not None else None)
+                        _md["scope_source_queue_wait_ms"] = (
+                            max(0.0, (_decode_started_ns - _requested_ns) / 1e6)
+                            if _decode_started_ns is not None
+                            and _requested_ns is not None else None)
+                        _md["scope_source_decode_ms"] = (
+                            max(0.0, (_ready_ns - _decode_started_ns) / 1e6)
+                            if _ready_ns is not None
+                            and _decode_started_ns is not None else None)
+                        _md["scope_source_ready_to_adoption_ms"] = (
+                            max(0.0, (_adopted_at_ns - _ready_ns) / 1e6)
+                            if _ready_ns is not None else None)
+                    else:
+                        _md["scope_source_age_ms"] = None
+                        _md["scope_source_queue_wait_ms"] = None
+                        _md["scope_source_decode_ms"] = None
+                        _md["scope_source_ready_to_adoption_ms"] = None
+                    _runtime_adoptions = [
+                        (identity, adopted_ns)
+                        for identity, adopted_ns in scope.adoption_snapshot()
+                        if (isinstance(identity, tuple) and len(identity) >= 12
+                            and identity[7] == "runtime-images")]
+                    _source_timing_values = {
+                        "source_age": [], "queue_wait": [], "decode": [],
+                        "ready_to_adoption": [],
+                    }
+                    for _identity, _adopted_ns in _runtime_adoptions:
+                        (_selected_ns, _requested_ns, _decode_started_ns,
+                         _ready_ns) = _identity[8:12]
+                        if _selected_ns is not None:
+                            _source_timing_values["source_age"].append(
+                                max(0.0, (_adopted_ns - _selected_ns) / 1e6))
+                        if (_requested_ns is not None
+                                and _decode_started_ns is not None):
+                            _source_timing_values["queue_wait"].append(
+                                max(0.0, (_decode_started_ns
+                                          - _requested_ns) / 1e6))
+                        if (_decode_started_ns is not None and _ready_ns is not None):
+                            _source_timing_values["decode"].append(
+                                max(0.0, (_ready_ns
+                                          - _decode_started_ns) / 1e6))
+                        if _ready_ns is not None:
+                            _source_timing_values["ready_to_adoption"].append(
+                                max(0.0, (_adopted_ns - _ready_ns) / 1e6))
+                    _md["scope_source_adoption_samples"] = len(_runtime_adoptions)
+                    _md["scope_source_age_ms_window"] = {}
+                    for _name, _values in _source_timing_values.items():
+                        if _values:
+                            _md["scope_source_age_ms_window"][_name] = {
+                                "p50": float(np.percentile(_values, 50)),
+                                "p95": float(np.percentile(_values, 95)),
+                                "p99": float(np.percentile(_values, 99)),
+                                "max": float(max(_values)),
+                            }
+                        else:
+                            _md["scope_source_age_ms_window"][_name] = None
                     _md["scope_underruns"] = int(getattr(source, "underruns", 0)
-                                                 if source is not None else 0)
+                                                  if source is not None else 0)
                     # Both of these are centre-dot causes.  A rising
                     # scope_beam_parked means frames are arriving stationary
                     # and the guard is ringing them; a rising
@@ -2135,16 +2428,42 @@ def run_scope(clock_source=None):
                     # moves tells you where to look.
                     _md["scope_beam_parked"] = int(scope.beams_unparked)
                     _md["scope_dac_dropouts"] = int(scope.dac_dropouts)
-                    # displayed == index: scope has no FIFO, so the trace being
-                    # drawn IS the current index.  Reporting them equal keeps
-                    # the shared dashboard's delta meaningful rather than blank.
+                    _producer_stats = frame_producer.snapshot()
+                    _md["scope_prepared_cache"] = prepared_cache.snapshot()
+                    _md["scope_producer_frames"] = int(
+                        _producer_stats["rendered"])
+                    _md["scope_producer_deadline_misses"] = int(
+                        _producer_stats["deadline_misses"])
+                    _md["scope_producer_failures"] = int(
+                        _producer_stats["failed"])
+                    _md["scope_producer_last_error"] = (
+                        _producer_stats["last_error"])
+                    _deadline_lateness = _producer_stats[
+                        "deadline_lateness_ms"]
+                    _md["scope_producer_p95_lateness_ms"] = (
+                        float(np.percentile(_deadline_lateness, 95))
+                        if _deadline_lateness else 0.0)
+                    _md["scope_presentations_requested"] = int(
+                        _producer_stats["attempted"])
+                    _md["scope_render_state_requests"] = int(
+                        _producer_stats["requested"])
+                    _md["scope_presentations_accepted"] = int(
+                        scope.frames_accepted)
+                    _md["scope_presentations_adopted"] = int(
+                        scope.frames_adopted)
+                    _md["scope_presentations_dropped_before_adoption"] = int(
+                        scope.frames_dropped)
+                    _md["scope_requested_presentation"] = requested_presentation
+                    _md["scope_accepted_presentation"] = (
+                        scope.last_accepted_identity)
+                    _md["scope_adopted_presentation"] = _adopted_identity
                     monitor.update({
                         "index": index,
-                        "displayed": index,
+                        "displayed": _displayed_index,
                         "fps": round(scope.samplerate
                                      / max(scope.samples_per_frame, 1), 1),
                         "fifo_depth": 0,
-                        "successful_frame": True,
+                        "successful_frame": _accepted_in_interval,
                         "main_folder": mf,
                         "float_folder": ff,
                         "main_folder_count": main_folder_count,
@@ -2165,6 +2484,9 @@ def run_scope(clock_source=None):
                           "SCOPE_BUFFER_BLOCKS or use frame mode")
             time.sleep(tick)
     finally:
+        if frame_producer is not None:
+            frame_producer.clear(wait=True)
+            frame_producer.close(timeout=10.0)
         if gui is not None:
             gui.close()
         if term is not None:
@@ -2180,14 +2502,100 @@ def run_scope(clock_source=None):
             pass
 
 
+def _queue_presented_frame(scope, frame, *, handoff=None, presentation=None):
+    kwargs = {}
+    if handoff is not None:
+        kwargs["handoff"] = handoff
+    if presentation is not None:
+        kwargs["identity"] = presentation
+    return scope.show_frame(frame, **kwargs)
+
+
+def _configure_raster_emitter_fields(emitter, render_mode,
+                                     configured_raster_fields):
+    """Use interlace only in raster mode; other modes are progressive."""
+    if render_mode == "raster":
+        emitter.fields = max(1, int(configured_raster_fields))
+    else:
+        emitter.fields = 1
+    emitter._field = 0
+
+
+def _configure_field_groups(field_group, mix_field_group, fields):
+    """Reset both accepted-output field latches for a new output lifecycle."""
+    field_group.configure(fields)
+    mix_field_group.configure(fields)
+
+
+def _execute_frame_transaction(scope, render, checkpoint, restore, commit):
+    """Restore renderer state unless the candidate was accepted by Scope."""
+    accepted_before = scope.frames_accepted
+    try:
+        endpoint = render()
+    except Exception:
+        if scope.frames_accepted > accepted_before:
+            commit(scope.last_accepted_endpoint)
+            return True
+        restore(checkpoint)
+        raise
+    if scope.frames_accepted > accepted_before:
+        commit(endpoint)
+        return True
+    restore(checkpoint)
+    return False
+
+
 def _emit(scope, ml, fl, index, render_mode, sweep, sweep_mode,
           gamma, trim, density, rows, min_feature, autofit=True, lowpass=None,
           oversample=1, cal=None, field=0, fields=1, dc_comp=None,
           border=0.0, emitter=None, stochastic_emitter=None, beam_start=None,
           mode_handoff=False, fusion_components="vrs",
           stochastic_gamma=2.0, stochastic_edge=0.0, stipple_emitter=None,
-          fusion_multiplexer=None, invert=False, rotation=0):
+          fusion_multiplexer=None, invert=False, rotation=0,
+          presentation=None, defer_state=False, prepared_cache=None,
+          source_thumbnails=None):
     n = scope.samples_per_frame
+
+    def prepare_luma(main, main_index, floating, float_index, *, raw=False,
+                     invert=False):
+        if prepared_cache is not None:
+            return prepared_cache.luma(
+                main, main_index, floating, float_index, raw=raw,
+                invert=invert, rotation=rotation,
+                thumbnails=source_thumbnails)
+        return _rotate_luma(composite_luma(
+            main, main_index, floating, float_index, raw=raw,
+            invert=invert, thumbnails=source_thumbnails), rotation)
+
+    def emit_stochastic(target, luminance):
+        if prepared_cache is None:
+            return target.emit(luminance)
+        source_key = PreparedImageCache.source_key(
+            ml, index, fl, index, raw=True, invert=invert,
+            rotation=rotation)
+        probability = prepared_cache.stochastic_probability(
+            luminance, source_key, gamma=target.gamma, trim=target.trim,
+            edge_gain=target.edge_gain)
+        cdf_provider = lambda: prepared_cache.stochastic_cdf(
+            probability, source_key, gamma=target.gamma, trim=target.trim,
+            edge_gain=target.edge_gain)
+        return target.emit_probability(probability, cdf=cdf_provider)
+
+    def prepare_raster_grid(target, luminance):
+        if prepared_cache is None:
+            return None
+        source_key = PreparedImageCache.source_key(
+            ml, index, fl, index, raw=False, invert=invert,
+            rotation=rotation)
+        grid = target.grid or (None, None)
+        return prepared_cache.raster_grid(
+            luminance, source_key, n=target.n, density=target.density,
+            trim=target.trim, rows=target.rows, cols=None,
+            autofit=target.autofit, grid_rows=grid[0], grid_cols=grid[1],
+            row_bias=target.row_bias, levels=target.levels, stretch=True,
+            fields=target.fields, precondition=target.precondition,
+            yt_fixed=(target.yt_timing == "fixed"))
+
     if render_mode == "fusion":
         # Build corresponding V/R/S position arrays, then select their entries
         # by sampled source light. No coordinates are averaged and no
@@ -2204,20 +2612,35 @@ def _emit(scope, ml, fl, index, render_mode, sweep, sweep_mode,
         emitter.border = 0.0
         stochastic_emitter.border = 0.0
         try:
-            fusion_luma = _rotate_luma(composite_luma(
-                ml, index, fl, index, raw=True, invert=invert), rotation)
-            vector_frame = (rotate_frame(rasterize(
-                merge(ml, index, fl, index, min_feature=min_feature), n),
-                rotation) if "v" in components else None)
+            fusion_luma = prepare_luma(
+                ml, index, fl, index, raw=True, invert=invert)
+            if "v" in components:
+                vector_frame = (
+                    prepared_cache.vector_frame(
+                        ml, index, fl, index, samples=n,
+                        min_feature=min_feature, rotation=rotation)
+                    if prepared_cache is not None else
+                    rotate_frame(rasterize(
+                        merge(ml, index, fl, index,
+                              min_feature=min_feature), n), rotation))
+            else:
+                vector_frame = None
             raster_frame = None
             if "r" in components:
-                if beam_start is not None and emitter.sweep_mode == "alternate":
+                if (beam_start is not None and not defer_state
+                        and emitter.sweep_mode == "alternate"):
                     emitter._end = np.asarray(
                         beam_start, dtype=np.float32).copy()
-                raster_frame = emitter.emit(_rotate_luma(
-                    composite_luma(
-                        ml, index, fl, index, raw=False, invert=invert),
-                    rotation))
+                raster_luma = prepare_luma(
+                    ml, index, fl, index, raw=False, invert=invert)
+                raster_grid = prepare_raster_grid(emitter, raster_luma)
+                if defer_state:
+                    raster_frame = emitter.emit(
+                        raster_luma, field=field, commit=False,
+                        start=beam_start, prepared_grid=raster_grid)
+                else:
+                    raster_frame = emitter.emit(
+                        raster_luma, prepared_grid=raster_grid)
             stochastic_frame = None
             if "s" in components:
                 if beam_start is not None:
@@ -2226,7 +2649,8 @@ def _emit(scope, ml, fl, index, render_mode, sweep, sweep_mode,
                     stochastic_emitter.start_at(beam_start)
                 # Reuse the identical raw composite, rotation, and inversion
                 # already prepared for fusion_luma above.
-                stochastic_frame = stochastic_emitter.emit(fusion_luma)
+                stochastic_frame = emit_stochastic(
+                    stochastic_emitter, fusion_luma)
             mux = fusion_multiplexer or PositionMultiplexer()
             fusion_weights = {
                 "v": trace_luminance_weights(
@@ -2261,29 +2685,33 @@ def _emit(scope, ml, fl, index, render_mode, sweep, sweep_mode,
             frame = stochastic_emitter.apply_lowpass(frame, lowpass)
         elif lowpass and lowpass_circular is not None:
             frame = lowpass_circular(frame, lowpass, scope.samplerate)
-        if beam_start is not None:
-            frame[0] = beam_start
-        emitter._end = frame[-1].copy()
-        stochastic_emitter.chain_from(frame[-1])
-        sweep["rev"], sweep["end"] = emitter._rev, emitter._end
-        scope.show_frame(frame)
-        return frame[-1].copy()
+        queued_end = _queue_presented_frame(
+            scope, frame, handoff=beam_start, presentation=presentation)
+        end = np.asarray(
+            frame[-1] if queued_end is None else queued_end,
+            dtype=np.float32).copy()
+        if not defer_state:
+            emitter._end = end.copy()
+        stochastic_emitter.chain_from(end)
+        if not defer_state:
+            sweep["rev"], sweep["end"] = emitter._rev, emitter._end
+        return end
 
     if render_mode in ("raster", "stochastic", "stipple"):
         # Composite here, sweep in the emitter. Everything about HOW the trace
         # is drawn -- grid, fields, chaining, border, dc-comp -- lives on the
         # emitter, which scope_screen.py shares. Nothing about it is restated
         # in this file, so there is no second parameter list to drift.
-        _lum = _rotate_luma(composite_luma(
+        _lum = prepare_luma(
             ml, index, fl, index,
-            raw=(render_mode in ("stochastic", "stipple")), invert=invert),
-            rotation)
+            raw=(render_mode in ("stochastic", "stipple")), invert=invert)
         if Scope._tap_until > _time_mono():
             # only while a browser is watching -- same gate as the trace tap
             Scope.publish_luma(_lum)
         exact_handoff = False
         if beam_start is not None:
-            if render_mode == "raster" and emitter.sweep_mode == "alternate":
+            if (render_mode == "raster" and not defer_state
+                    and emitter.sweep_mode == "alternate"):
                 emitter._end = np.asarray(beam_start, dtype=np.float32).copy()
             elif render_mode in ("stochastic", "stipple"):
                 if mode_handoff:
@@ -2295,19 +2723,56 @@ def _emit(scope, ml, fl, index, render_mode, sweep, sweep_mode,
                         stipple_emitter if render_mode == "stipple"
                         else stochastic_emitter).handoff_from(beam_start)
         if render_mode == "raster":
-            frame = emitter.emit(_lum)
+            raster_grid = prepare_raster_grid(emitter, _lum)
+            if defer_state:
+                frame = emitter.emit(
+                    _lum, field=field, commit=False, start=beam_start,
+                    prepared_grid=raster_grid)
+            else:
+                frame = emitter.emit(_lum, prepared_grid=raster_grid)
         elif render_mode == "stipple":
-            cloud = _rotate_stipple_cloud(composite_stipple_candidates(
-                ml, index, fl, index, invert=invert), rotation)
-            frame = (stipple_emitter.emit_candidates(cloud)
-                     if cloud is not None else stipple_emitter.emit(_lum))
+            if prepared_cache is None:
+                cloud = _rotate_stipple_cloud(composite_stipple_candidates(
+                    ml, index, fl, index, invert=invert), rotation)
+                samples = None
+                candidate_key = None
+            else:
+                cloud = prepared_cache.stipple_candidates(
+                    ml, index, fl, index, invert=invert, rotation=rotation)
+                candidate_key = PreparedImageCache.source_key(
+                    ml, index, fl, index, raw=True, invert=invert,
+                    rotation=rotation)
+                samples = (prepared_cache.stipple_candidate_samples(
+                    cloud, candidate_key, points=stipple_emitter.points,
+                    gamma=stipple_emitter.gamma, trim=stipple_emitter.trim,
+                    edge_gain=stipple_emitter.edge_gain)
+                    if cloud is not None else None)
+            if cloud is not None:
+                frame = stipple_emitter.emit_candidates(
+                    cloud, prepared_samples=samples,
+                    tour_cache=None,
+                    source_key=candidate_key)
+            elif prepared_cache is not None:
+                source_key = PreparedImageCache.source_key(
+                    ml, index, fl, index, raw=True, invert=invert,
+                    rotation=rotation)
+                importance = prepared_cache.stipple_importance(
+                    _lum, source_key, gamma=stipple_emitter.gamma,
+                    trim=stipple_emitter.trim,
+                    edge_gain=stipple_emitter.edge_gain)
+                samples = prepared_cache.stipple_image_samples(
+                    importance, source_key, points=stipple_emitter.points,
+                    gamma=stipple_emitter.gamma,
+                    trim=stipple_emitter.trim,
+                    edge_gain=stipple_emitter.edge_gain)
+                frame = stipple_emitter.emit_importance(
+                    importance, prepared_samples=samples,
+                    tour_cache=None, source_key=source_key)
+            else:
+                frame = stipple_emitter.emit(_lum)
         else:
-            frame = stochastic_emitter.emit(_lum)
+            frame = emit_stochastic(stochastic_emitter, _lum)
         if frame is not None:
-            # mirrored back for the live-controls print and anything else
-            # reading sweep state; the emitter owns the real copy
-            if render_mode == "raster":
-                sweep["rev"], sweep["end"] = emitter._rev, emitter._end
             if render_mode in ("stochastic", "stipple"):
                 frame = (stipple_emitter if render_mode == "stipple"
                          else stochastic_emitter).apply_lowpass(frame, lowpass)
@@ -2317,35 +2782,42 @@ def _emit(scope, ml, fl, index, render_mode, sweep, sweep_mode,
             # fixed timing, now lives in Scope.show_frame as clip_for_trigger.
             # It has to cover every renderer once the marker is always on, and
             # show_frame is the one place they all arrive post-filter.
-            if beam_start is not None and (render_mode == "raster"
-                                           or exact_handoff):
-                # Circular filters and DC compensation can move sample zero.
-                # Restore the exact handoff point so the frame boundary itself
-                # never introduces an unbudgeted visible connector.
-                frame[0] = beam_start
-            # Compensation/filtering can move the final sample. Chain from the
-            # sample the DAC actually receives, not the unfiltered geometry.
+            handoff = (beam_start if beam_start is not None
+                       and (render_mode == "raster" or exact_handoff) else None)
+            queued_end = _queue_presented_frame(
+                scope, frame, handoff=handoff, presentation=presentation)
+            end = np.asarray(
+                frame[-1] if queued_end is None else queued_end,
+                dtype=np.float32).copy()
+            # Compensation and output-side filtering can move both endpoints.
+            # Chain the next trace from the final queued waveform, not from the
+            # pre-output renderer buffer.
             if render_mode == "raster" and emitter.sweep_mode == "alternate":
-                emitter._end = frame[-1].copy()
+                if not defer_state:
+                    emitter._end = end.copy()
+                    sweep["rev"], sweep["end"] = emitter._rev, emitter._end
             elif render_mode in ("stochastic", "stipple"):
                 (stipple_emitter if render_mode == "stipple"
-                 else stochastic_emitter).chain_from(frame[-1])
-            scope.show_frame(frame)
-            return frame[-1].copy()
+                 else stochastic_emitter).chain_from(end)
+            return end
     else:
         # empty -> safe idle circle, never a parked dot
-        polys = merge(ml, index, fl, index, min_feature=min_feature)
-        frame = rotate_frame(rasterize(polys, n), rotation)
+        frame = (prepared_cache.vector_frame(
+            ml, index, fl, index, samples=n, min_feature=min_feature,
+            rotation=rotation) if prepared_cache is not None else
+            rotate_frame(rasterize(
+                merge(ml, index, fl, index, min_feature=min_feature), n),
+                rotation))
         if invert:
-            inverse_luma = _rotate_luma(composite_luma(
-                ml, index, fl, index, raw=True, invert=True), rotation)
+            inverse_luma = prepare_luma(
+                ml, index, fl, index, raw=True, invert=True)
             weights = trace_luminance_weights(
                 inverse_luma, frame, gamma=gamma, trim=trim)
             if weights is not None:
                 frame = retime_trace_by_weights(frame, weights)
         if lowpass and lowpass_circular is not None:
             frame = lowpass_circular(frame, lowpass, scope.samplerate)
-        scope.show_frame(frame)
+        _queue_presented_frame(scope, frame, presentation=presentation)
         return frame[-1].copy()
     return None
 

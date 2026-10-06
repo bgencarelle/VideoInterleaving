@@ -40,6 +40,160 @@ if ROOT_DIR not in sys.path:
 
 from scope_bake import SweepSource, plan_grid, TraceEmitter   # noqa: E402
 from scope_out import Scope, BufferedSource, choose_device  # noqa: E402
+from scope_frame_scheduler import FieldGroupLatch  # noqa: E402
+from scope_prepared_cache import PreparedImageCache  # noqa: E402
+
+
+def _begin_raster_field(field_group, grab, levels_for):
+    """Capture one immutable source/tone-map snapshot per accepted picture."""
+    request = None
+    if field_group.index == 0:
+        timed_snapshot = getattr(grab, "timed_snapshot", None)
+        if callable(timed_snapshot):
+            source, source_version, source_metadata = timed_snapshot()
+        else:
+            snapshot = getattr(grab, "prepared_snapshot", None)
+            if callable(snapshot):
+                source, source_version = snapshot()
+            else:
+                source, source_version = grab(), None
+            source_metadata = None
+        lum = np.asarray(source, dtype=np.float32).copy()
+        levels, level_state = levels_for(lum)
+        if levels is not None:
+            levels = tuple(levels)
+        request = {"lum": lum, "levels": levels,
+                   "level_state": level_state,
+                   "source_version": source_version,
+                   "source_metadata": source_metadata,
+                   "selected_at_ns": time.monotonic_ns()}
+    field, active = field_group.begin(request)
+    if active is None:
+        raise RuntimeError("interlaced raster field has no pinned source")
+    return field, active
+
+
+def _queue_raster_candidate(scope, emitter, frame, handoff=None,
+                            field_group=None, levels_commit=None,
+                            identity=None):
+    """Advance raster sweep/field state only when Scope accepts a trace."""
+    accepted_before = getattr(scope, "frames_accepted", None)
+    try:
+        if identity is not None:
+            endpoint = scope.show_frame(frame, handoff=handoff,
+                                        identity=identity)
+        else:
+            endpoint = (scope.show_frame(frame, handoff=handoff)
+                        if handoff is not None else scope.show_frame(frame))
+    except Exception:
+        # Some Scope implementations can report an error after placing the
+        # candidate in the output queue. Do not retry an already accepted
+        # field, or the interlace group and trajectory will fall behind DAC.
+        accepted_after = getattr(scope, "frames_accepted", accepted_before)
+        if (accepted_before is None or accepted_after <= accepted_before):
+            raise
+        endpoint = getattr(scope, "last_accepted_endpoint", None)
+        if endpoint is None:
+            endpoint = frame[-1]
+    accepted = (
+        scope.frames_accepted > accepted_before
+        if accepted_before is not None else endpoint is not None)
+    if accepted:
+        emitter.accept(frame[-1] if endpoint is None else endpoint)
+        if field_group is not None:
+            field_group.accept()
+        if levels_commit is not None:
+            target, candidate = levels_commit
+            if candidate is not None:
+                target.update(candidate)
+    return accepted
+
+
+def _source_presentation_identity(captured, field, fields):
+    """Carry the chosen capture/video timestamp through Scope adoption."""
+    metadata = captured.get("source_metadata") or {}
+    source_version = captured.get("source_version")
+    sequence = metadata.get("source_sequence")
+    if sequence is None:
+        sequence = id(source_version)
+    return (
+        0, "screen-raster", int(sequence), 0, 0, int(field), int(fields),
+        str(metadata.get("source_kind", "capture")),
+        captured.get("selected_at_ns"), metadata.get("requested_at_ns"),
+        metadata.get("decode_started_at_ns"), metadata.get("ready_at_ns"),
+        metadata.get("media_position_s"),
+    )
+
+
+def _adopted_source_metrics(scope, playback_position_s=None):
+    """Summarize source timestamps at the output callback's adoption boundary."""
+    record = getattr(scope, "last_adopted_record", None)
+    if isinstance(record, tuple) and len(record) == 2:
+        identity, adopted_ns = record
+    else:
+        identity = getattr(scope, "last_adopted_identity", None)
+        adopted_ns = getattr(scope, "last_adopted_monotonic_ns", None)
+    if (not isinstance(identity, tuple) or len(identity) < 12
+            or adopted_ns is None):
+        return {}
+    selected_ns, requested_ns, decode_started_ns, ready_ns = identity[8:12]
+    now_ns = time.monotonic_ns()
+    metrics = {
+        "adopted_source_kind": identity[7],
+        "adopted_source_sequence": identity[2],
+        "source_selected_at_ns": selected_ns,
+        "source_requested_at_ns": requested_ns,
+        "source_decode_started_at_ns": decode_started_ns,
+        "source_ready_at_ns": ready_ns,
+        "source_adopted_at_ns": adopted_ns,
+        "adopted_media_position_s": (
+            identity[12] if len(identity) > 12 else None),
+        "distinct_source_adoptions": int(
+            getattr(scope, "distinct_source_adoptions", 0)),
+        "source_age_at_adoption_ms": (
+            max(0.0, (adopted_ns - requested_ns) / 1e6)
+            if requested_ns is not None else None),
+        "selection_to_adoption_ms": (
+            max(0.0, (adopted_ns - selected_ns) / 1e6)
+            if selected_ns is not None else None),
+        "source_age_now_ms": (
+            max(0.0, (now_ns - requested_ns) / 1e6)
+            if requested_ns is not None else None),
+        "source_decode_queue_ms": (
+            max(0.0, (decode_started_ns - requested_ns) / 1e6)
+            if decode_started_ns is not None and requested_ns is not None
+            else None),
+        "source_decode_ms": (
+            max(0.0, (ready_ns - decode_started_ns) / 1e6)
+            if ready_ns is not None and decode_started_ns is not None else None),
+        "source_ready_to_adoption_ms": (
+            max(0.0, (adopted_ns - ready_ns) / 1e6)
+            if ready_ns is not None else None),
+    }
+    metrics.update(_source_update_rate(scope))
+    media_position = metrics["adopted_media_position_s"]
+    metrics["media_lag_s"] = (
+        max(0.0, float(playback_position_s) - float(media_position))
+        if playback_position_s is not None and media_position is not None
+        else None)
+    return metrics
+
+
+def _source_update_rate(scope):
+    records = scope.adoption_snapshot()
+    source_records = [
+        (tuple(identity[2:5]), adopted_ns)
+        for identity, adopted_ns in records
+        if isinstance(identity, tuple) and len(identity) >= 7]
+    if len(source_records) < 2:
+        return {"fresh_source_adoptions_per_second": 0.0,
+                "fresh_source_adoptions_in_window": len(source_records)}
+    changes = sum(a[0] != b[0]
+                  for a, b in zip(source_records, source_records[1:]))
+    elapsed = max((source_records[-1][1] - source_records[0][1]) / 1e9,
+                  1e-6)
+    return {"fresh_source_adoptions_per_second": changes / elapsed,
+            "fresh_source_adoptions_in_window": changes}
 
 
 # ---------------------------------------------------------------- sources
@@ -96,8 +250,22 @@ def screen_source(region=None, downto=160):
     return grab
 
 
+def _read_exact(stream, nbytes):
+    """Read one whole raw-video frame from a possibly short-reading pipe."""
+    frame = bytearray(int(nbytes))
+    view = memoryview(frame)
+    offset = 0
+    while offset < len(frame):
+        chunk = stream.read(len(frame) - offset)
+        if not chunk:
+            return None
+        view[offset:offset + len(chunk)] = chunk
+        offset += len(chunk)
+    return frame
+
+
 def ffmpeg_source(width=160, fps=12, region=None, input_spec=None,
-                  display=None):
+                  display=None, source_kind="capture"):
     """
     Capture via ffmpeg instead of in Python.
 
@@ -153,66 +321,172 @@ def ffmpeg_source(width=160, fps=12, region=None, input_spec=None,
                             stderr=subprocess.DEVNULL, bufsize=0)
     nbytes = w * h
     last = [np.zeros((h, w), np.float32)]
+    metadata = [{"source_kind": str(source_kind), "source_sequence": 0,
+                 "requested_at_ns": None, "decode_started_at_ns": None,
+                 "ready_at_ns": None, "media_position_s": None}]
 
     def grab():
-        buf = proc.stdout.read(nbytes)
-        if not buf or len(buf) < nbytes:
+        started_ns = time.monotonic_ns()
+        buf = _read_exact(proc.stdout, nbytes)
+        if buf is None:
             return last[0]
         last[0] = (np.frombuffer(buf, np.uint8).reshape(h, w)
                    .astype(np.float32) / 255.0)
+        metadata[0] = {
+            "source_kind": str(source_kind),
+            "source_sequence": int(metadata[0]["source_sequence"]) + 1,
+            "requested_at_ns": started_ns,
+            "decode_started_at_ns": started_ns,
+            "ready_at_ns": time.monotonic_ns(),
+            "media_position_s": None,
+        }
         return last[0]
 
     grab.proc = proc
     grab.size = (w, h)
+    grab.timing_snapshot = lambda: dict(metadata[0])
     return grab
 
 
 class Throttled:
-    """Capture on a background thread at its own rate.
+    """Publish immutable latest-frame snapshots from a reader worker.
 
     The sweep asks for a frame every trace, but a ~56 cell display does not
     need the screen sampled 30 times a second, and capture is the expensive
-    part.  Decoupling means the generator never waits on a grab -- it uses
-    whatever the last one produced.
+    part. Decoupling means the producer never waits on a grab. ``drain`` is for
+    already-paced FFmpeg pipes: reading continuously prevents pipe buffering
+    from turning a latest-frame display into delayed FIFO playback.
     """
 
-    def __init__(self, grab, fps=12.0):
+    def __init__(self, grab, fps=12.0, *, source_kind="capture", drain=False):
         import threading
         self._grab = grab
+        if hasattr(grab, "proc"):
+            self.proc = grab.proc
+        self.source_kind = str(source_kind)
+        self._drain = bool(drain)
+        self._source_owner = getattr(grab, "__self__", None)
+        self._timing_source = getattr(grab, "timing_snapshot", None)
+        if not callable(self._timing_source):
+            self._timing_source = getattr(
+                self._source_owner, "timing_snapshot", None)
+        self._latest_lock = threading.Lock()
+        started_ns = time.monotonic_ns()
         self._latest = grab()
+        ready_ns = time.monotonic_ns()
+        self._prepared_source_version = object()
+        self._latest_metadata = self._metadata(
+            started_ns, ready_ns, source_sequence=1)
+        self._source_sequence = int(
+            self._latest_metadata.get("source_sequence", 1))
         self._stop = threading.Event()
         self.captures = 0
+        self.polls = 0
+        self.failures = 0
+        self.last_capture_duration_ms = max(0.0, (ready_ns - started_ns) / 1e6)
         self._period = 1.0 / max(fps, 0.5)
         self._t = threading.Thread(target=self._run, daemon=True,
                                    name="scope-capture")
         self._t.start()
 
+    def _metadata(self, started_ns, ready_ns, *, source_sequence):
+        metadata = None
+        if callable(self._timing_source):
+            try:
+                metadata = self._timing_source()
+            except Exception:
+                metadata = None
+        metadata = dict(metadata or {})
+        metadata.setdefault("source_kind", self.source_kind)
+        metadata.setdefault("source_sequence", int(source_sequence))
+        metadata.setdefault("requested_at_ns", int(started_ns))
+        metadata.setdefault("decode_started_at_ns", int(started_ns))
+        metadata.setdefault("ready_at_ns", int(ready_ns))
+        metadata.setdefault("media_position_s", None)
+        return metadata
+
     def _run(self):
         while not self._stop.is_set():
             t0 = time.perf_counter()
+            started_ns = time.monotonic_ns()
             try:
-                self._latest = self._grab()
-                self.captures += 1
+                latest = self._grab()
+                ready_ns = time.monotonic_ns()
+                metadata = self._metadata(
+                    started_ns, ready_ns,
+                    source_sequence=self._source_sequence + 1)
+                sequence = int(metadata["source_sequence"])
+                with self._latest_lock:
+                    self.polls += 1
+                    changed = sequence != self._source_sequence
+                    if changed:
+                        self._latest = latest
+                        self._latest_metadata = metadata
+                        self._prepared_source_version = object()
+                        self._source_sequence = sequence
+                        self.captures += 1
+                    self.last_capture_duration_ms = max(
+                        0.0, (ready_ns - started_ns) / 1e6)
             except Exception:
-                pass
-            time.sleep(max(0.0, self._period - (time.perf_counter() - t0)))
+                self.failures += 1
+                changed = False
+            if self._drain:
+                # A pipe may return its final frame immediately at EOF. Avoid
+                # a hot loop while retaining prompt wake-up for the next frame.
+                if not changed:
+                    self._stop.wait(0.001)
+            else:
+                self._stop.wait(max(
+                    0.0, self._period - (time.perf_counter() - t0)))
 
     def __call__(self):
-        return self._latest
+        return self.prepared_snapshot()[0]
+
+    def prepared_snapshot(self):
+        """Atomically return a frame and its immutable-content version token."""
+        with self._latest_lock:
+            return self._latest, self._prepared_source_version
+
+    def timed_snapshot(self):
+        """Return the frame, content token, and source/decode timestamps."""
+        with self._latest_lock:
+            return (self._latest, self._prepared_source_version,
+                    dict(self._latest_metadata))
+
+    def snapshot_metrics(self):
+        with self._latest_lock:
+            ready_ns = int(self._latest_metadata.get("ready_at_ns", 0))
+            return {
+                "captures": self.captures,
+                "polls": self.polls,
+                "failures": self.failures,
+                "pending_latest_age_ms": max(
+                    0.0, (time.monotonic_ns() - ready_ns) / 1e6),
+                "last_capture_duration_ms": self.last_capture_duration_ms,
+                "source_kind": self._latest_metadata.get("source_kind"),
+                "source_sequence": self._latest_metadata.get("source_sequence"),
+                "media_position_s": self._latest_metadata.get("media_position_s"),
+            }
 
     def close(self):
         self._stop.set()
-        self._t.join(timeout=0.5)
+        self._t.join(timeout=2.0)
 
 
 class VideoFileSource:
-    """Thread-safe looping video source with optional transport controls."""
+    """Timestamp-paced video decoder with nonblocking latest-frame snapshots.
+
+    ``read_latest_due`` is used by the reader worker. It advances according to
+    elapsed media time and drops decoded frames that are already late. ``__call__``
+    retains the original one-frame-at-a-time behavior for compatibility callers.
+    """
 
     def __init__(self, path, downto=160, loop=True, start_at=0.0,
-                 cv2_module=None):
+                 cv2_module=None, clock=None):
         if cv2_module is None:
             import cv2 as cv2_module
         self.cv2 = cv2_module
+        self._clock = clock or time.monotonic
         self.cap = cv2_module.VideoCapture(path)
         if not self.cap.isOpened():
             raise SystemExit(f"cannot open {path}")
@@ -226,40 +500,145 @@ class VideoFileSource:
         count = float(self.cap.get(cv2_module.CAP_PROP_FRAME_COUNT) or 0.0)
         self.frame_rate = fps if np.isfinite(fps) and fps > 0 else None
         self.duration = (count / fps if count > 0 and fps > 0 else None)
+        self._playback_anchor_wall = self._clock()
+        self._playback_anchor_position = 0.0
+        self._next_decoded = None
+        self._eof = False
+        self._seek_pending = False
+        self._generation = 0
+        self._sequence = 0
+        self._frame_metadata = {
+            "source_kind": "video", "source_sequence": 0,
+            "requested_at_ns": None, "decode_started_at_ns": None,
+            "ready_at_ns": None, "media_position_s": None,
+            "generation": self._generation,
+        }
         if start_at > 0:
             self.transport("seek", start_at)
 
+    def _frame_position_locked(self):
+        if self.frame_rate:
+            frame_index = float(
+                self.cap.get(self.cv2.CAP_PROP_POS_FRAMES) or 0)
+            return max(0.0, (frame_index - 1.0) / self.frame_rate)
+        position = float(self.cap.get(self.cv2.CAP_PROP_POS_MSEC) or 0)
+        return max(0.0, position / 1000.0)
+
+    def _read_next_locked(self):
+        started_ns = time.monotonic_ns()
+        ok, frame = self.cap.read()
+        if not ok:
+            return None
+        image = np.asarray(shrink(frame, self.downto), dtype=np.float32).copy()
+        ready_ns = time.monotonic_ns()
+        image.setflags(write=False)
+        return {
+            "image": image,
+            "position": self._frame_position_locked(),
+            "requested_at_ns": started_ns,
+            "decode_started_at_ns": started_ns,
+            "ready_at_ns": ready_ns,
+        }
+
+    def _publish_locked(self, candidate):
+        self.last = candidate["image"]
+        self.position = float(candidate["position"])
+        self._seek_pending = False
+        self._sequence += 1
+        self._frame_metadata = {
+            "source_kind": "video",
+            "source_sequence": self._sequence,
+            "requested_at_ns": int(candidate["requested_at_ns"]),
+            "decode_started_at_ns": int(candidate["decode_started_at_ns"]),
+            "ready_at_ns": int(candidate["ready_at_ns"]),
+            "media_position_s": self.position,
+            "generation": self._generation,
+        }
+
     def __call__(self):
         with self.lock:
-            if self.paused and self.last is not None:
+            if self.paused and self.last is not None and not self._seek_pending:
                 return self.last
-            ok, frame = self.cap.read()
-            if not ok and self.loop:
+            candidate = self._read_next_locked()
+            if candidate is None and self.loop:
                 self.cap.set(self.cv2.CAP_PROP_POS_FRAMES, 0)
-                ok, frame = self.cap.read()
-                if ok:
-                    self.position = 0.0
-            if not ok:
+                self._eof = False
+                candidate = self._read_next_locked()
+            if candidate is None:
                 if self.last is not None:
                     return self.last
                 return np.zeros((64, 64), np.float32)
-            self.last = shrink(frame, self.downto)
-            if self.frame_rate:
-                frame_index = float(self.cap.get(self.cv2.CAP_PROP_POS_FRAMES) or 0)
-                self.position = max(0.0, (frame_index - 1.0) / self.frame_rate)
-            else:
-                position = float(self.cap.get(self.cv2.CAP_PROP_POS_MSEC) or 0)
-                self.position = max(0.0, position / 1000.0)
+            self._publish_locked(candidate)
             return self.last
+
+    def read_latest_due(self):
+        """Decode through the latest frame due at the current media time."""
+        with self.lock:
+            now = self._clock()
+            if (self.paused and self.last is not None
+                    and not self._seek_pending):
+                return self.last
+            target = (self.position if self.paused else
+                      self._playback_anchor_position
+                      + max(0.0, now - self._playback_anchor_wall))
+            if self.duration is not None and target >= self.duration:
+                if not self.loop:
+                    target = max(0.0, self.duration -
+                                 (1.0 / self.frame_rate
+                                  if self.frame_rate else 0.001))
+                else:
+                    target %= self.duration
+                    self.cap.set(self.cv2.CAP_PROP_POS_MSEC, target * 1000.0)
+                    self._next_decoded = None
+                    self._eof = False
+                    self._playback_anchor_position = target
+                    self._playback_anchor_wall = now
+
+            while True:
+                if self._next_decoded is None:
+                    if self._eof:
+                        break
+                    self._next_decoded = self._read_next_locked()
+                    if self._next_decoded is None:
+                        self._eof = True
+                        break
+                # A decoder can land just after a non-frame-aligned seek
+                # target. Publish that first seek result even while paused,
+                # otherwise the frozen media clock can leave it pending.
+                if (self._next_decoded["position"] <= target + 1e-9
+                        or self._seek_pending):
+                    self._publish_locked(self._next_decoded)
+                    self._next_decoded = None
+                    continue
+                break
+
+            if self.last is not None:
+                return self.last
+            return np.zeros((64, 64), np.float32)
+
+    def timing_snapshot(self):
+        with self.lock:
+            return dict(self._frame_metadata)
 
     def transport(self, command, position=None):
         """Apply play, pause, restart, or seek without stopping scope output."""
         command = str(command or "").strip().lower()
         with self.lock:
             if command == "pause":
+                if not self.paused:
+                    self.position = (
+                        self._playback_anchor_position
+                        + max(0.0, self._clock()
+                              - self._playback_anchor_wall))
+                    if self.duration is not None and self.loop:
+                        self.position %= self.duration
+                    self._playback_anchor_position = self.position
+                    self._playback_anchor_wall = self._clock()
                 self.paused = True
             elif command == "play":
                 self.paused = False
+                self._playback_anchor_position = self.position
+                self._playback_anchor_wall = self._clock()
             elif command == "restart":
                 was_paused = self.paused
                 self._seek_locked(0.0)
@@ -283,16 +662,33 @@ class VideoFileSource:
             seconds = min(seconds, max(0.0, self.duration - 0.001))
         self.cap.set(self.cv2.CAP_PROP_POS_MSEC, seconds * 1000.0)
         self.position = seconds
-        self.last = None
+        # Keep the last complete decoded image visible until the seek target
+        # has been decoded. A transport discontinuity must not flash black.
+        self._next_decoded = None
+        self._eof = False
+        self._seek_pending = True
+        self._generation += 1
+        self._playback_anchor_position = seconds
+        self._playback_anchor_wall = self._clock()
 
     def playback(self):
         with self.lock:
+            position = self.position
+            if not self.paused:
+                position = (self._playback_anchor_position
+                            + max(0.0, self._clock()
+                                  - self._playback_anchor_wall))
+                if self.duration is not None and self.loop:
+                    position %= self.duration
             return {
                 "status": "playback",
-                "position": round(self.position, 3),
+                "position": round(position, 3),
                 "duration": (round(self.duration, 3)
                              if self.duration is not None else None),
                 "paused": self.paused,
+                "frame_position": self._frame_metadata.get("media_position_s"),
+                "frame_sequence": self._sequence,
+                "generation": self._generation,
             }
 
     def close(self):
@@ -541,19 +937,29 @@ def main(argv=None):
 
     region = [int(v) for v in args.region.split(",")] if args.region else None
     if args.source in ("ffmpeg", "camera"):
-        grab = ffmpeg_source(width=args.downto, fps=args.capture_fps,
-                             region=region, input_spec=args.ffmpeg_input,
-                             display=args.display)
+        raw_grab = ffmpeg_source(width=args.downto, fps=args.capture_fps,
+                                 region=region, input_spec=args.ffmpeg_input,
+                                 display=args.display,
+                                 source_kind=args.source)
+        grab = (raw_grab if args.profile else
+                Throttled(raw_grab, fps=args.capture_fps,
+                          source_kind=args.source, drain=True))
     elif args.source == "screen":
-        grab = screen_source(region, downto=args.downto)
+        raw_grab = screen_source(region, downto=args.downto)
+        grab = (raw_grab if args.profile else
+                Throttled(raw_grab, fps=args.capture_fps,
+                          source_kind="screen"))
     elif args.source == "video":
         video = video_source(args.file, downto=args.downto,
                              start_at=args.start_at)
-        grab = video
+        grab = (video if args.profile else
+                Throttled(video.read_latest_due, fps=args.capture_fps,
+                          source_kind="video"))
     else:
-        grab = test_source()
-    if args.source not in ("ffmpeg", "camera"):
-        grab = Throttled(grab, fps=args.capture_fps)
+        raw_grab = test_source()
+        grab = (raw_grab if args.profile else
+                Throttled(raw_grab, fps=args.capture_fps,
+                          source_kind="test"))
 
     probe = grab()
     print(f"[SCREEN] source {args.source}, {probe.shape[1]}x{probe.shape[0]} "
@@ -567,7 +973,7 @@ def main(argv=None):
                 grab.close()
             if args.source == "video":
                 video.close()
-            if hasattr(grab, "proc"):
+            if getattr(grab, "proc", None) is not None:
                 grab.proc.terminate()
         return
 
@@ -585,8 +991,10 @@ def main(argv=None):
         scope.set_tap_fields(max(1, args.fields))
     n = scope.samples_per_frame
     stop = threading.Event()
+    render_lock = threading.RLock()
     control_messages = queue.Queue()
     control_thread = None
+    producer_thread = None
     if args.control:
         control_thread = threading.Thread(
             target=_control_reader,
@@ -601,18 +1009,23 @@ def main(argv=None):
 
     def levels_for(g):
         if args.adapt <= 0:
-            return None
+            return None, None
+        current = {"lo": lv["lo"], "hi": lv["hi"]}
         lit = g[g > 0.01]
         if lit.size < 16:
-            return (lv["lo"], lv["hi"]) if lv["lo"] is not None else None
+            levels = ((current["lo"], current["hi"])
+                      if current["lo"] is not None else None)
+            return levels, current
         lo_n, hi_n = float(np.percentile(lit, 2)), float(np.percentile(lit, 98))
-        if lv["lo"] is None:
-            lv["lo"], lv["hi"] = lo_n, hi_n
+        if current["lo"] is None:
+            proposed = {"lo": lo_n, "hi": hi_n}
         else:
             a = min(1.0, (1.0 / max(args.fps, 1)) / args.adapt)
-            lv["lo"] += a * (lo_n - lv["lo"])
-            lv["hi"] += a * (hi_n - lv["hi"])
-        return (lv["lo"], lv["hi"])
+            proposed = {
+                "lo": current["lo"] + a * (lo_n - current["lo"]),
+                "hi": current["hi"] + a * (hi_n - current["hi"]),
+            }
+        return (proposed["lo"], proposed["hi"]), proposed
 
     # --- fix the grid once -------------------------------------------------
     # autofit re-derives rows/cols from the fraction of cells surviving trim.
@@ -634,6 +1047,7 @@ def main(argv=None):
 
     emitter = None
     gen = None
+    prepared_cache = PreparedImageCache()
     if args.stream:
         gen = SweepSource(lum_fn=grab, samples_per_pass=n, gamma=args.gamma,
                           trim=args.trim, density=args.density, rows=args.rows,
@@ -654,41 +1068,93 @@ def main(argv=None):
             border=getattr(args, "border", 0.0),
             oversample=getattr(args, "oversample", 1),
             sweep="alternate", dc_comp=args.dc_comp,
-            grid=(_grid_rows, _grid_cols))
+            grid=(_grid_rows, _grid_cols), close_frame=not scope.trigger)
+        field_group = FieldGroupLatch(max(1, args.fields))
 
         def push():
             # Gate on the callback having taken the last frame. Without it a
             # frame can be queued over an unconsumed one and dropped while
             # sweep["end"] advances anyway -- so the next trace starts from a
-            # position the beam was never at, which with close=False is a
-            # full-screen jump nothing budgeted samples for: a bright flyback.
+            # position the beam was never at, which creates an unbudgeted
+            # full-screen jump.
             # It also guarantees interlaced fields arrive one per trace, in
             # order, instead of one silently replacing the other.
             if not scope.ready():
-                return
-            lum = np.asarray(grab(), dtype=np.float32)
-            fr = emitter.emit(lum, levels=levels_for(lum))
-            if fr is not None:
-                scope.show_frame(fr)
+                return False
+            field, captured = _begin_raster_field(
+                field_group, grab, levels_for)
+            with render_lock:
+                handoff = (None if emitter._end is None
+                           else emitter._end.copy())
+                source_key = PreparedImageCache.versioned_array_key(
+                    captured.get("source_version"))
+                levels = (captured["levels"] if captured["levels"] is not None
+                          else emitter.levels)
+                prepared_grid = None
+                # Adaptive percentiles intentionally change tone per captured
+                # picture; do not fill the bounded cache with one-off grids.
+                if source_key is not None and args.adapt <= 0:
+                    grid = emitter.grid or (None, None)
+                    prepared_grid = prepared_cache.raster_grid(
+                        captured["lum"], source_key, n=emitter.n,
+                        density=emitter.density, trim=emitter.trim,
+                        rows=emitter.rows, cols=None,
+                        autofit=emitter.autofit, grid_rows=grid[0],
+                        grid_cols=grid[1], row_bias=emitter.row_bias,
+                        levels=levels, stretch=True, fields=emitter.fields,
+                        precondition=emitter.precondition,
+                        yt_fixed=(emitter.yt_timing == "fixed"))
+                fr = emitter.emit(
+                    captured["lum"], levels=captured["levels"],
+                    field=field, commit=False, prepared_grid=prepared_grid)
+                if fr is not None:
+                    return _queue_raster_candidate(
+                        scope, emitter, fr, handoff=handoff,
+                        field_group=field_group,
+                        levels_commit=((lv, captured["level_state"])
+                                       if field == 0 else None),
+                        identity=_source_presentation_identity(
+                            captured, field, args.fields))
+            return False
 
-        push()
+        trace_period = scope.trace_samples / max(scope.samplerate, 1)
+        next_deadline = [0.0]
         rws = cls = 0
 
         def pump():
-            period = 1.0 / max(args.fps, 1)
             while not stop.is_set():
-                t0 = time.perf_counter()
+                if not scope.ready():
+                    stop.wait(0.001)
+                    continue
+                now = time.monotonic()
+                delay = next_deadline[0] - now
+                if delay > 0:
+                    stop.wait(min(delay, 0.001))
+                    continue
+                started = now
                 try:
-                    push()
+                    produced = push()
                 except Exception:
-                    pass
-                time.sleep(max(0.0, period - (time.perf_counter() - t0)))
+                    produced = False
+                if produced:
+                    # Anchor to the observed ready boundary. This leaves the
+                    # render time available before the next DAC boundary.
+                    next_deadline[0] = started + trace_period
+                else:
+                    # A transient capture/render failure must not turn the
+                    # producer into a tight retry loop while the callback is
+                    # ready for another frame.
+                    stop.wait(0.001)
 
-        threading.Thread(target=pump, daemon=True, name="scope-frames").start()
+        producer_thread = threading.Thread(
+            target=pump, daemon=True, name="scope-frames")
 
-    scope.stream.start()
     gui = None
     try:
+        last_reported_adoption_sequence = 0
+        scope.stream.start()
+        if producer_thread is not None:
+            producer_thread.start()
         if gui_enabled:
             from scope_gui import ScopeGUI
 
@@ -743,7 +1209,15 @@ def main(argv=None):
                                     hasattr(source, "buffered_samples") else
                                     "trace queue"),
                     "dac_latency_ms": dac_latency_ms,
+                    "adoption_dac_schedule_offset_ms": getattr(
+                        scope, "last_adopted_dac_schedule_offset_ms", None),
                 }
+                playback_position = (video.playback()["position"]
+                                     if args.source == "video" else None)
+                metrics.update(_adopted_source_metrics(
+                    scope, playback_position_s=playback_position))
+                if hasattr(grab, "snapshot_metrics"):
+                    metrics["capture_reader"] = grab.snapshot_metrics()
                 try:
                     actions = gui.poll(live_state, metrics)
                 except Exception as exc:
@@ -756,18 +1230,21 @@ def main(argv=None):
                         name, value = action[1], action[2]
                         if name == "gamma":
                             live_state["gamma"] = float(value)
-                            if emitter is not None:
-                                emitter.gamma = float(value)
+                            with render_lock:
+                                if emitter is not None:
+                                    emitter.gamma = float(value)
                             if gen is not None:
-                                gen.gamma = float(value)
+                                gen.configure(gamma=float(value))
                         elif name == "trim":
                             live_state["trim"] = float(value)
-                            if emitter is not None:
-                                emitter.trim = float(value)
+                            with render_lock:
+                                if emitter is not None:
+                                    emitter.trim = float(value)
                             if gen is not None:
-                                gen.trim = float(value)
+                                gen.configure(trim=float(value))
                         elif name == "lowpass":
-                            scope.lowpass_hz = float(value) or None
+                            with render_lock:
+                                scope.lowpass_hz = float(value) or None
                             live_state["lowpass"] = float(value)
                         elif name == "exposure":
                             gui.set_preview_exposure(value)
@@ -786,7 +1263,40 @@ def main(argv=None):
                     break
                 print(json.dumps(message), flush=True)
             if args.control and time.monotonic() - last_report >= 0.25:
-                print(json.dumps(video.playback()), flush=True)
+                status = video.playback()
+                status.update(_adopted_source_metrics(
+                    scope, playback_position_s=status["position"]))
+                status["adoption_dac_schedule_offset_ms"] = getattr(
+                    scope, "last_adopted_dac_schedule_offset_ms", None)
+                # Export cumulative counters so clients can calculate measured
+                # trace cadence independently of source-identity transitions.
+                status["output_trace_count"] = scope.frames_drawn
+                status["callback_adoption_count"] = scope.frames_adopted
+                status["source_adoption_event_count"] = (
+                    scope.distinct_source_adoptions)
+                adoption_records = scope.adoption_snapshot()
+                new_adoption_count = (
+                    scope._adoption_sequence
+                    - last_reported_adoption_sequence)
+                new_adoptions = (adoption_records[-new_adoption_count:]
+                                 if new_adoption_count > 0 else ())
+                status["adoption_events"] = [
+                    {
+                        "source_identity": list(identity[2:5]),
+                        "source_kind": identity[7],
+                        "selected_at_ns": identity[8],
+                        "requested_at_ns": identity[9],
+                        "decode_started_at_ns": identity[10],
+                        "ready_at_ns": identity[11],
+                        "media_position_s": (
+                            identity[12] if len(identity) > 12 else None),
+                        "adopted_at_ns": adopted_ns,
+                    }
+                    for identity, adopted_ns in new_adoptions
+                    if isinstance(identity, tuple) and len(identity) >= 12]
+                last_reported_adoption_sequence = scope._adoption_sequence
+                status["capture_reader"] = grab.snapshot_metrics()
+                print(json.dumps(status), flush=True)
                 last_report = time.monotonic()
             u = getattr(getattr(scope, "source", None), "underruns", 0)
             if u:
@@ -801,14 +1311,28 @@ def main(argv=None):
             stop.set()
         except NameError:
             pass
+        if producer_thread is not None and producer_thread.is_alive():
+            producer_thread.join(timeout=5.0)
+        proc = getattr(grab, "proc", None)
+        if proc is not None and proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=2.0)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait(timeout=2.0)
         if hasattr(grab, "close"):
             grab.close()
         if args.source == "video":
             video.close()
-        if hasattr(grab, "proc"):
-            grab.proc.terminate()
         if gui is not None:
             gui.close()
+        cache_stats = (gen.preparation_stats() if gen is not None
+                       else prepared_cache.snapshot())
+        if any(cache_stats.get(key, 0)
+               for key in ("hits", "misses", "bypasses")):
+            print("[SCREEN] prepared cache "
+                  + json.dumps(cache_stats), flush=True)
         if getattr(scope, "source", None) is not None:
             scope.source.close()
         scope.stream.stop()

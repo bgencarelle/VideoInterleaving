@@ -49,6 +49,17 @@ def test_stochastic_trace_chaining():
     assert emitter._count == 3200
 
 
+def test_stochastic_checkpoint_restores_walk_rng_and_filter_state():
+    emitter = StochasticEmitter(48000, 256, seed=31)
+    checkpoint = emitter.checkpoint()
+
+    first = emitter.apply_lowpass(emitter.emit(_portrait()), 12000)
+    emitter.restore(checkpoint)
+    retry = emitter.apply_lowpass(emitter.emit(_portrait()), 12000)
+
+    np.testing.assert_array_equal(retry, first)
+
+
 def test_brightness_is_visit_density():
     lum = np.full((96, 72), 0.25, dtype=np.float64)
     lum[34:62, 26:46] = 1.0
@@ -243,6 +254,15 @@ def test_baker_streams_large_thumbnail_arrays_to_an_atomic_memmap():
             assert lib.stipple(1)[0].shape == (baker.STIPPLE_CANDIDATES, 2)
     finally:
         baker.vectorize = original
+
+
+def test_triangle_mix_peek_does_not_advance_until_trace_is_committed():
+    scheduler = TriangleMixScheduler(0.5)
+    assert scheduler.peek_next_mode() == "vector"
+    assert scheduler.peek_next_mode() == "vector"
+    assert scheduler.next_mode() == "vector"
+    assert scheduler.peek_next_mode() == "raster"
+    assert scheduler.next_mode() == "raster"
 
 
 def test_triangle_mix_default_sequence_and_duty():
@@ -515,6 +535,27 @@ def test_live_inverse_toggle_and_printed_flag():
     keys.feed("i")
     assert state["invert"] is False
     assert "--scope-invert" not in as_flags(state)
+
+
+def test_live_tone_filter_and_sweep_controls_signal_runtime_application():
+    state = {"mode": "raster", "raster": True, "gamma": 2.2,
+             "raster_gamma": 2.2, "lowpass": None,
+             "sweep": "alternate"}
+    keys = KeyMap(state)
+
+    assert keys.feed("]")
+    assert np.isclose(state["raster_gamma"], 2.4)
+    assert keys.changed and not keys.dirty
+
+    keys.changed = False
+    assert keys.feed("l")
+    assert state["lowpass"] == 12000.0
+    assert keys.changed and not keys.dirty
+
+    keys.changed = False
+    assert keys.feed("w")
+    assert state["sweep"] == "palindrome"
+    assert keys.changed and not keys.dirty
 
 
 def test_scope_rotation_key_and_output_cover_frame_and_realtime_paths():
@@ -808,6 +849,13 @@ def test_position_fusion_multiplexes_corresponding_array_entries():
     continued = mux.emit(vector, raster, stochastic, components="vrs")
     assert np.array_equal(continued[0], stochastic[0])
 
+    mux = PositionMultiplexer()
+    checkpoint = mux.checkpoint()
+    first = mux.emit(vector, raster, stochastic, components="vrs")
+    mux.restore(checkpoint)
+    retry = mux.emit(vector, raster, stochastic, components="vrs")
+    np.testing.assert_array_equal(retry, first)
+
 
 def test_position_fusion_allocates_more_samples_to_brighter_candidates():
     n = 1000
@@ -927,8 +975,12 @@ def test_vector_density_and_fusion_runtime_emit_all_combinations():
         def __init__(self):
             self.frames = []
 
-        def show_frame(self, frame):
+        def show_frame(self, frame, handoff=None, identity=None):
+            if handoff is not None:
+                frame = np.array(frame, copy=True)
+                frame[0] = handoff
             self.frames.append(frame)
+            return frame[-1].copy()
 
     lib = Lib()
     vd = vector_density(lib.frame(0)[0], (64, 48))
@@ -980,6 +1032,244 @@ def test_vector_density_and_fusion_runtime_emit_all_combinations():
     _assert_full_border(scope.frames[-1], 64 / 48)
 
 
+def test_live_raster_fusion_switch_normalizes_and_restores_field_count():
+    import scope_display
+
+    class Lib:
+        thumbs = True
+
+        def __len__(self):
+            return 1
+
+        def thumb(self, _index):
+            thumb = np.zeros((32, 24, 2), dtype=np.uint8)
+            thumb[4:28, 5:19, 0] = 200
+            thumb[4:28, 5:19, 1] = 255
+            return thumb
+
+    class FakeScope:
+        samplerate = 48000
+        samples_per_frame = 512
+
+        def show_frame(self, frame, handoff=None, identity=None):
+            if handoff is not None:
+                frame = np.array(frame, copy=True)
+                frame[0] = handoff
+            return np.asarray(frame[-1], dtype=np.float32).copy()
+
+    scope_display.Scope._tap_until = 0
+    scope = FakeScope()
+    lib = Lib()
+    raster = TraceEmitter(48000, 512, fields=2, sweep="alternate")
+    stochastic = StochasticEmitter(48000, 512, seed=41)
+    mux = PositionMultiplexer()
+    observations = []
+    original_emit = raster.emit
+
+    def observe_emit(*args, **kwargs):
+        observations.append((raster.fields, kwargs.get("field")))
+        return original_emit(*args, **kwargs)
+
+    raster.emit = observe_emit
+    beam = None
+    scope_display._configure_raster_emitter_fields(raster, "fusion", 2)
+    assert raster.fields == 1
+    for _ in range(2):
+        beam = scope_display._emit(
+            scope, lib, None, 0, "fusion", {}, "alternate",
+            2.2, 0.02, 1.0, None, 0.02,
+            emitter=raster, stochastic_emitter=stochastic,
+            fusion_multiplexer=mux, fusion_components="sr",
+            beam_start=beam, field=0, fields=2, defer_state=True)
+        raster.accept(beam)
+
+    # Returning to raster restores the configured two-field geometry and starts
+    # a fresh field group rather than inheriting fusion's progressive setting.
+    scope_display._configure_raster_emitter_fields(raster, "raster", 2)
+    assert raster.fields == 2
+    beam = None
+    for field in (0, 1):
+        beam = scope_display._emit(
+            scope, lib, None, 0, "raster", {}, "alternate",
+            2.2, 0.02, 1.0, None, 0.02,
+            emitter=raster, stochastic_emitter=stochastic,
+            beam_start=beam, field=field, fields=2, defer_state=True)
+        raster.accept(beam)
+
+    assert observations == [(1, 0), (1, 0), (2, 0), (2, 1)]
+
+
+def test_live_tuning_geometry_and_mode_changes_anchor_to_accepted_waveform():
+    import scope_display
+
+    class Lib:
+        thumbs = True
+
+        def __len__(self):
+            return 1
+
+        def thumb(self, _index):
+            thumb = np.zeros((40, 32, 2), dtype=np.uint8)
+            thumb[5:35, 6:26, 0] = 190
+            thumb[5:35, 6:26, 1] = 255
+            thumb[12:28, 11:21, 0] = 255
+            return thumb
+
+    def assert_joined(previous, current):
+        boundary = float(np.linalg.norm(current[0] - previous[-1]))
+        before = float(np.linalg.norm(previous[-1] - previous[-2]))
+        after = float(np.linalg.norm(current[1] - current[0]))
+        assert np.isfinite((boundary, before, after)).all()
+        assert boundary <= 1e-6
+        assert boundary <= max(before, after) + 1e-6
+
+    # Exercise the real accepted-output boundary and captured null-device
+    # samples; a fake show_frame that writes the handoff into sample zero would
+    # make continuity true by construction.
+    scope = scope_display.Scope(
+        device="null", samplerate=48000, samples=640,
+        trigger=False, invert_y=False, channel_pair=(24, 25))
+    scope_display.Scope.want_tap(10.0)
+
+    def accepted_samples():
+        seq, frame = scope_display.Scope.read_tap()
+        assert seq > 0 and frame is not None
+        return np.asarray(frame, dtype=np.float32) * 0.9
+
+    lib = Lib()
+    raster = TraceEmitter(48000, 640, fields=1, sweep="alternate")
+    stochastic = StochasticEmitter(48000, 640, seed=57)
+    mux = PositionMultiplexer()
+    beam = scope_display._emit(
+        scope, lib, None, 0, "raster", {}, "alternate",
+        2.2, 0.02, 1.0, None, 0.02,
+        emitter=raster, stochastic_emitter=stochastic)
+    previous = accepted_samples()
+
+    transitions = (
+        {"gamma": 2.4},
+        {"lowpass": 12000.0},
+        {"rotation": 90},
+    )
+    gamma, lowpass, rotation = 2.2, None, 0
+    for change in transitions:
+        gamma = change.get("gamma", gamma)
+        lowpass = change.get("lowpass", lowpass)
+        rotation = change.get("rotation", rotation)
+        raster.gamma = gamma
+        beam = scope_display._emit(
+            scope, lib, None, 0, "raster", {}, "alternate",
+            gamma, 0.02, 1.0, None, 0.02, lowpass=lowpass,
+            emitter=raster, stochastic_emitter=stochastic,
+            beam_start=beam, rotation=rotation)
+        current = accepted_samples()
+        assert_joined(previous, current)
+        previous = current
+
+    # Match the production raster-to-fusion switch: clear renderer trajectory
+    # state, use a progressive raster component, then hand off the accepted end.
+    raster.reset()
+    scope_display._configure_raster_emitter_fields(raster, "fusion", 1)
+    beam = scope_display._emit(
+        scope, lib, None, 0, "fusion", {}, "alternate",
+        gamma, 0.02, 1.0, None, 0.02, lowpass=lowpass,
+        emitter=raster, stochastic_emitter=stochastic,
+        fusion_multiplexer=mux, fusion_components="sr",
+        beam_start=beam, field=0, fields=1, rotation=rotation,
+        defer_state=True)
+    current = accepted_samples()
+    assert_joined(previous, current)
+    scope.stream.close()
+
+
+def test_fusion_transaction_restores_mutated_walk_filter_and_mux_after_queue_error():
+    import scope_display
+
+    class Lib:
+        thumbs = True
+
+        def __len__(self):
+            return 1
+
+        def thumb(self, _index):
+            thumb = np.zeros((36, 28, 2), dtype=np.uint8)
+            thumb[4:32, 4:24, 0] = 210
+            thumb[4:32, 4:24, 1] = 255
+            return thumb
+
+    class QueueScope:
+        samplerate = 48000
+        samples_per_frame = 640
+
+        def __init__(self):
+            self.frames_accepted = 0
+            self.last_accepted_endpoint = None
+            self.attempts = []
+            self.fail_next = True
+            self.render_state_at_queue = None
+
+        def show_frame(self, frame, handoff=None, identity=None):
+            queued = np.array(frame, dtype=np.float32, copy=True)
+            self.attempts.append(queued)
+            walk = stochastic.checkpoint()
+            self.render_state_at_queue = (
+                walk["count"], mux.checkpoint(), walk["lowpass_state"])
+            if self.fail_next:
+                self.fail_next = False
+                raise RuntimeError("injected queue failure after rendering")
+            self.frames_accepted += 1
+            self.last_accepted_endpoint = queued[-1].copy()
+            return self.last_accepted_endpoint.copy()
+
+    scope_display.Scope._tap_until = 0
+    scope = QueueScope()
+    raster = TraceEmitter(48000, 640, fields=1, sweep="alternate")
+    stochastic = StochasticEmitter(48000, 640, seed=73)
+    mux = PositionMultiplexer()
+
+    def render():
+        return scope_display._emit(
+            scope, Lib(), None, 0, "fusion", {}, "alternate",
+            2.2, 0.02, 1.0, None, 0.02, lowpass=12000.0,
+            emitter=raster, stochastic_emitter=stochastic,
+            fusion_multiplexer=mux, fusion_components="sr",
+            stochastic_gamma=2.0, fields=1, defer_state=True)
+
+    def checkpoint():
+        return stochastic.checkpoint(), mux.checkpoint()
+
+    def restore(saved):
+        stochastic.restore(saved[0])
+        mux.restore(saved[1])
+
+    saved = checkpoint()
+    before_walk_count = stochastic._count
+    with pytest.raises(RuntimeError, match="injected queue failure"):
+        scope_display._execute_frame_transaction(
+            scope, render, saved, restore, lambda _endpoint: None)
+
+    assert scope.frames_accepted == 0
+    count_at_queue, mux_at_queue, filter_at_queue = (
+        scope.render_state_at_queue)
+    assert count_at_queue > before_walk_count
+    assert mux_at_queue[1] is not None
+    assert filter_at_queue is not None
+    restored = checkpoint()
+    assert restored[0]["count"] == saved[0]["count"]
+    assert restored[0]["phase"] == saved[0]["phase"]
+    assert restored[1][0:2] == saved[1][0:2]
+    assert restored[1][2] is saved[1][2] is None
+
+    committed = []
+    accepted_checkpoint = checkpoint()
+    assert scope_display._execute_frame_transaction(
+        scope, render, accepted_checkpoint, restore, committed.append)
+    assert scope.frames_accepted == 1
+    assert len(committed) == 1
+    np.testing.assert_array_equal(committed[0], scope.last_accepted_endpoint)
+    np.testing.assert_array_equal(scope.attempts[0], scope.attempts[1])
+
+
 def test_live_mode_cycle_respects_fixed_scheduler():
     state = {"mode": "raster", "raster": True, "mode_locked": True}
     keys = KeyMap(state)
@@ -1029,8 +1319,12 @@ def test_runtime_mode_handoff_starts_at_actual_beam_endpoint():
         def __init__(self):
             self.frames = []
 
-        def show_frame(self, frame):
+        def show_frame(self, frame, handoff=None, identity=None):
+            if handoff is not None:
+                frame = np.array(frame, copy=True)
+                frame[0] = handoff
             self.frames.append(frame)
+            return frame[-1].copy()
 
     scope_display.Scope._tap_until = 0
     scope = FakeScope()
@@ -1179,8 +1473,12 @@ def test_legacy_three_channel_bake_mix_emits_all_four_paths():
         def __init__(self):
             self.frames = []
 
-        def show_frame(self, frame):
+        def show_frame(self, frame, handoff=None, identity=None):
+            if handoff is not None:
+                frame = np.array(frame, copy=True)
+                frame[0] = handoff
             self.frames.append(frame)
+            return frame[-1].copy()
 
     scope_display.Scope._tap_until = 0
     scope = FakeScope()
