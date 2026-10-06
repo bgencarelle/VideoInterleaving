@@ -131,6 +131,7 @@ SCOPE_FPS = None          # None -> follow IPS
 SCOPE_SAMPLES = None      # explicit samples/trace; incompatible with mix
 SCOPE_GEOMETRY_SAMPLES = None  # opt-in independent trajectory detail budget
 SCOPE_TRAVERSAL_HZ = None     # opt-in geometry traversal clock
+SCOPE_PHYSICAL_DWELL = 0.0    # opt-in physical dwell redistribution [0, 1]
 SCOPE_RENDER_MODE = "vector"  # vector | raster | stochastic | stipple | fusion
                           # Stochastic is a luminance-weighted XY walk; fusion
                           # multiplexes corresponding V/R/S entries by light.

@@ -125,6 +125,7 @@ def _settings_defaults():
         "walk_edge": str(value("SCOPE_WALK_EDGE", 0.0)),
         "walk_hz": str(value("SCOPE_WALK_HZ", 48000.0)),
         "stipple_points": str(value("SCOPE_STIPPLE_POINTS", 768)),
+        "physical_dwell": str(value("SCOPE_PHYSICAL_DWELL", 0.0)),
         "rows": "" if value("SCOPE_ROWS", None) is None else str(value("SCOPE_ROWS", None)),
         "row_bias": str(value("SCOPE_ROW_BIAS", 1.0)),
         "border": str(value("SCOPE_BORDER", 0.0)),
@@ -174,14 +175,14 @@ if (DEFAULT_SETTINGS["app_source"] == "images" and
 FIELD_GROUPS = (
     ("Pipeline", ("run_mode", "device")),
     ("Output and trigger", ("channels", "x_only", "trigger",
-                             "trigger_shape", "trigger_us", "lowpass",
+                              "trigger_shape", "trigger_us", "lowpass", "physical_dwell",
                              "rotation", "mirror")),
     ("Image source", ("app_source", "image_dir", "xy_dir", "live_size")),
     ("Renderer and timing", ("render_mode", "fps", "samples",
                               "geometry_samples", "traversal_hz", "fields",
                               "yt_timing", "realtime", "sweep")),
     ("Raster and tone", ("invert", "trim", "gamma", "density", "rows",
-                          "row_bias", "border", "precondition", "autofit")),
+                           "row_bias", "border", "physical_dwell", "precondition", "autofit")),
     ("Stochastic, stipple, fusion", ("walk_radius", "walk_stride",
                                      "walk_reseed_ms", "stochastic_gamma",
                                      "walk_edge", "walk_hz", "stipple_points",
@@ -216,6 +217,7 @@ FIELD_LABELS = {
     "trim": "Trim cutoff", "gamma": "Raster gamma", "density": "Samples / cell",
     "rows": "Raster rows · blank = auto", "row_bias": "Raster row bias",
     "border": "Fixed border fraction", "precondition": "Raster precondition",
+    "physical_dwell": "Physical dwell strength",
     "autofit": "Autofit trimmed raster grid", "walk_radius": "Walk radius · px",
     "walk_stride": "Walk stride · 0 = automatic", "walk_reseed_ms": "Walk reseed · ms",
     "stochastic_gamma": "Stochastic gamma", "walk_edge": "Walk edge probability",
@@ -248,7 +250,7 @@ NUMBER_FIELDS = {
     "traversal_hz", "fields", "trim", "gamma",
     "density", "precondition", "walk_radius", "walk_stride", "walk_reseed_ms",
     "stochastic_gamma", "walk_edge", "walk_hz", "stipple_points", "rows",
-    "row_bias", "border", "dc_comp", "lowpass", "oversample", "mix",
+    "row_bias", "border", "physical_dwell", "dc_comp", "lowpass", "oversample", "mix",
     "mix_duty", "min_feature", "rotation", "live_fps", "live_samples",
     "live_trim", "live_gamma", "live_border", "live_oversample", "live_fields",
     "live_density", "live_rows", "adapt", "capture_fps", "downto",
@@ -323,8 +325,8 @@ def validate_settings(settings, outputs=(), root=ROOT):
                                    integer=True)
         traversal_hz = _number(settings, "traversal_hz", optional=True)
         if geometry_samples is not None or traversal_hz is not None:
-            if source != "bake" or renderer not in ("vector", "raster"):
-                raise ValueError("Geometry/traversal controls require baked vector or raster rendering")
+            if source != "bake" or renderer not in ("vector", "raster", "stipple"):
+                raise ValueError("Geometry/traversal controls require baked vector, raster, or stipple rendering")
             if settings.get("yt_timing", "dwell") == "fixed":
                 raise ValueError("Independent geometry controls cannot use fixed Y-T timing")
             if _number(settings, "mix", optional=True) is not None:
@@ -380,6 +382,9 @@ def validate_settings(settings, outputs=(), root=ROOT):
             value = _number(settings, key)
             if not 0.0 <= value <= 1.0:
                 raise ValueError(f"{FIELD_LABELS[key]} must be between 0 and 1")
+        physical_dwell = _number(settings, "physical_dwell", optional=True)
+        if physical_dwell is not None and not 0.0 <= physical_dwell <= 1.0:
+            raise ValueError("Physical dwell strength must be between 0 and 1")
         if source == "bake":
             xy_dir = str(settings.get("xy_dir", "")).strip()
             if (xy_dir and not Path(xy_dir).expanduser().is_dir()
@@ -506,6 +511,7 @@ def build_command(settings, outputs=(), *, python=sys.executable, root=ROOT,
                           ("walk_edge", "--scope-walk-edge"),
                           ("walk_hz", "--scope-walk-hz"),
                           ("stipple_points", "--scope-stipple-points"),
+                          ("physical_dwell", "--scope-physical-dwell"),
                           ("rows", "--scope-rows"),
                           ("row_bias", "--scope-row-bias"),
                           ("border", "--scope-border"),
@@ -592,7 +598,8 @@ def build_command(settings, outputs=(), *, python=sys.executable, root=ROOT,
         command.extend(("--region", str(settings["region"]).strip()))
     for key, flag in (("live_fps", "--fps"), ("live_samples", "--samples"),
                       ("geometry_samples", "--geometry-samples"),
-                      ("traversal_hz", "--traversal-hz"),
+                          ("traversal_hz", "--traversal-hz"),
+                          ("physical_dwell", "--physical-dwell"),
                       ("live_trim", "--trim"), ("live_gamma", "--gamma"),
                       ("live_border", "--border"),
                       ("live_oversample", "--oversample"),

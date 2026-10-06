@@ -25,6 +25,7 @@ Screen capture needs `mss` (pip install mss).  On Wayland mss cannot grab the
 screen; use X11, or feed frames another way with --source video.
 """
 import argparse
+import math
 import json
 import os
 import queue
@@ -850,6 +851,8 @@ def build_parser():
                     help="raster trajectory detail budget independent of DAC samples")
     ap.add_argument("--traversal-hz", type=float, metavar="HZ",
                     help="timed raster traversal speed in cycles/second; requires trigger and one field")
+    ap.add_argument("--physical-dwell", type=float, default=0.0, metavar="F",
+                    help="physical sample-time redistribution toward drawing segments (0=off, 1=strong)")
     ap.add_argument("--trim", type=float, default=0.02,
                     help="drop cells dimmer than this. Useful on dark content; "
                          "leave low for a full-frame source")
@@ -941,6 +944,8 @@ def main(argv=None):
         ap.error("--start-at must be finite and non-negative")
     if args.geometry_samples is not None and args.geometry_samples < 2:
         ap.error("--geometry-samples must be at least 2")
+    if not math.isfinite(args.physical_dwell) or not 0.0 <= args.physical_dwell <= 1.0:
+        ap.error("--physical-dwell must be between 0 and 1")
     if args.traversal_hz is not None and (
             not np.isfinite(args.traversal_hz) or args.traversal_hz <= 0):
         ap.error("--traversal-hz must be finite and greater than zero")
@@ -1015,7 +1020,7 @@ def main(argv=None):
         channel_pair=channel_pair, trigger=args.scope_trigger,
         trigger_shape=args.scope_trigger_shape,
         yt_trigger_us=args.scope_trigger_us, rotation=args.rotation,
-        mirror=args.mirror)
+        mirror=args.mirror, physical_dwell=args.physical_dwell)
     if gui_enabled:
         scope.set_tap_fields(max(1, args.fields))
     n = scope.samples_per_frame

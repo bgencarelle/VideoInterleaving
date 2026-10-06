@@ -30,6 +30,7 @@ SLIDER_RANGES = {
     "rows": (0.0, 400.0, 1.0),
     "lowpass": (0.0, 12000.0, 100.0),
     "exposure": (0.2, 2.5, 0.05),
+    "spot": (0.5, 2.0, 0.05),
 }
 SLIDER_LABELS = {
     "ips": "Picture rate",
@@ -41,6 +42,7 @@ SLIDER_LABELS = {
     "rows": "Raster rows (0 = auto)",
     "lowpass": "Output low-pass",
     "exposure": "Preview exposure",
+    "spot": "Preview spot width",
 }
 MODES = ("vector", "raster", "stochastic", "stipple", "fusion")
 
@@ -144,8 +146,8 @@ def responsive_layout(width, height, scale=1.0):
 
 
 def _to_slider_value(name, state, exposure):
-    if name == "exposure":
-        return exposure
+    if name in ("exposure", "spot"):
+        return exposure if name == "exposure" else 1.0
     value = state.get(name)
     if name == "rows" and value is None:
         return 0
@@ -174,6 +176,8 @@ def _format_value(name, value):
         return "Off" if value <= 0 else f"{value / 1000:g} kHz"
     if name == "exposure":
         return f"{value:.2f}x"
+    if name == "spot":
+        return f"{value:.2f}x"
     return f"{value:g}"
 
 
@@ -189,6 +193,7 @@ class ScopeGUI:
                  start_image_only=False, start_fullscreen=False):
         self._state = dict(initial_state)
         self.preview_exposure = float(preview_exposure)
+        self.preview_spot_width = 1.0
         self.specs = {
             "ips": make_slider_spec("ips", initial_state.get("ips", 30)),
             "fps": make_slider_spec("fps", initial_state.get("fps", 30)),
@@ -199,6 +204,7 @@ class ScopeGUI:
             "rows": make_slider_spec("rows", initial_state.get("rows", 0)),
             "lowpass": make_slider_spec("lowpass", initial_state.get("lowpass", 0)),
             "exposure": make_slider_spec("exposure", preview_exposure),
+            "spot": make_slider_spec("spot", 1.0),
         }
         self.closed = False
         self.close_requested = False
@@ -219,6 +225,7 @@ class ScopeGUI:
         self._rendered_size = None
         self._preview_points = None
         self._rendered_exposure = None
+        self._rendered_spot_width = None
         self._font_cache = {}
         self.texture = None
         self.program = None
@@ -397,6 +404,7 @@ class ScopeGUI:
         try:
             from scope_bake import preview_frame
             from scope_out import Scope
+            import numpy as np
         except Exception as exc:
             with self._preview_lock:
                 self._preview_error = f"Preview unavailable: {exc}"
@@ -410,25 +418,34 @@ class ScopeGUI:
                     self._preview_points = points
                 exposure = self.preview_exposure
                 changed_exposure = exposure != self._rendered_exposure
+                spot_width = self.preview_spot_width
+                changed_spot = spot_width != self._rendered_spot_width
                 target_size = min(
                     MAX_PREVIEW_RENDER_SIZE,
                     max(1, int(self._preview_target_size)))
                 changed_size = target_size != self._rendered_size
                 render_pending = (seq != self._rendered_seq
-                                 or changed_exposure or changed_size)
+                                 or changed_exposure or changed_spot
+                                 or changed_size)
                 render_due = (time.monotonic() - getattr(
                     self, "_last_preview_render", 0.0)
                     >= 1.0 / PREVIEW_RENDER_HZ)
                 if self._preview_points is not None and render_pending and render_due:
                     try:
-                        frame = preview_frame(self._preview_points,
-                                              size=target_size,
-                                              exposure=exposure)
+                        kwargs = {"size": target_size, "exposure": exposure}
+                        if spot_width != 1.0:
+                            points_array = np.asarray(self._preview_points)
+                            rows = max(2, len(np.unique(
+                                np.round(points_array[:, 1], 5))))
+                            kwargs["spot"] = max(
+                                0.6, 0.40 * target_size / rows * spot_width)
+                        frame = preview_frame(self._preview_points, **kwargs)
                         with self._preview_lock:
                             self._preview_rgb = frame
                             self._preview_error = ""
                         self._rendered_seq = self._preview_seq
                         self._rendered_exposure = exposure
+                        self._rendered_spot_width = spot_width
                         self._rendered_size = target_size
                         self._last_preview_render = time.monotonic()
                     except Exception as exc:
@@ -438,6 +455,10 @@ class ScopeGUI:
 
     def set_preview_exposure(self, value):
         self.preview_exposure = float(value)
+
+    def set_preview_spot_width(self, value):
+        """Adjust CPU phosphor blur only; this never changes DAC samples."""
+        self.preview_spot_width = float(value)
 
     def poll(self, state, metrics=None):
         """Pump input, draw the newest preview and return UI actions."""
@@ -523,8 +544,10 @@ class ScopeGUI:
         return False
 
     def _slider_value(self, name, state):
-        if name == "exposure":
+        if name in ("exposure", "spot"):
             value = self.preview_exposure
+            if name == "spot":
+                value = self.preview_spot_width
         else:
             value = _to_slider_value(name, state, self.preview_exposure)
         if self._dragging == name and self._drag_value is not None:
@@ -884,8 +907,11 @@ class ScopeGUI:
                         and not self._slider_disabled(name, self._state)):
                     self._dragging = name
                     self._drag_value = self._value_for_pointer(name, x)
-                    if name == "exposure":
-                        self.set_preview_exposure(self._drag_value)
+                    if name in ("exposure", "spot"):
+                        if name == "exposure":
+                            self.set_preview_exposure(self._drag_value)
+                        else:
+                            self.set_preview_spot_width(self._drag_value)
                     return
             for hit, rect in self._hits.items():
                 if rect[0] <= x <= rect[2] and rect[1] <= y <= rect[3]:
@@ -908,8 +934,11 @@ class ScopeGUI:
                 value = self._drag_value
             self._dragging = None
             self._drag_value = None
-            if name == "exposure":
-                self.set_preview_exposure(value)
+            if name in ("exposure", "spot"):
+                if name == "exposure":
+                    self.set_preview_exposure(value)
+                else:
+                    self.set_preview_spot_width(value)
             else:
                 self._actions.append(("slider", name, value))
 
@@ -919,8 +948,11 @@ class ScopeGUI:
         value = self._value_for_pointer(self._dragging, x)
         if value is not None:
             self._drag_value = value
-            if self._dragging == "exposure":
-                self.set_preview_exposure(value)
+            if self._dragging in ("exposure", "spot"):
+                if self._dragging == "exposure":
+                    self.set_preview_exposure(value)
+                else:
+                    self.set_preview_spot_width(value)
 
     def _on_key(self, _window, key, _scancode, action, _mods):
         if action != self.glfw.PRESS:

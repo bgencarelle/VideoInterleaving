@@ -1766,12 +1766,70 @@ class StippleEmitter(StochasticEmitter):
 
     def __init__(self, samplerate, samples, *, points=768, gamma=2.0,
                  trim=0.02, edge_gain=0.0, dc_comp=None, level=0.9,
-                 border=0.0):
+                 border=0.0, geometry_samples=None, traversal_hz=None):
         super().__init__(
             samplerate, samples, gamma=gamma, trim=trim,
             edge_gain=edge_gain, dc_comp=dc_comp, level=level, border=border)
         self.points = max(8, int(points))
+        self.geometry_samples = (None if geometry_samples is None
+                                 else max(2, int(geometry_samples)))
+        self.traversal_hz = (None if traversal_hz is None
+                             else float(traversal_hz))
+        if self.traversal_hz is not None and (
+                not np.isfinite(self.traversal_hz) or self.traversal_hz <= 0):
+            raise ValueError("traversal_hz must be finite and positive")
+        self._trajectory_phase = 0.0
+        self._candidate_trajectory_phase = None
         _warm_stipple_tour_kernel()
+        if geometry_samples is not None or traversal_hz is not None:
+            _trajectory_sample_kernel(
+                np.zeros((2, 2), dtype=np.float32), 0.0, 0.5, 2)
+
+    def checkpoint(self):
+        state = super().checkpoint()
+        state["trajectory_phase"] = self._trajectory_phase
+        state["candidate_trajectory_phase"] = self._candidate_trajectory_phase
+        return state
+
+    def restore(self, checkpoint):
+        super().restore(checkpoint)
+        self._trajectory_phase = checkpoint.get("trajectory_phase", 0.0)
+        self._candidate_trajectory_phase = checkpoint.get(
+            "candidate_trajectory_phase")
+
+    def reset(self):
+        super().reset()
+        self._trajectory_phase = 0.0
+        self._candidate_trajectory_phase = None
+
+    def accept(self, endpoint):
+        super().chain_from(endpoint)
+        if self._candidate_trajectory_phase is not None:
+            self._trajectory_phase = self._candidate_trajectory_phase
+            self._candidate_trajectory_phase = None
+
+    def _sample_route(self, route, singleton_radius):
+        """Resample stipple geometry independently of DAC buffer length."""
+        canonical_n = self.geometry_samples or self.n
+        if len(route) == 1:
+            theta = 2.0 * np.pi * np.arange(canonical_n) / canonical_n
+            route = route[0] + singleton_radius * np.column_stack(
+                [np.cos(theta), np.sin(theta)])
+        else:
+            t = np.linspace(0.0, len(route) - 1, canonical_n)
+            lo = np.floor(t).astype(np.int64)
+            hi = np.minimum(lo + 1, len(route) - 1)
+            route = route[lo] + (t - lo)[:, None] * (route[hi] - route[lo])
+        if self.traversal_hz is None:
+            return _trajectory_sample_kernel(
+                np.ascontiguousarray(route, dtype=np.float32), 0.0,
+                1.0 / canonical_n, self.n)
+        rate = self.traversal_hz / self.samplerate
+        self._candidate_trajectory_phase = (
+            self._trajectory_phase + self.n * rate) % 1.0
+        return _trajectory_sample_kernel(
+            np.ascontiguousarray(route, dtype=np.float32),
+            self._trajectory_phase, rate, self.n)
 
     def _sample_pixels(self, importance, *, prepared_samples=None,
                        tour_cache=None, source_key=None):
@@ -1783,7 +1841,7 @@ class StippleEmitter(StochasticEmitter):
         unique, dwell = samples
         pixels = np.column_stack([unique % w, unique // w]).astype(np.float64)
 
-        if self._end is not None:
+        if self._end is not None and self.traversal_hz is None:
             start = np.asarray(self._xy_to_pixel(self._end, (h, w)), np.float64)
         else:
             start = pixels[np.argmax(dwell)]
@@ -1816,21 +1874,9 @@ class StippleEmitter(StochasticEmitter):
             2.0 * (pixels[:, 0] + (m - w) * 0.5) / m - 1.0,
             1.0 - 2.0 * (pixels[:, 1] + (m - h) * 0.5) / m,
         ]) * self.level
-        if self._end is not None:
+        if self._end is not None and self.traversal_hz is None:
             route = np.vstack([self._end, route])
-        if len(route) == 1:
-            theta = 2.0 * np.pi * np.arange(self.n) / self.n
-            radius = self.level / max(importance.shape)
-            out = route[0] + radius * np.column_stack(
-                [np.cos(theta), np.sin(theta)])
-        else:
-            # Interpolate in target-index time rather than arc length: repeated
-            # targets remain dwell, while long connectors are crossed quickly.
-            target_t = np.linspace(0.0, len(route) - 1, self.n)
-            lo = np.floor(target_t).astype(np.int64)
-            hi = np.minimum(lo + 1, len(route) - 1)
-            frac = (target_t - lo)[:, None]
-            out = route[lo] + frac * (route[hi] - route[lo])
+        out = self._sample_route(route, self.level / max(importance.shape))
         out = apply_trace_border(
             out, self.border, aspect=h / float(max(w, 1)), level=self.level)
         if self.dc_comp:
@@ -1863,7 +1909,9 @@ class StippleEmitter(StochasticEmitter):
             (1.0 - 2.0 * points[:, 1]) * sy,
         ]) * self.level
 
-        start = self._end if self._end is not None else display[np.argmax(dwell)]
+        start = (self._end if self._end is not None
+                 and self.traversal_hz is None
+                 else display[np.argmax(dwell)])
         settings = ("candidates", self.points, float(self.gamma),
                     float(self.trim), float(self.edge_gain), aspect,
                     float(self.level))
@@ -1872,19 +1920,9 @@ class StippleEmitter(StochasticEmitter):
                  if tour_cache is not None else
                  _greedy_nearest_order(display, start))
         route = np.repeat(display[order], dwell[order], axis=0)
-        if self._end is not None:
+        if self._end is not None and self.traversal_hz is None:
             route = np.vstack([self._end, route])
-        if len(route) == 1:
-            theta = 2.0 * np.pi * np.arange(self.n) / self.n
-            radius = self.level / 256.0
-            out = route[0] + radius * np.column_stack(
-                [np.cos(theta), np.sin(theta)])
-        else:
-            target_t = np.linspace(0.0, len(route) - 1, self.n)
-            lo = np.floor(target_t).astype(np.int64)
-            hi = np.minimum(lo + 1, len(route) - 1)
-            frac = (target_t - lo)[:, None]
-            out = route[lo] + frac * (route[hi] - route[lo])
+        out = self._sample_route(route, self.level / 256.0)
         out = apply_trace_border(
             out, self.border, aspect=aspect, level=self.level)
         if self.dc_comp:

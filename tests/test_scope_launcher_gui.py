@@ -55,7 +55,7 @@ class ScopeLauncherCommandTests(unittest.TestCase):
         self.settings.update({"run_mode": "app", "app_source": "bake",
                               "render_mode": "stochastic",
                               "geometry_samples": "2400"})
-        with self.assertRaisesRegex(ValueError, "baked vector or raster"):
+        with self.assertRaisesRegex(ValueError, "baked vector, raster, or stipple"):
             validate_settings(self.settings, root=self.root)
         self.settings.update({"render_mode": "raster", "traversal_hz": "60",
                               "trigger": False})
@@ -71,6 +71,18 @@ class ScopeLauncherCommandTests(unittest.TestCase):
         self.assertEqual(command[command.index("--scope-mode") + 1], "vector")
         self.assertEqual(command[command.index("--scope-geometry-samples") + 1], "3200")
         self.assertEqual(command[command.index("--scope-traversal-hz") + 1], "15")
+
+    def test_stipple_and_physical_dwell_controls_are_forwarded(self):
+        self.settings.update({"run_mode": "app", "app_source": "bake",
+                              "render_mode": "stipple", "geometry_samples": "2400",
+                              "traversal_hz": "20", "physical_dwell": "0.4"})
+        validate_settings(self.settings, root=self.root)
+        command = build_command(self.settings, root=self.root, python="python")
+        self.assertIn("--scope-mode", command)
+        self.assertEqual(command[command.index("--scope-mode") + 1], "stipple")
+        self.assertEqual(command[command.index("--scope-geometry-samples") + 1], "2400")
+        self.assertEqual(command[command.index("--scope-traversal-hz") + 1], "20")
+        self.assertEqual(command[command.index("--scope-physical-dwell") + 1], "0.4")
 
     def test_launcher_can_start_the_scope_tuner_fullscreen_image_only(self):
         self.settings.update({"run_mode": "app", "app_source": "images",

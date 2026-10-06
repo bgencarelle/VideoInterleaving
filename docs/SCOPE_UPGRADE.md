@@ -4298,3 +4298,109 @@ stipple tour acceleration are delivered. Continuous/stochastic/fusion integratio
 the measured real-content quality/cost frontier, and thickness/intensity budget
 work remain open under the frozen S5 charter. Product channel defaults remain
 `(1, 2)` and the user-accepted S4 software closure remains in force.
+
+## Appendix A046 — Bounded S5 decoded-content budget/proxy sweep — 2026-10-06
+
+Ran `tmp/scope_s5_quality_cost_sweep.py`, saving raw per-cell data to
+`tmp/scope-s5-quality-cost-sweep.json`. The source is the checked-in
+`modem_tests/fixtures/v7_pixel_motion_16x9.mp4` (SHA-256
+`7542e4b0287b3f9485f1d4ad7c1d7ccbe330e9272c8bce7f7c61a7f0c6f37864`), decoded
+frames 30, 150 and 270. The bounded matrix covers 48/96 detail settings, 48 kHz
+with 1,600 output samples and 96 kHz with 3,200 samples, raster/stipple/vector
+renderer-stage calls, and 15/30 traversal settings where supported. Actual output
+lengths were 1,600 and 3,200 respectively. p50/p95 timings and finite-XY extents
+are preserved cell-by-cell in the JSON. Illustrative medians ranged from 8.68 to
+15.90 ms for raster, 11.59 to 14.13 ms for stipple, and 0.05 to 0.18 ms for the
+contour-vector sampler; the prior stipple-only 256–1,024 point sweep remains in
+`tmp/scope-s5-stipple-budget-check.json`.
+
+The JSON reports source-luma-at-emitted-XY deviation/spread and XY extent only as
+software proxy metrics. They are not perceptual image quality measurements and
+say nothing about physical spot size, brightness, dwell, tape or beam appearance.
+The vector case uses thresholded OpenCV contours rather than production baked
+vectors. Stipple has no traversal clock; its repeated calls do not change tour
+phase, so the speed labels are not evidence of stipple speed behavior. Repetition
+is five calls on each of three frames and timings are renderer-local (not full
+output/pipeline cadence); this remains diagnostic rather than sustained-quality
+evidence. This sweep therefore adds bounded comparison data but does not satisfy
+the frozen S5 quality/cost frontier, independent stipple traversal, appearance
+budget, full integration, or 30+ cadence exit requirements. S5 remains active;
+no physical appearance improvement is claimed.
+
+---
+
+## Appendix A047 — S5 stipple clock and appearance controls — 2026-10-06
+
+This continuation wires the independent geometry/traversal controls through the
+baked stipple path. Stipple traversal now samples its cached, proximity-ordered
+route against a canonical detail budget and advances by `traversal_hz / sample
+rate`; phase is committed only after queue acceptance and is covered by rollback
+state. Its tour kernel and trajectory sampler are prewarmed before output.
+Application and launcher validation now accept baked vector, raster, and stipple
+for these controls; stochastic, fusion, realtime and whole-trace mix remain
+unsupported. The A046 sweep predates this integration: its stipple rows are
+point-budget render diagnostics, and its traversal labels were comparison labels,
+not measured stipple speeds.
+
+Appearance controls now have separate meanings:
+
+- Native CPU preview has a **Preview spot width** control; the existing exposure
+  control remains preview-only. Default spot width and exposure preserve the old
+  preview.
+- `Scope(physical_dwell=...)` and application/launcher
+  `--scope-physical-dwell F` (standalone frame sender: `--physical-dwell F`)
+  redistribute a fixed picture sample budget toward shorter drawing segments.
+  They do not scale XY coordinates, alter sample count or trigger-marker samples,
+  and retain endpoints and coordinate extent. Default `0` is an exact no-op.
+  This is an experimental time/dwell distribution control; it is not calibrated
+  brightness or a Z/intensity channel.
+- Dwell redistribution uses a cached Numba kernel, warmed in `Scope` setup when
+  nonzero strength is selected. Kernel configuration is `nogil=True`,
+  `fastmath=False`; zero strength bypasses the kernel.
+
+One bounded strength/cost sweep used a 3,200-sample synthetic multi-scale path,
+three warmups and 30 calls at each strength. At strengths 0.25, 0.5, 0.75, and
+1.0, p50/p95 were respectively 0.154/0.177, 0.156/0.183, 0.157/0.183, and
+0.132/0.144 ms. Each retained 3,200 samples and XY extent 1.6 by 1.2. Software
+RMS waveform deviation from strength 0 was 0.295, 0.207, 0.107, and 0.0012;
+this non-monotonic proxy is not a perceived-brightness result. Artifact:
+`tmp/scope-s5-physical-dwell-cost.json`, SHA256
+`2cd38100712497257e330d8cc510e1dae92a8973cf42d9ea26094c2ffde95113`;
+reproduction: `PYTHONPATH=. .venv/bin/python
+tmp/scope_s5_physical_dwell_sweep.py`.
+
+Combined focused verification after these edits passed **174 tests and 13
+subtests** across S5 trajectory, appearance, output, launcher, trigger, X-only,
+cache, GUI, and source modules. `main.py` baked stipple startup/shutdown passed
+with null output, test channels 24/25, 2,400 geometry samples, 20 traversal
+cycles/s and physical dwell 0.35 (`tmp/scope-s5-stipple-application-smoke.log`).
+
+### S5 handoff
+
+Delivered: tested raster, vector and stipple geometry/traversal clocks; compiled
+stipple tour; preview spot/exposure controls; and fixed-budget physical dwell
+redistribution with software cost/extent evidence. The decoded-content sweep is
+bounded renderer-stage evidence with source-luma/extent proxies. It is not a
+perceptual quality frontier or sustained picture-cadence measurement. The null
+backend's trigger marker reduces 30-Hz configured traces below 30 actual trace
+windows; no 30+ complete-picture result is claimed. Stochastic already has its
+sample-clock `walk_hz`, while fusion's mixed component clocks are not independently
+decoupled by this pass. Physical brightness/spot appearance requires the user's
+offline scope testing; it is not inferred from software coordinates.
+
+**Status: S5 substantially implemented, but not an evidence-complete S5 exit.**
+The current safe handoff is to exercise the documented controls offline and
+compare the resulting actual scope appearance against the software proxies.
+Retain all existing defaults, including `SCOPE_CHANNELS = (1, 2)`.
+
+### Verification follow-up
+
+The final combined scope / lazy-import / modem-integration focused run after
+stippling and appearance wiring passed **305 tests, 28 subtests**. The repository
+ASCII converter/scaling suite passed **15 tests**. Modem test discovery ran 910
+tests and reported two failures in unrelated modified V7 worktree files:
+`test_v7_capture_video.VideoSourceCommandTests.test_untagged_hd_files_are_read_with_the_hd_colour_matrix`
+and `test_v7_mono_video.MonoVideoWireTests.test_mono_fold_500_packets_are_bit_identical`.
+No modem/V7 source or test changes were included in this S5 patch. These two
+failures remain visible rather than being represented as a passing repository-wide
+check.

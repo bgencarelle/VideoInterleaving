@@ -20,6 +20,7 @@ try:
 except Exception:                    # usable standalone, outside the repo
     settings_mod = None
 import numpy as np
+from numba import njit
 try:
     import sounddevice as sd
 except Exception as _sd_err:            # deliberately broad -- see below
@@ -166,6 +167,87 @@ def mirror_frame(frame, mirror):
     out = src.copy()
     out[:, 0] = -out[:, 0]
     return np.ascontiguousarray(out)
+
+
+@njit(cache=True, nogil=True, fastmath=False)
+def _redistribute_dwell_kernel(src, strength, x_only):
+    """Numba implementation of fixed-budget short-segment dwell weighting."""
+    n = len(src)
+    axes = 1 if x_only else 2
+    lengths = np.empty(n - 1, dtype=np.float64)
+    positive = np.empty(n - 1, dtype=np.float64)
+    positive_count = 0
+    for i in range(n - 1):
+        squared = 0.0
+        for axis in range(axes):
+            delta = float(src[i + 1, axis]) - float(src[i, axis])
+            squared += delta * delta
+        length = np.sqrt(squared)
+        lengths[i] = length
+        if length > 1e-12:
+            positive[positive_count] = length
+            positive_count += 1
+    if positive_count == 0:
+        return src.copy()
+    ordered = np.sort(positive[:positive_count])
+    middle = positive_count // 2
+    scale = (ordered[middle] if positive_count % 2 else
+             0.5 * (ordered[middle - 1] + ordered[middle]))
+    cumulative = np.zeros(n, dtype=np.float64)
+    for i in range(n - 1):
+        weight = max(lengths[i], scale * 1e-4) ** (1.0 - strength)
+        cumulative[i + 1] = cumulative[i] + weight
+    out = np.empty_like(src)
+    segment = 0
+    for i in range(n):
+        target = i * cumulative[n - 1] / n
+        lo, hi = segment, n - 1
+        while lo < hi:
+            mid = (lo + hi + 1) // 2
+            if cumulative[mid] <= target:
+                lo = mid
+            else:
+                hi = mid - 1
+        segment = min(lo, n - 2)
+        span = cumulative[segment + 1] - cumulative[segment]
+        fraction = (target - cumulative[segment]) / span
+        for axis in range(2):
+            out[i, axis] = src[segment, axis] + fraction * (
+                src[segment + 1, axis] - src[segment, axis])
+    out[0] = src[0]
+    out[n - 1] = src[n - 1]
+    for axis in range(axes):
+        minimum = 0
+        maximum = 0
+        for i in range(1, n):
+            if src[i, axis] < src[minimum, axis]:
+                minimum = i
+            if src[i, axis] > src[maximum, axis]:
+                maximum = i
+        out[minimum, axis] = src[minimum, axis]
+        out[maximum, axis] = src[maximum, axis]
+    return out
+
+
+def redistribute_dwell(frame, strength=0.0, x_only=False):
+    """Redistribute a fixed picture sample budget toward slow path segments.
+
+    Positive strength increases residence on short steps (the bright/drawing
+    portions) relative to long travel steps. It changes sample timing only:
+    sample count and the geometric path's segment endpoints are retained.
+    Zero is an exact no-op, so the shipped waveform is unchanged by default.
+    Trigger samples are added later and are therefore never redistributed.
+    """
+    src = np.asarray(frame, dtype=np.float32)
+    strength = float(strength)
+    if not np.isfinite(strength) or not 0.0 <= strength <= 1.0:
+        raise ValueError("physical dwell strength must be between 0 and 1")
+    if strength == 0.0 or len(src) < 3:
+        return np.ascontiguousarray(src)
+    if len(src) < 3:
+        return np.ascontiguousarray(src)
+    return _redistribute_dwell_kernel(np.ascontiguousarray(src), strength,
+                                      bool(x_only))
 
 
 def anchor_periodic_frame(frame, start, *, slope_fraction=0.25):
@@ -906,7 +988,7 @@ class Scope:
                  yt_mode=None, yt_trigger_us=250.0,
                  yt_trigger_level=0.99, mirror=False,
                  trigger=True, trigger_shape="ramp", x_only=False,
-                 channel_pair=(1, 2)):
+                 channel_pair=(1, 2), physical_dwell=0.0):
         """
         samples : path length per trace -- the REAL parameter.  Refresh is not
                   set independently; it falls out as rate/samples, because the
@@ -918,6 +1000,15 @@ class Scope:
         self.invert_y = invert_y
         self.swap_xy = swap_xy
         self.x_only = bool(x_only)
+        if (not np.isfinite(physical_dwell)
+                or not 0.0 <= float(physical_dwell) <= 1.0):
+            raise ValueError("physical_dwell must be between 0 and 1")
+        self.physical_dwell = float(physical_dwell)
+        if self.physical_dwell:
+            # Compile the exact contiguous float32 output signature before the
+            # stream starts; first-use compilation must not land on a deadline.
+            redistribute_dwell(np.zeros((8, 2), dtype=np.float32),
+                               self.physical_dwell, self.x_only)
         self.channel_pair = parse_channel_pair(channel_pair)
         self.channel_indices = tuple(channel - 1 for channel in self.channel_pair)
         self.output_channels = required_output_channels(
@@ -1426,6 +1517,8 @@ class Scope:
         if self._pending_record is not None:
             self.frames_dropped += 1
         f = mirror_frame(rotate_frame(frame, self.rotation), self.mirror)
+        if self.physical_dwell:
+            f = redistribute_dwell(f, self.physical_dwell, x_only=self.x_only)
         # Before the filters, not after: lowpass ringing and the Y-T marker
         # both add motion of their own, so a picture that collapsed upstream
         # would still look alive by the time it reached the DAC.

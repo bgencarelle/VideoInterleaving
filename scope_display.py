@@ -677,8 +677,8 @@ def run_scope(clock_source=None):
         raise ValueError("live scope images support raster, stochastic, "
                          "or stipple; vector/fusion need an XY bake")
     if geometry_samples is not None or traversal_hz is not None:
-        if scope_source != "bake" or render_mode not in ("vector", "raster"):
-            raise ValueError("scope geometry/traversal controls require baked vector or raster rendering")
+        if scope_source != "bake" or render_mode not in ("vector", "raster", "stipple"):
+            raise ValueError("scope geometry/traversal controls require baked vector, raster, or stipple rendering")
         if traversal_hz is not None and not trigger_on:
             raise ValueError("SCOPE_TRAVERSAL_HZ requires the scope trigger")
     use_raster = render_mode == "raster"
@@ -1552,7 +1552,10 @@ def run_scope(clock_source=None):
     stipple_emitter = StippleEmitter(
         scope.samplerate, scope.samples_per_frame,
         points=stipple_points, gamma=walk_gamma, trim=trim,
-        edge_gain=walk_edge, dc_comp=dc_comp, border=border)
+        edge_gain=walk_edge, dc_comp=dc_comp, border=border,
+        geometry_samples=(geometry_samples or
+                          (3200 if traversal_hz is not None else None)),
+        traversal_hz=traversal_hz)
     fusion_multiplexer = PositionMultiplexer()
 
     prepared_cache = PreparedImageCache()
@@ -1604,7 +1607,7 @@ def run_scope(clock_source=None):
         if next_fps < 1 or next_ips < 1 or not 1 <= next_fields <= 4:
             raise ValueError("invalid picture rate, trace rate, or field count")
         if traversal_hz is not None and next_fields != 1:
-            raise ValueError("timed raster traversal requires one field")
+            raise ValueError("timed trajectory traversal requires one field")
 
         # The timing request is a new sample budget, so an old explicit
         # --scope-samples value must no longer override the requested rate.
@@ -1653,7 +1656,10 @@ def run_scope(clock_source=None):
         stipple_emitter = StippleEmitter(
             scope.samplerate, scope.samples_per_frame,
             points=stipple_points, gamma=walk_gamma, trim=trim,
-            edge_gain=walk_edge, dc_comp=dc_comp, border=border)
+            edge_gain=walk_edge, dc_comp=dc_comp, border=border,
+            geometry_samples=(geometry_samples or
+                              (3200 if traversal_hz is not None else None)),
+            traversal_hz=traversal_hz)
         fusion_multiplexer.reset()
         beam_end = None
         _configure_field_groups(field_group, mix_field_group, fields)
@@ -1709,6 +1715,9 @@ def run_scope(clock_source=None):
         trajectory = request.get("vector_trajectory")
         if trajectory is not None:
             trajectory.accept()
+        if mode == "stipple" and request.get("stipple_emitter") is not None:
+            request["stipple_emitter"].accept(
+                beam_end if beam_end is not None else endpoint)
         has_raster = (mode == "raster" or
                       (mode == "fusion"
                        and "r" in request["fusion_components"]))
@@ -2056,7 +2065,10 @@ def run_scope(clock_source=None):
                     stipple_emitter = StippleEmitter(
                         scope.samplerate, scope.samples_per_frame,
                         points=stipple_points, gamma=walk_gamma, trim=trim,
-                        edge_gain=walk_edge, dc_comp=dc_comp, border=border)
+                        edge_gain=walk_edge, dc_comp=dc_comp, border=border,
+                        geometry_samples=(geometry_samples or
+                                          (3200 if traversal_hz is not None else None)),
+                        traversal_hz=traversal_hz)
                     fusion_multiplexer.reset()
                     beam_end = None
                     _configure_field_groups(field_group, mix_field_group, fields)

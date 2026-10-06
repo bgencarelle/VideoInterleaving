@@ -237,9 +237,9 @@ def configure_runtime():
     parser.add_argument("--scope-fps", type=int, help="Scope trace rate (default: IPS)")
     parser.add_argument("--scope-samples", type=int, help="Scope samples per trace")
     parser.add_argument("--scope-geometry-samples", type=int, metavar="N",
-                        help="Baked vector/raster trajectory detail budget independent of DAC samples")
+                        help="Baked vector/raster/stipple trajectory detail budget independent of DAC samples")
     parser.add_argument("--scope-traversal-hz", type=float, metavar="HZ",
-                        help="Timed baked vector/raster traversal speed in cycles/second; requires trigger and one field")
+                        help="Timed baked vector/raster/stipple traversal speed in cycles/second; requires trigger and one field")
     parser.add_argument("--scope-fields", type=int, metavar="N",
                         help="Scope raster: interlace. N=2 draws every other "
                              "row per trace and alternates, so the beam "
@@ -295,6 +295,8 @@ def configure_runtime():
     parser.add_argument("--scope-stipple-points", type=int, metavar="N",
                         help="Scope stipple: stable luminance-weighted image "
                              "positions before proximity ordering (default 768)")
+    parser.add_argument("--scope-physical-dwell", type=float, metavar="F",
+                        help="Redistribute fixed physical XY sample budget toward drawing segments (0=off, 1=strong; does not change preview exposure)")
     parser.add_argument("--scope-rows", type=int)
     parser.add_argument("--scope-row-bias", type=float, metavar="F",
                         help="Trade columns for rows at constant cell count. "
@@ -758,8 +760,8 @@ def configure_runtime():
         geometry_samples = args.scope_geometry_samples
         traversal_hz = args.scope_traversal_hz
         if geometry_samples is not None or traversal_hz is not None:
-            if scope_source != "bake" or requested_render not in ("vector", "raster"):
-                parser.error("scope geometry/traversal controls require baked vector or raster rendering")
+            if scope_source != "bake" or requested_render not in ("vector", "raster", "stipple"):
+                parser.error("scope geometry/traversal controls require baked vector, raster, or stipple rendering")
             if args.scope_mix is not None:
                 parser.error("scope geometry/traversal controls cannot be combined with --scope-mix")
             if args.scope_realtime:
@@ -912,6 +914,10 @@ def configure_runtime():
             if args.scope_stipple_points < 8:
                 parser.error("--scope-stipple-points must be at least 8")
             settings.SCOPE_STIPPLE_POINTS = args.scope_stipple_points
+        if args.scope_physical_dwell is not None:
+            if not math.isfinite(args.scope_physical_dwell) or not 0.0 <= args.scope_physical_dwell <= 1.0:
+                parser.error("--scope-physical-dwell must be between 0 and 1")
+            settings.SCOPE_PHYSICAL_DWELL = args.scope_physical_dwell
         if args.scope_rows is not None:
             settings.SCOPE_ROWS = args.scope_rows
         if args.scope_clear_rows:
