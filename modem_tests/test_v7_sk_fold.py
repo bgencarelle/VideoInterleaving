@@ -93,6 +93,36 @@ class KernelTests(unittest.TestCase):
         self.assertGreater(float(np.mean((wrong-hosts)**2)),
                            float(np.mean((got_hosts-hosts)**2)))
 
+    def test_smoothing_stays_within_the_bounds_and_cleans_a_flat_area(self):
+        rows, cols = 24, 20
+        left, right = sk.dct_matrix(rows), sk.dct_matrix(cols)
+        transforms = (left, np.ascontiguousarray(left.T), right, np.ascontiguousarray(right.T))
+        picture = np.full((rows, cols), -.6)
+        picture[6:18, 5:15] = .7                       # a bright block on a flat ground
+        truth = sk.separable(left, picture, np.ascontiguousarray(right.T))
+        rng = np.random.default_rng(21)
+        u, v = np.meshgrid(np.arange(rows), np.arange(cols), indexing='ij')
+        sent = u+v < 14
+        room = np.where(sent, .02, np.inf)
+        room[0, :3] = 0.0                              # sent exactly: must not move
+        seen = np.where(sent, truth+rng.uniform(-.02, .02, truth.shape), 0.0)
+        seen[0, :3] = truth[0, :3]
+        low, high = seen-room, seen+room
+
+        def variation(plane):
+            image = left.T@plane@right
+            return float(np.abs(np.diff(image, axis=0)).sum()+np.abs(np.diff(image, axis=1)).sum())
+
+        np.testing.assert_array_equal(
+            sk.smooth_within_bounds(seen, low, high, *transforms, 0, .01, .25), seen)
+        out = sk.smooth_within_bounds(seen, low, high, *transforms, 80, .01, .25)
+        self.assertTrue(np.all(out >= low-1e-12) and np.all(out <= high+1e-12))
+        np.testing.assert_array_equal(out[0, :3], seen[0, :3])
+        self.assertLess(variation(out), .9*variation(seen))
+        # Nearer the picture than showing zeros for everything unsent.
+        self.assertLess(float(np.sum((out-truth)**2)), .8*float(np.sum((seen-truth)**2)))
+        self.assertTrue(np.any(out[~sent] != 0))
+
     def test_water_filling_matches_closed_forms(self):
         # Equal variances: D = n*lambda*2^(-2R/n).
         theta, distortion, active = sk.reverse_water_fill(np.full(50, 2.0), 100.0)

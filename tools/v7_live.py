@@ -3011,6 +3011,12 @@ def _make_auto_profile_decoder(args, fold):
 def run_receive(args):
     if getattr(args, 'image_only', False) and getattr(args, 'headless', False):
         raise ValueError('--image-only cannot be combined with --headless')
+    if getattr(args, 'nested_smooth', None) is not None:
+        if args.nested_smooth < 0:
+            raise ValueError('--nested-smooth must be 0 or more')
+        _ensure_test_modem_path()
+        import nested_fold
+        nested_fold.SMOOTH_PASSES = int(args.nested_smooth)
     runtime_options = getattr(args, 'runtime_options', None)
     if runtime_options is not None:
         identity = runtime_options.snapshot().get('audio_input_identity')
@@ -4689,6 +4695,11 @@ def parser():
                            'plus one frame and a small guard (default: 1)')
     recv.add_argument('--no-tail-memory', action='store_true',
                       help='do not reuse tail coefficients from earlier packets')
+    recv.add_argument('--nested-smooth', type=int, default=None, metavar='PASSES',
+                      help='nested-fold pictures: strength of decoding inside '
+                           'the bounds, which shows the cleanest picture that '
+                           'fits what was received (default 40; 0 shows the '
+                           'decoded values as they are)')
     recv.add_argument('--temporal-fusion', choices=('off', 'held'),
                       default='off',
                       help='average successive packets of a held picture '

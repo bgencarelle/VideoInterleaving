@@ -16,7 +16,7 @@ of this is tape validation.
 | 1 | Reverse loses resolution (stereo) | **Fixed** |
 | 2 | Reverse / forward colour loss | Not reproduced against the base wire; two real causes found (3, 7) |
 | 3 | Band-limited nested packets pass the pilot gate and are shown damaged | **Partly fixed**; gate policy still open |
-| 4 | Grain | **Reduced on held pictures** by dither (part C, done). Single-packet error unchanged; parts A and B still open |
+| 4 | Grain | **Reduced**: decoding inside the bounds (every packet) and dither (held pictures). Parts A and B still open |
 | 5 | Banding | **Fixed** by dither (no dead zone, no fixed contours) |
 | 6 | Stereo nested behind stock slices under a 4 kHz low-pass | Open |
 | 7 | Mono and slices wires carry less chroma than `aspect-fold-500` | Open, by design of the base wires |
@@ -217,6 +217,47 @@ average never engages and the error is that of a single packet: mono about
 1% above plain stairs, stereo equal. So dither fixes the fixed pattern
 (banding, static grain on stills and slow scenes); it does not lower the
 error of one packet. That needs parts A and B, which need a table rebuild.
+
+### Decoding inside the bounds (receiver only)
+
+Code: `smooth_within_bounds` in `tools/v7_sk_fold.py` (numba);
+`FrozenFold.room` and `FrozenFold.clean` in `test_modem_v7/nested_fold.py`.
+No sender or wire change; it works on a single packet, so also in motion.
+
+What arrives is a set of bounds, not values: a folded host lies within half
+a stair of what was decoded, a plain host within its noise, a guest is taken
+as read, and a coefficient that was not sent is unknown. The receiver used
+to show the middle of every bound and zero for everything unsent. It now
+shows the picture of least total variation that fits the bounds (projected
+gradient descent, 40 passes, about 5 ms). Flat areas come out flat and the
+ringing of the cut-off spectrum goes, because the unsent coefficients are
+free to fill in.
+
+- `--nested-smooth PASSES` on the receiver, or `NESTED_FOLD_SMOOTH`: the
+  strength; 0 shows the decoded values as they are.
+- `NESTED_FOLD_SMOOTH_ROOM` (default 0.5): the share of the half stair a
+  folded host may move. 1 is flattest and starts to look painted; 0 leaves
+  every sent value alone and only fills in what was not sent.
+- One channel or a mono sum of the stereo table is shown as decoded: there
+  only base plus or minus detail is bounded, not each coefficient.
+
+Luma error through the live sender and receiver, clean, one packet:
+
+| Picture | Mono nested, as decoded | Mono, shown | Stereo nested, as decoded | Stereo, shown |
+|---|---|---|---|---|
+| Reference face | 0.0755 | 0.0678 | 0.0681 | 0.0604 |
+| Robot movie frame | 0.2584 | 0.2487 | 0.2004 | 0.1918 |
+| 1/f noise (test texture) | 0.0942 | 0.0994 | 0.0819 | 0.0891 |
+
+It costs dense texture with no flat areas about 5 to 9%. Judged by eye on
+the fixture movies: the mottle on flat dark areas is gone and text edges are
+cleaner; fine vertical stripes in `stereo-nested` on the line chart are
+reduced, not removed.
+
+Seen in the same pictures and not addressed: false colour in every mode,
+stock included (green and purple on the black-and-white checkerboard, pink
+on white bars, colour bars smearing upward). That is the chroma of the base
+wires (issue 7), not the fold.
 
 ## 10. Body level since `b147922` (open)
 

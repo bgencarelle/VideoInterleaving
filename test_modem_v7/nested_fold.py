@@ -47,6 +47,7 @@ table simply stays on the stock mapping.
 import math
 import os
 import threading
+import types
 from pathlib import Path
 
 import sys
@@ -81,7 +82,7 @@ def hadamard():
     return h
 
 
-HADAMARD = hadamard()
+HADAMARD = np.ascontiguousarray(hadamard(), np.float64)
 
 
 def level_row(index, dithered=False):
@@ -90,23 +91,26 @@ def level_row(index, dithered=False):
     return HADAMARD[int(index)-LOWEST+1]*(-1.0 if dithered else 1.0)
 
 
+def _f8(values):
+    """A contiguous float64 array: what every kernel takes."""
+    return np.ascontiguousarray(values, np.float64)
+
+
+_NONE = np.zeros(0)
+
+
 def read_signature(unit):
     """(score, level, residual rms, stock score, dithered) from signature
     slots already divided by the profile's pattern and signature amplitude
     (so a stock packet reads all ones)."""
-    unit = np.asarray(unit, float)
-    correlations = HADAMARD@unit/len(unit)
-    row = int(np.argmax(np.abs(correlations[1:])))+1
-    sign = -1.0 if correlations[row] < 0 else 1.0
-    residual = float(np.sqrt(np.mean((unit-sign*HADAMARD[row])**2)))
-    return (float(abs(correlations[row])), row-1+LOWEST, residual,
-            float(correlations[0]), sign < 0)
+    score, row, residual, stock, dithered = sk.read_signature(_f8(unit), HADAMARD)
+    return float(score), int(row)-1+LOWEST, float(residual), float(stock), bool(dithered)
 
 
 def loudness(symbols):
     """Noise multiplier of a packet: the sender holds every packet at one
     audio level, so slot noise scales with the slots' own size."""
-    return max(.5, 1.2*float(np.sqrt(np.mean(np.square(symbols)))))
+    return float(sk.loudness(_f8(symbols)))
 
 
 class FrozenFold:
@@ -122,22 +126,26 @@ class FrozenFold:
     PAIRED = ('detail_position', 'ride', 'common', 'differ')
 
     def __init__(self, arrays):
+        # Table loading (once): every array is stored in the type and layout
+        # the kernels take, so nothing is converted per packet.
+        integers = ('model_index', 'host_position', 'level', 'host_sector', 'guest_position',
+                    'guest_slot', 'guest_sector', 'guest_band', 'detail_position')
         for name in self.FIELDS:
-            setattr(self, name, np.ascontiguousarray(arrays[name]))
+            kind = np.bool_ if name == 'member' else np.int64 if name in integers else np.float64
+            setattr(self, name, np.ascontiguousarray(arrays[name], kind))
         self.paired = all(name in arrays for name in self.PAIRED)
+        self.slots = len(self.host_position)
         for name in self.PAIRED:
-            setattr(self, name, np.ascontiguousarray(arrays[name]) if self.paired else None)
-        self.level = self.level.astype(np.int64)
-        self.host_sector = self.host_sector.astype(np.int64)
-        self.member = self.member.astype(np.bool_)
+            kind = np.int64 if name in integers else np.float64
+            setattr(self, name, np.ascontiguousarray(arrays[name], kind) if self.paired
+                    else np.zeros(self.slots, kind))
         self.inverse = sk.expand_table(self.compander)
         self.density_sum = sk.self_convolved(self.density)
         self.sectors = self.law.shape[0]
         self.legs = self.guest_position.shape[0]
-        self.slots = len(self.host_position)
         self._draw = np.random.default_rng(20261006).standard_normal(self.slots)
         # Stair offsets, within half a step, one set per dither phase.
-        self._dither = (np.random.default_rng(20261007).uniform(
+        self._dither = np.ascontiguousarray(np.random.default_rng(20261007).uniform(
             -.5, .5, (DITHER_PHASES, self.slots))*self.step*(self.level > 0))
         mask = np.zeros(LUMA, bool)
         mask[self.host_position] = True
@@ -146,54 +154,72 @@ class FrozenFold:
             mask[self.detail_position[self.ride > 0]] = True
         mask.setflags(write=False)
         self.sent_mask = mask
+        rows, cols = sk.dct_matrix(96), sk.dct_matrix(LUMA//96)
+        self._transforms = (rows, np.ascontiguousarray(rows.T),
+                            cols, np.ascontiguousarray(cols.T))
 
     # ------------------------------------------------------------ both ends
     def _activity(self, hosts):
-        total, count = np.zeros(self.sectors), np.zeros(self.sectors)
-        picked = hosts[self.member]
-        np.add.at(total, self.host_sector[self.member], picked*picked)
-        np.add.at(count, self.host_sector[self.member], 1.0)
-        return np.maximum(np.sqrt(total/np.maximum(count, 1.0)), .05)
+        return sk.sector_activity(_f8(hosts), self.member, self.host_sector, self.sectors)
 
     def _guest_scale(self, activity, leg):
-        law = self.law[self.guest_sector[leg], self.guest_band]
-        value = np.exp(law[:, 0]+law[:, 1]*np.log(activity[self.guest_sector[leg]]))
-        return np.clip(value, self.limits[0], self.limits[1])
+        return sk.guest_scales(activity, self.law, self.guest_sector[leg], self.guest_band,
+                               self.limits[0], self.limits[1])
 
     def offset(self, phase, leg=0):
         """Stair offsets of a dithered packet (None: plain stairs).  The
         second channel's are the first's negated."""
         if phase is None:
             return None
-        return np.ascontiguousarray(
-            (-1.0 if leg == 1 else 1.0)*self._dither[int(phase) % DITHER_PHASES])
+        return sk.dither_offsets(self._dither[int(phase) % DITHER_PHASES],
+                                 -1.0 if leg == 1 else 1.0)
 
     def _stairs(self, hosts, offset=None):
         """Host values as a slip-free receiver decodes them."""
-        hosts = np.ascontiguousarray(hosts, float)
         if offset is not None:
-            return sk.stair_values_dithered(hosts, self.level, self.step, offset)
-        return sk.stair_values(hosts, self.level, self.step)
+            return sk.stair_values_dithered(_f8(hosts), self.level, self.step, offset)
+        return sk.stair_values(_f8(hosts), self.level, self.step)
 
     def _soft(self, values, sigma, density, offset=None):
-        values = np.ascontiguousarray(values, float)
-        sigma = np.ascontiguousarray(sigma, float)
         if offset is not None:
             return sk.soft_decode_frame_dithered(
-                values, self.level, self.step, self.scale, self.alpha, sigma,
+                _f8(values), self.level, self.step, self.scale, self.alpha, _f8(sigma),
                 density, self.inverse, offset)
-        return sk.soft_decode_frame(values, self.level, self.step, self.scale,
-                                    self.alpha, sigma, density, self.inverse)
+        return sk.soft_decode_frame(_f8(values), self.level, self.step, self.scale,
+                                    self.alpha, _f8(sigma), density, self.inverse)
+
+    def room(self, level, sigma, count=1, joined=True):
+        """How far each luma coefficient (flat 7,680) may lie from its
+        decoded value: infinite where nothing was sent, half a stair for a
+        folded host (less once ``count`` dithered packets are averaged),
+        the noise for a plain host, nothing for a guest.  None when the
+        bounds are not known per coefficient (one channel, or a mono sum, of
+        a two-channel table: only base plus or minus detail is bounded)."""
+        if self.paired and not joined:
+            return None
+        return sk.coefficient_room(
+            LUMA, self.host_position, self.level, self.step, self.host_sd, self.scale,
+            _f8(sigma), RATIO**level, SMOOTH_ROOM, int(count), self.guest_position,
+            self.ride, self.detail_position, self.paired)
+
+    def clean(self, luma, room, passes=None):
+        """The cleanest picture within ``room`` of the decoded ``luma``."""
+        passes = SMOOTH_PASSES if passes is None else int(passes)
+        if passes <= 0 or room is None:
+            return luma
+        return sk.smooth_within_room(_f8(luma), room, 96, *self._transforms, passes,
+                                     SMOOTH_EDGE, SMOOTH_RATE)
 
     # --------------------------------------------------------------- sender
     def _normalised(self, plane, index, leg=0):
         factor = RATIO**index
-        flat = np.asarray(plane, float).ravel()
-        value = flat[self.host_position]
-        if self.paired:
-            # The stock slices slot: base plus (left) or minus (right) detail.
-            value = value+(1.0 if leg == 0 else -1.0)*self.ride*flat[self.detail_position]
-        return (value-self.host_mean)/(self.host_sd*factor), flat, factor
+        flat = _f8(plane).ravel()
+        # Two-channel tables: the stock slices slot, base plus (left) or
+        # minus (right) detail.
+        sign = (1.0 if leg == 0 else -1.0) if self.paired else 0.0
+        hosts = sk.normalised_hosts(flat, self.host_position, self.host_mean, self.host_sd,
+                                    factor, self.ride, self.detail_position, sign)
+        return hosts, flat, factor
 
     def encode(self, plane, index, leg=0, phase=None):
         """Unit-power luma slot values for one channel.  ``plane``: the 96x80
@@ -202,41 +228,31 @@ class FrozenFold:
         hosts, flat, factor = self._normalised(plane, index, leg)
         offset = self.offset(phase, leg)
         scale = self._guest_scale(self._activity(self._stairs(hosts, offset)), leg)
-        guests = flat[self.guest_position[leg]]/(self.guest_sd[leg]*factor*scale)
-        b = np.zeros(self.slots)
-        b[self.guest_slot] = guests
+        guests = sk.normalised_guests(flat, self.guest_position[leg], self.guest_sd[leg],
+                                      self.guest_slot, scale, factor, self.slots)
         if offset is not None:
-            return sk.encode_frame_dithered(
-                np.ascontiguousarray(hosts, float), b, self.level, self.step,
-                self.scale, self.alpha, self.compander, offset)
-        return sk.encode_frame(hosts, b, np.zeros(self.slots), self.level, self.step,
+            return sk.encode_frame_dithered(hosts, guests, self.level, self.step,
+                                            self.scale, self.alpha, self.compander, offset)
+        return sk.encode_frame(hosts, guests, _NOTHING(self.slots), self.level, self.step,
                                self.scale, self.alpha, 3, .25, self.compander, 1.0)
 
     def choose_level(self, plane):
         """The ladder level with the least error in a trial decode at the
         noise that packet will meet (nearest-stair decode, fixed draw)."""
-        best, chosen = np.inf, 0
-        flat = np.asarray(plane, float).ravel()
-        for index in range(LOWEST, HIGHEST+1):
-            hosts, _, factor = self._normalised(flat, index)
-            scale = self._guest_scale(self._activity(self._stairs(hosts)), 0)
-            guests = flat[self.guest_position[0]]/(self.guest_sd[0]*factor*scale)
-            b = np.zeros(self.slots)
-            b[self.guest_slot] = guests
-            symbols = sk.encode_frame(hosts, b, np.zeros(self.slots), self.level, self.step,
-                                      self.scale, self.alpha, 3, .25, self.compander, 1.0)
-            received = symbols+loudness(symbols)*self.noise*self._draw
-            got_hosts, got = sk.hard_decode_frame(received, self.level, self.step,
-                                                  self.scale, self.alpha, self.inverse)
-            got_scale = self._guest_scale(self._activity(got_hosts), 0)
-            error = factor*factor*(
-                float(np.sum((self.host_sd*(got_hosts-hosts))**2)) +
-                float(np.sum((self.guest_sd[0]*(got[self.guest_slot]*got_scale-guests*scale))**2)))
-            if error < best:
-                best, chosen = error, index
-        return chosen
+        return int(sk.choose_level(
+            _f8(plane).ravel(), LOWEST, HIGHEST, RATIO, self.host_position, self.host_mean,
+            self.host_sd, self.level, self.step, self.scale, self.alpha, self.compander,
+            self.inverse, self.member, self.host_sector, self.sectors, self.law,
+            self.guest_sector[0], self.guest_band, self.limits[0], self.limits[1],
+            self.guest_position[0], self.guest_sd[0], self.guest_slot, self.noise, self._draw,
+            self.ride, self.detail_position, 1.0 if self.paired else 0.0))
 
     # ------------------------------------------------------------- receiver
+    def _place_guests(self, out, leg, hosts, guests, factor):
+        sk.place_guests(out, self.guest_position[leg], guests, self.guest_slot,
+                        self._guest_scale(self._activity(hosts), leg),
+                        self.guest_sd[leg], factor)
+
     def decode(self, readings, index, phase=None, averaged=False):
         """Luma coefficients (flat 7,680) from what arrived.  ``phase``: the
         dither phase of a dithered packet, or None for plain stairs.
@@ -249,10 +265,9 @@ class FrozenFold:
         Noise is per slot, in units of the slot's design signal.
         """
         factor = RATIO**index
-        out = np.zeros(LUMA)
-        alpha = self.alpha
         if self.paired:
             return self._decode_paired(readings, factor, phase, averaged)
+        out = np.zeros(LUMA)
         if 'sum' in readings:
             # Opposite offsets on the two channels cancel in their sum.
             values, sigma = readings['sum']
@@ -263,67 +278,54 @@ class FrozenFold:
         elif len(readings) == 2:
             (left, sigma_left), (right, sigma_right) = readings[0], readings[1]
             hosts, first, second = sk.soft_decode_pair(
-                np.ascontiguousarray(left, float), np.ascontiguousarray(right, float),
-                self.level, self.step, self.scale, alpha,
-                np.ascontiguousarray(sigma_left, float),
-                np.ascontiguousarray(sigma_right, float), self.density, self.inverse)
+                _f8(left), _f8(right), self.level, self.step, self.scale, self.alpha,
+                _f8(sigma_left), _f8(sigma_right), self.density, self.inverse)
             guests = {0: first, 1: second}
         else:
             (leg, (values, sigma)), = readings.items()
             hosts, got = self._soft(values, sigma, self.density, self.offset(phase, leg))
             guests = {leg: got}
-        out[self.host_position] = self.host_mean+hosts*self.host_sd*factor
-        activity = self._activity(hosts)
+        sk.place_hosts(out, self.host_position, self.host_mean, hosts, self.host_sd, factor)
         for leg, got in guests.items():
-            out[self.guest_position[leg]] = (got[self.guest_slot]*self._guest_scale(activity, leg) *
-                                             self.guest_sd[leg]*factor)
+            self._place_guests(out, leg, hosts, got, factor)
         return out
-
 
     def _decode_paired(self, readings, factor, phase=None, averaged=False):
         """Two-channel tables: each channel is decoded on its own stairs,
         then base and detail are separated as the stock slices profile does,
         weighted by what each channel's noise left of them."""
         out = np.zeros(LUMA)
-        lam = self.common+self.differ
-        quantised = (0.0 if averaged else
-                     np.where(self.level > 0, self.step**2/12.0, 0.0))
         got = {}
         for key, reading in readings.items():
-            values, sigma = reading[0], np.ascontiguousarray(reading[1], float)
+            sigma = _f8(reading[1])
             if key == 'sum':
-                hosts, guests = self._soft(values, sigma, self.density_sum)
+                hosts, guests = self._soft(reading[0], sigma, self.density_sum)
             else:
-                hosts, guests = self._soft(values, sigma, self.density,
+                hosts, guests = self._soft(reading[0], sigma, self.density,
                                            self.offset(phase, key))
-            got[key] = (hosts, guests, lam*(sigma*sigma+quantised))
-        riding = self.ride > 0
-        share = np.where(riding, self.ride, 1.0)
+            got[key] = (hosts, guests, sigma)
+        shared = (self.host_position, self.host_mean, self.host_sd, self.common, self.differ,
+                  self.ride, self.detail_position, factor)
         if 'sum' in got:
-            base, detail = got['sum'][0]*self.host_sd, None
+            sk.place_single(out, got['sum'][0], *shared, 0.0)
         elif len(got) == 2:
-            (left, _, noise_left), (right, _, noise_right) = got[0], got[1]
-            noise = .5*(noise_left+noise_right)
-            already = lam/(lam+noise)
-            base = .5*(left+right)*self.host_sd*np.minimum(
-                self.common/(self.common+.5*noise)/already, 2.0)
-            detail = .5*(left-right)*self.host_sd/share*(
-                self.differ/(self.differ+.5*noise)/already)
+            (left, _, sigma_left), (right, _, sigma_right) = got[0], got[1]
+            sk.place_pair(out, left, right, sigma_left, sigma_right, self.level, self.step,
+                          *shared, bool(averaged))
         else:
             (leg, (hosts, _, _)), = got.items()
-            value = hosts*self.host_sd
-            base = value*self.common/lam
-            detail = (1.0 if leg == 0 else -1.0)*value*self.differ/(lam*share)
-        out[self.host_position] = self.host_mean+base*factor
-        if detail is not None:
-            out[self.detail_position[riding]] = detail[riding]*factor
+            sk.place_single(out, hosts, *shared, 1.0 if leg == 0 else -1.0)
         for leg, (hosts, guests, _) in got.items():
-            if leg == 'sum':
-                continue
-            out[self.guest_position[leg]] = (
-                guests[self.guest_slot]*self._guest_scale(self._activity(hosts), leg) *
-                self.guest_sd[leg]*factor)
+            if leg != 'sum':
+                self._place_guests(out, leg, hosts, guests, factor)
         return out
+
+
+def _NOTHING(slots, _made={}):
+    """A zero array of ``slots`` values (the unused second guest)."""
+    if slots not in _made:
+        _made[slots] = np.zeros(slots)
+    return _made[slots]
 
 
 # Held pictures: a dithered packet's stair error differs from packet to
@@ -355,7 +357,9 @@ class Held:
         self.reset()
 
     def reset(self):
-        self._planes, self._key, self._phase, self._plain = [], None, None, None
+        self._planes = None            # (DITHER_PHASES, luma) ring of decoded pictures
+        self._count = self._next = 0
+        self._key, self._phase, self._hosts = None, None, _NONE
         self.last_count = 0
         self.last_motion = None
 
@@ -365,33 +369,50 @@ class Held:
         if not HOLD or phase is None:
             self.reset()
             return luma
-        plain = fold.level == 0
-        factor = RATIO**level
-        spread = fold.host_sd*factor
-        seen = luma[fold.host_position]
-        # What two packets of one picture differ by: noise, and on folded
-        # hosts the two packets' stair errors.
-        noise = (np.asarray(sigma, float)/fold.scale*spread)**2
-        stair = np.where(plain, 0.0, (fold.step*spread)**2/12.0)
         key = (key, id(fold), level)
         step = None if self._phase is None else (phase-self._phase) % DITHER_PHASES
         still = self._key == key and step in (1, DITHER_PHASES-1)
+        if not still or len(self._hosts) != fold.slots:
+            self._hosts = np.empty(fold.slots)
+            still = False
+        # What two packets of one picture differ by: noise, and on folded
+        # hosts the two packets' stair errors.
+        motion = sk.held_motion(
+            luma, self._hosts if still else _NONE, fold.host_position, fold.level, fold.step,
+            fold.host_sd, fold.scale, _f8(sigma), RATIO**level, HOLD_FLOOR)
         if still:
-            change = (seen-self._plain)**2/(2.0*(noise+stair)+(HOLD_FLOOR*spread)**2)
-            self.last_motion = (float(np.mean(change[plain])) if np.any(plain) else 0.0,
-                                float(np.mean(change[~plain])) if np.any(~plain) else 0.0)
-            still = (self.last_motion[0] < HOLD_MOTION and
-                     self.last_motion[1] < HOLD_STAIR_MOTION)
-        if not still:
-            self._planes = []
-        self._key, self._phase, self._plain = key, phase, seen.copy()
-        self._planes = (self._planes+[luma if averaged is None else averaged()]
-                        )[-DITHER_PHASES:]
-        self.last_count = len(self._planes)
-        if len(self._planes) == 1:
+            self.last_motion = (float(motion[0]), float(motion[1]))
+            still = motion[0] < HOLD_MOTION and motion[1] < HOLD_STAIR_MOTION
+        else:
+            self._hosts[:] = sk.gather(luma, fold.host_position)
+        if not still or self._planes is None or self._planes.shape[1] != len(luma):
+            self._planes = np.empty((DITHER_PHASES, len(luma)))
+            self._count = self._next = 0
+        self._key, self._phase = key, phase
+        self._planes[self._next] = luma if averaged is None else averaged()
+        self._next = (self._next+1) % DITHER_PHASES
+        self._count = min(self._count+1, DITHER_PHASES)
+        self.last_count = self._count
+        if self._count == 1:
             return luma
-        return np.mean(self._planes, axis=0)
+        return sk.mean_of_rows(self._planes, self._count)
 
+
+# Decoding inside the bounds (tools/v7_sk_fold.py, smooth_within_bounds): the
+# picture shown is the cleanest one that fits what was received.  A host on a
+# staircase may move within half a step, a plainly sent coefficient within its
+# noise, a guest not at all, and coefficients that were not sent are free.
+# On dense texture with no flat areas this costs a little (about 5% more
+# luma error on 1/f noise); on the fixtures it lowers the error.
+# SMOOTH_PASSES is the strength (0: show the decoded values as they are);
+# NESTED_FOLD_SMOOTH or the receiver's --nested-smooth sets it.
+SMOOTH_PASSES = int(os.environ.get('NESTED_FOLD_SMOOTH', 40))
+# Share of the half stair a folded host may move.  All of it gives the
+# flattest picture; half of it gave the lowest error on the fixtures and
+# costs dense texture less.
+SMOOTH_ROOM = float(os.environ.get('NESTED_FOLD_SMOOTH_ROOM', .5))
+SMOOTH_EDGE = .01              # pixel difference (of -1..1) that counts as flat
+SMOOTH_RATE = .25              # descent step, as a share of SMOOTH_EDGE
 
 _lock = threading.Lock()
 _cache = {}
@@ -432,16 +453,11 @@ def slot_noise(relative, design, confidence=None, variance=None):
       equaliser overstates clean-link noise, so only SLOT_NOISE_SHARE of it
       is taken.
     """
-    sigma = max(relative, .5)*design
-    own = None
-    if confidence is not None:
-        c = np.clip(np.asarray(confidence, float), 1e-3, 1.0)
-        own = np.sqrt((1-c)/c)
     if variance is not None:
-        own = np.sqrt(np.maximum(np.asarray(variance, float), 0.0))
-    if own is not None:
-        sigma = np.maximum(sigma, SLOT_NOISE_SHARE*own)
-    return sigma
+        return sk.slot_noise(float(relative), design, 2, _f8(variance), SLOT_NOISE_SHARE)
+    if confidence is not None:
+        return sk.slot_noise(float(relative), design, 1, _f8(confidence), SLOT_NOISE_SHARE)
+    return sk.slot_noise(float(relative), design, 0, _NONE, SLOT_NOISE_SHARE)
 
 
 STICKY_PACKETS = 36            # about three seconds of packets
@@ -511,10 +527,8 @@ def packet_noise(residual, design, own=None):
     already attributes to those particular slots (they sit in a damaged band,
     say) is not spread over the whole packet.
     """
-    excess = residual*residual
-    if own is not None:
-        excess -= float(np.mean((SLOT_NOISE_SHARE*np.asarray(own, float))**2))
-    return math.sqrt(max(excess, 0.0))/max(design, 1e-12)
+    return float(sk.packet_noise(float(residual), float(design),
+                                 _NONE if own is None else _f8(own), SLOT_NOISE_SHARE))
 
 
 _SENDING = threading.local()   # sender: counter of the packet being built
@@ -533,13 +547,22 @@ class NestedMonoCodec:
         index = fold.model_index
         if not np.array_equal(np.asarray(stock.kept)[index], fold.host_position):
             raise ValueError('nested fold table does not match this layout')
-        self.index = index
-        self.mu = np.asarray(stock.model.mu)[index]
-        self.sd = np.sqrt(np.asarray(stock.model.lam)[index])
-        self.signature_index = np.asarray(stock.hosts)[-SIGNATURE_SLOTS:]
-        self.signature_sd = np.asarray(stock.sd_host)[-SIGNATURE_SLOTS:]
+        # Set-up, once per codec: slices of the stock model in the type and
+        # layout the kernels take.
+        self.index = np.ascontiguousarray(index, np.int64)
+        self.mu = _f8(np.asarray(stock.model.mu)[index])
+        self.sd = _f8(np.sqrt(np.asarray(stock.model.lam)[index]))
+        self.signature_index = np.ascontiguousarray(
+            np.asarray(stock.hosts)[-SIGNATURE_SLOTS:], np.int64)
+        self.signature_sd = _f8(np.asarray(stock.sd_host)[-SIGNATURE_SLOTS:])
+        self.signature_mu = _f8(np.asarray(stock.model.mu)[self.signature_index])
+        self.pattern = _f8(stock.pattern)
         from folding import SIGNATURE_STEPS
         self.signature_unit = SIGNATURE_STEPS*stock.D/math.sqrt(stock.power)
+        self._unit_factor = _f8(self.pattern/self.signature_unit)
+        self._ones = np.ones(len(self.index))
+        self.design_signature_noise = float(sk.root_mean_square(fold.signature_noise))
+        self.folded_slots = int(np.count_nonzero(fold.level > 0))
         self.last_level = None
         self.last_nested = False
         self.last_dithered = False
@@ -548,10 +571,9 @@ class NestedMonoCodec:
         self.tail_slice = None          # receiver: tail slice of the packet in hand
 
     def _unit(self, xhat, conf):
-        confidence = np.clip(np.asarray(conf, float), 1e-3, 1.0)
-        seen = np.asarray(xhat, float)/confidence
-        return confidence, seen, (seen[self.signature_index]/self.signature_sd /
-                                  self.signature_unit*self.stock.pattern)
+        seen, confidence = sk.unshrink(_f8(xhat), _f8(conf), 1e-3)
+        return confidence, seen, sk.gather_scaled(
+            seen, self.signature_index, self.signature_sd, self._unit_factor)
 
     def begin_packet(self, tail_slice, xhat, conf):
         """Receiver: note the tail slice the packet's metadata names (its
@@ -573,20 +595,20 @@ class NestedMonoCodec:
     def encode_coefficients(self, values, full=None):
         if full is None:
             full = self.stock.grid.forward(values)
-        coefficients = np.array(self.stock.encode_coefficients(values, full), float)
+        coefficients = np.array(self.stock.encode_coefficients(values, full), np.float64)
         if not self.send:
             return coefficients
-        plane = np.asarray(full)[:LUMA]
+        plane = _f8(full)[:LUMA]
         level = self.fold.choose_level(plane)
         # Dithered only inside a packet whose counter is known (see
         # enable_mono); a bare call sends plain stairs.
         counter = getattr(_SENDING, 'counter', None) if DITHER else None
         phase = None if counter is None else int(counter) % DITHER_PHASES
-        coefficients[self.index] = self.mu+self.sd*self.fold.encode(plane, level, 0, phase)
-        coefficients[self.signature_index] = (
-            np.asarray(self.stock.model.mu)[self.signature_index] +
-            self.signature_sd*self.signature_unit*self.stock.pattern *
-            level_row(level, phase is not None))
+        coefficients[self.index] = sk.slot_coefficients(
+            self.mu, self.sd, self.fold.encode(plane, level, 0, phase))
+        coefficients[self.signature_index] = sk.signature_symbols(
+            self.signature_mu, self.signature_sd, self.signature_unit, self.pattern,
+            HADAMARD[int(level)-LOWEST+1], -1.0 if phase is not None else 1.0)
         return coefficients
 
     def decode(self, coeffs, xhat, conf, fallback=True, metadata_confirmed=False):
@@ -600,20 +622,20 @@ class NestedMonoCodec:
             return self.stock.decode(coeffs, xhat, conf, fallback=fallback,
                                      metadata_confirmed=metadata_confirmed)
         fold = self.fold
-        doubt = confidence[self.signature_index]
-        relative = packet_noise(residual*self.signature_unit,
-                                float(np.sqrt(np.mean(fold.signature_noise**2))),
-                                np.sqrt((1-doubt)/doubt))
-        sigma = slot_noise(relative, fold.noise, confidence[self.index])
+        relative = packet_noise(residual*self.signature_unit, self.design_signature_noise,
+                                sk.confidence_noise(confidence, self.signature_index))
+        sigma = slot_noise(relative, fold.noise, sk.gather(confidence, self.index))
         full = self.stock.plain(coeffs)
         self.last_dithered = self.recognition.dithered
         phase = self.recognition.phase(tail_slice) if self.last_dithered else None
-        full[:LUMA] = self.held.update(
-            fold, fold.decode({0: (seen[self.index]/self.sd, sigma)}, level, phase),
+        luma = self.held.update(
+            fold, fold.decode({0: (sk.gather_scaled(seen, self.index, self.sd, self._ones),
+                                   sigma)}, level, phase),
             level, phase, sigma)
+        full[:LUMA] = fold.clean(luma, fold.room(level, sigma, self.held.last_count))
         self.stock.last_score = self.last_score = score
         self.stock.last_noise = self.last_noise = relative
-        self.stock.last_unfolded_slots = self.last_unfolded_slots = int(np.sum(fold.level > 0))
+        self.stock.last_unfolded_slots = self.last_unfolded_slots = self.folded_slots
         self.last_level = level
         return full
 
@@ -674,6 +696,7 @@ def _slice_wire_class():
             self.send, self._path = bool(send), path
             self._level = (None, None)
             self._counter = None
+            self._prepared = {}
             self.nested_fold = 'send' if send else 'receive'
             self.last_nested = False
             self.recognition = Recognition()
@@ -690,6 +713,34 @@ def _slice_wire_class():
                     fold.host_position, self.slots(layout).base[0]):
                 raise ValueError('nested fold table does not match this layout')
             return fold
+
+        def prepared(self, layout):
+            """Set-up, once per layout: slices of the stock slot tables in
+            the type and layout the kernels take."""
+            if layout not in self._prepared:
+                slots, fold = self.slots(layout), self.fold(layout)
+                part = np.ascontiguousarray(np.arange(len(slots.model_mu))[slots.parts[0]], np.int64)
+                hosts = np.ascontiguousarray(slots.fold_hosts[slots.guests:], np.int64)
+                amplitude = stock.SIGNATURE_STEPS*stock.FOLD_STEP/math.sqrt(stock.FOLD_POWER)
+                pattern = _f8(stock.SIGNATURE_PATTERN)
+                transforms = []
+                for rows, cols in stock.v7.V7_GRIDS:
+                    transforms.append((np.ascontiguousarray(stock._dct_matrix(rows).T, np.float64),
+                                       _f8(stock._dct_matrix(cols))))
+                self._prepared[layout] = types.SimpleNamespace(
+                    part=part, part_mu=_f8(slots.model_mu[part]),
+                    part_sd=_f8(np.sqrt(slots.model_lam[part])),
+                    hosts=hosts, host_mu=_f8(slots.model_mu[hosts]),
+                    host_sd=_f8(slots.sd_host[slots.guests:]),
+                    amplitude=amplitude, pattern=pattern,
+                    unit_factor=_f8(pattern/amplitude), model_mu=_f8(slots.model_mu),
+                    lam=_f8(slots.lam[0]),
+                    design=max(float(sk.root_mean_square(fold.signature_noise)), 1e-12)
+                    if fold is not None else 1.0,
+                    transforms=transforms,
+                    base=[np.ascontiguousarray(index, np.int64) for index in slots.base],
+                    pixels=sum(rows*cols for rows, cols in stock.v7.V7_GRIDS))
+            return self._prepared[layout]
 
         def luma_sent_mask(self, layout):
             fold = self.fold(layout) if self.send else None
@@ -712,41 +763,36 @@ def _slice_wire_class():
             fold = self.fold(layout) if self.send else None
             if fold is None:
                 return out
-            slots = self.slots(layout)
+            ready = self.prepared(layout)
             plane = spectra[0]
             # Both channels of a frame share one level: choose it once.
             if self._level[0] is not plane:
                 self._level = (plane, fold.choose_level(plane))
             level = self._level[1]
-            part = slots.parts[0]
             phase = (int(self._counter) % DITHER_PHASES
                      if DITHER and self._counter is not None else None)
             symbols = fold.encode(plane, level, stock.SIDES.index(kind), phase)
-            out[part] = slots.model_mu[part]+np.sqrt(slots.model_lam[part])*symbols
-            hosts = slots.fold_hosts[slots.guests:]
-            out[hosts] = slots.model_mu[hosts]+slots.sd_host[slots.guests:]*(
-                stock.SIGNATURE_STEPS*stock.FOLD_STEP*stock.SIGNATURE_PATTERN *
-                level_row(level, phase is not None))/np.sqrt(stock.FOLD_POWER)
+            out[ready.part] = sk.slot_coefficients(ready.part_mu, ready.part_sd, symbols)
+            out[ready.hosts] = sk.signature_symbols(
+                ready.host_mu, ready.host_sd, ready.amplitude, ready.pattern,
+                HADAMARD[int(level)-LOWEST+1], -1.0 if phase is not None else 1.0)
             return out
 
         # ---------------------------------------------------------- receiver
         def half(self, model, result, channel=None):
             plain = super().half(model, result, channel)
-            slots = self.slots(plain.layout)
+            ready = self.prepared(plain.layout)
             equalized = result.diag.get('mono_fold_eq')
             if equalized is not None:
-                trust = np.clip(np.asarray(equalized[1], float), 1e-3, 1.0)
-                seen = np.asarray(equalized[0], float)/trust
+                seen, trust = sk.unshrink(_f8(equalized[0]), _f8(equalized[1]), 1e-3)
             else:
-                seen = np.asarray(result.coeffs, float)-slots.model_mu
-            hosts = slots.fold_hosts[slots.guests:]
-            unit = (seen[hosts]/slots.sd_host[slots.guests:]*np.sqrt(stock.FOLD_POWER) /
-                    (stock.SIGNATURE_STEPS*stock.FOLD_STEP)*stock.SIGNATURE_PATTERN)
+                seen = sk.subtract(_f8(result.coeffs), ready.model_mu)
+            unit = sk.gather_scaled(seen, ready.hosts, ready.host_sd, ready.unit_factor)
             half = NestedHalf(plain.kind, plain.score, plain.layout, plain.good, plain.noise,
                               plain.damaged, plain.steady, plain.raw, plain.ring)
             own = None
             if equalized is not None:
-                own = np.sqrt((1-trust[hosts])/trust[hosts])
+                own = sk.confidence_noise(trust, ready.hosts)
             half.signature = read_signature(unit)+(own,)
             half.counter = result.diag.get('tail_slice')
             return half
@@ -779,22 +825,21 @@ def _slice_wire_class():
             if not self.last_nested:
                 self.held.reset()
                 return super().values(halves)
-            slots = self.slots(chosen[0].layout)
-            lam = slots.lam[0]
-            unit_scale = stock.SIGNATURE_STEPS*stock.FOLD_STEP/np.sqrt(stock.FOLD_POWER)
-            design = max(float(np.sqrt(np.mean(fold.signature_noise**2))), 1e-12)
+            ready = self.prepared(chosen[0].layout)
+            lam, unit_scale, design = ready.lam, ready.amplitude, ready.design
             kinds = [half.kind for half in chosen]
             leak = self.nested_crosstalk(chosen) if sorted(kinds) == sorted(stock.SIDES) else 0.0
-            seen = {half.kind: half.raw[0][0] for half in chosen}
+            seen = {half.kind: _f8(half.raw[0][0]) for half in chosen}
             if leak:
-                a, b = seen['left'], seen['right']
-                seen = {'left': (a-leak*b)/(1-leak), 'right': (b-leak*a)/(1-leak)}
+                a, b = sk.undo_crosstalk(seen['left'], seen['right'], float(leak))
+                seen = {'left': a, 'right': b}
             readings = {}
             for half, (_, _, residual, _, _, own) in zip(chosen, signed):
+                values, variance = sk.scaled_reading(seen[half.kind], _f8(half.raw[0][1]), lam)
                 sigma = slot_noise(packet_noise(residual*unit_scale, design, own), fold.noise,
-                                   variance=half.raw[0][1]/np.maximum(lam, 1e-30))
+                                   variance=variance)
                 key = 'sum' if half.kind == 'sum' else stock.SIDES.index(half.kind)
-                readings[key] = (seen[half.kind]/np.sqrt(lam), sigma)
+                readings[key] = (values, sigma)
             if 'sum' in readings:
                 readings = {'sum': readings['sum']}
             named = [half.counter for half in chosen if half.counter is not None]
@@ -805,17 +850,19 @@ def _slice_wire_class():
                 next(iter(readings.values()))[1],
                 key=(chosen[0].layout, tuple(sorted(map(str, readings)))),
                 averaged=lambda: fold.decode(readings, level, phase, averaged=True))
-            out = []
+            worst = None
+            for _, sigma in readings.values():
+                worst = sigma if worst is None else sk.larger(worst, sigma)
+            luma = fold.clean(luma, fold.room(level, worst, self.held.last_count,
+                                              joined=len(readings) == 2))
+            out = np.empty(ready.pixels)
+            start = 0
             for plane, ((base, _), (rows, cols)) in enumerate(
                     zip(self.estimate(chosen), stock.v7.V7_GRIDS)):
-                if plane == 0:
-                    spectrum = luma
-                else:
-                    spectrum = np.zeros(rows*cols)
-                    spectrum[slots.base[plane]] = base
-                out.append((stock._dct_matrix(rows).T @ spectrum.reshape(rows, cols) @
-                            stock._dct_matrix(cols)).ravel())
-            return np.concatenate(out)
+                spectrum = _f8(luma) if plane == 0 else sk.scatter(
+                    rows*cols, ready.base[plane], _f8(base))
+                start = sk.inverse_plane(spectrum, out, start, *ready.transforms[plane])
+            return out
 
     return NestedSliceWire
 
