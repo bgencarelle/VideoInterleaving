@@ -860,7 +860,111 @@ def _apply_row_bias(rows, cols, bias, shape):
             max(8, min(int(round(cols / k)), shape[1])))
 
 
-def preview_frame(samples, size=384, spot=None, exposure=1.0, max_split=192):
+@njit(cache=True, nogil=True, fastmath=False)
+def _preview_splat_kernel(samples, size, max_split, out):
+    """Accumulate energy-preserving pixel splats without expanded index arrays."""
+    count = len(samples) - 1
+    x0 = np.empty(count, dtype=np.float32)
+    y0 = np.empty(count, dtype=np.float32)
+    x1 = np.empty(count, dtype=np.float32)
+    y1 = np.empty(count, dtype=np.float32)
+    subdivisions = np.empty(count, dtype=np.int32)
+    out.fill(0.0)
+    total = 0
+    scale = np.float32(0.5 * (size - 1))
+    one = np.float32(1.0)
+    for i in range(count):
+        x0[i] = np.float32(np.float32(samples[i, 0] + one) * scale)
+        y0[i] = np.float32(np.float32(one - samples[i, 1]) * scale)
+        x1[i] = np.float32(np.float32(samples[i + 1, 0] + one) * scale)
+        y1[i] = np.float32(np.float32(one - samples[i + 1, 1]) * scale)
+        dx = np.float32(x1[i] - x0[i])
+        dy = np.float32(y1[i] - y0[i])
+        distance = np.float32(np.sqrt(np.float32(dx * dx + dy * dy)))
+        pieces = int(np.ceil(distance))
+        if pieces < 1:
+            pieces = 1
+        if pieces > max_split:
+            pieces = max_split
+        subdivisions[i] = pieces
+        total += pieces
+
+    for i in range(count):
+        pieces = subdivisions[i]
+        weight = np.float32(1.0 / pieces)
+        dx = np.float32(x1[i] - x0[i])
+        dy = np.float32(y1[i] - y0[i])
+        for j in range(pieces):
+            t = (j + 0.5) / pieces
+            x = int(x0[i] + dx * t)
+            y = int(y0[i] + dy * t)
+            if x < 0:
+                x = 0
+            elif x >= size:
+                x = size - 1
+            if y < 0:
+                y = 0
+            elif y >= size:
+                y = size - 1
+            out[y, x] += float(weight)
+    return total
+
+
+@njit(cache=True, nogil=True, fastmath=False)
+def _preview_tonemap_kernel(acc, gain, out):
+    """Fuse preview tone curve, phosphor tint, clip and uint8 conversion."""
+    h, w = acc.shape
+    g = np.float32(gain)
+    for y in range(h):
+        for x in range(w):
+            value = np.float32(acc[y, x])
+            v = np.float32(1.0 - np.exp(np.float32(-value * g)))
+            red = np.float32(v * np.float32(0.35) + np.float32(0.03))
+            green = np.float32(v + np.float32(0.03))
+            blue = np.float32(v * np.float32(0.25) + np.float32(0.03))
+            if red < 0.0:
+                red = 0.0
+            elif red > 1.0:
+                red = 1.0
+            if green < 0.0:
+                green = 0.0
+            elif green > 1.0:
+                green = 1.0
+            if blue < 0.0:
+                blue = 0.0
+            elif blue > 1.0:
+                blue = 1.0
+            out[y, x, 0] = np.uint8(red * np.float32(255.0))
+            out[y, x, 1] = np.uint8(green * np.float32(255.0))
+            out[y, x, 2] = np.uint8(blue * np.float32(255.0))
+    return out
+
+
+class PreviewWorkspace:
+    """Reusable bounded scratch/output storage for repeated preview renders."""
+
+    def __init__(self, size):
+        self.size = int(size)
+        if self.size < 1:
+            raise ValueError("preview size must be positive")
+        shape = (self.size, self.size)
+        self.splats = np.empty(shape, dtype=np.float64)
+        self.blur_input = np.empty(shape, dtype=np.float32)
+        self.blurred = np.empty(shape, dtype=np.float32)
+        self.rgb = np.empty(shape + (3,), dtype=np.uint8)
+
+
+def _warm_preview_kernels():
+    """Compile preview production signatures before preview rendering starts."""
+    workspace = PreviewWorkspace(8)
+    _preview_splat_kernel(
+        np.zeros((2, 2), dtype=np.float32), 8, 4, workspace.splats)
+    _preview_tonemap_kernel(
+        workspace.blur_input, 1.0, workspace.rgb)
+
+
+def preview_frame(samples, size=384, spot=None, exposure=1.0, max_split=192,
+                  workspace=None):
     """Simulated scope screen: splat beam positions, blur, tonemap, tint green.
 
     THE SPLAT IS THE POINT.  Dwell is brightness -- render_luma spends more
@@ -890,6 +994,9 @@ def preview_frame(samples, size=384, spot=None, exposure=1.0, max_split=192):
     demonstrated what happens when one algorithm has two implementations.
     """
     import cv2
+    size = int(size)
+    if size < 1:
+        raise ValueError("preview size must be positive")
     samples = np.asarray(samples, dtype=np.float32)
     if len(samples) < 2:
         return np.zeros((size, size, 3), np.uint8)
@@ -917,33 +1024,20 @@ def preview_frame(samples, size=384, spot=None, exposure=1.0, max_split=192):
         # discontinuous one.
         spot = max(0.6, 0.40 * size / _rows)
 
-    px = (samples[:, 0] + 1.0) * 0.5 * (size - 1)
-    py = (1.0 - samples[:, 1]) * 0.5 * (size - 1)     # y up -> row down
-    x0, x1 = px[:-1], px[1:]
-    y0, y1 = py[:-1], py[1:]
-
-    # max_split bounds the cost: a single sample cannot cost more than this
-    # many splats however far the beam jumped.  Only a flyback gets near it.
-    d = np.hypot(x1 - x0, y1 - y0)
-    m = np.clip(np.ceil(d), 1, max_split).astype(np.int64)
-
-    seg = np.repeat(np.arange(len(m)), m)
-    starts = np.concatenate(([0], np.cumsum(m)[:-1]))
-    j = np.arange(int(m.sum())) - np.repeat(starts, m)
-    t = (j + 0.5) / m[seg]
-
-    xs = np.clip(x0[seg] + (x1[seg] - x0[seg]) * t, 0, size - 1).astype(np.int32)
-    ys = np.clip(y0[seg] + (y1[seg] - y0[seg]) * t, 0, size - 1).astype(np.int32)
-    wt = (1.0 / m[seg]).astype(np.float32)
-
-    acc = np.bincount(ys * size + xs, weights=wt,
-                      minlength=size * size).reshape(size, size)
-    acc = cv2.GaussianBlur(acc.astype(np.float32), (0, 0), spot)
+    samples = np.ascontiguousarray(samples, dtype=np.float32)
+    if workspace is None:
+        workspace = PreviewWorkspace(size)
+    elif workspace.size != size:
+        raise ValueError("preview workspace size does not match requested size")
+    _splat_count = _preview_splat_kernel(
+        samples, size, int(max_split), workspace.splats)
+    np.copyto(workspace.blur_input, workspace.splats, casting="unsafe")
+    cv2.GaussianBlur(workspace.blur_input, (0, 0), spot,
+                     dst=workspace.blurred)
+    acc = workspace.blurred
     lit = acc[acc > 0]
     gain = exposure * 2.5 / max(float(np.percentile(lit, 75)), 1e-6) if lit.size else 1.0
-    v = 1.0 - np.exp(-acc * gain)
-    img = np.stack([v * 0.35, v * 1.0, v * 0.25], axis=-1) + 0.03
-    return (np.clip(img, 0, 1) * 255).astype(np.uint8)
+    return _preview_tonemap_kernel(acc, gain, workspace.rgb)
 
 
 def calibrate(main_libs, float_libs, n_samples, density=1.0, trim=0.02,

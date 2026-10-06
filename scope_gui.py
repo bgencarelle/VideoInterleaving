@@ -227,6 +227,7 @@ class ScopeGUI:
         self._rendered_exposure = None
         self._rendered_spot_width = None
         self._font_cache = {}
+        self._canvas = None
         self.texture = None
         self.program = None
         self.vao = None
@@ -402,9 +403,10 @@ class ScopeGUI:
 
     def _preview_loop(self):
         try:
-            from scope_bake import preview_frame
+            from scope_bake import PreviewWorkspace, _warm_preview_kernels, preview_frame
             from scope_out import Scope
             import numpy as np
+            _warm_preview_kernels()
         except Exception as exc:
             with self._preview_lock:
                 self._preview_error = f"Preview unavailable: {exc}"
@@ -432,7 +434,12 @@ class ScopeGUI:
                     >= 1.0 / PREVIEW_RENDER_HZ)
                 if self._preview_points is not None and render_pending and render_due:
                     try:
+                        workspace = getattr(self, "_preview_workspace", None)
+                        if workspace is None or workspace.size != target_size:
+                            workspace = PreviewWorkspace(target_size)
+                            self._preview_workspace = workspace
                         kwargs = {"size": target_size, "exposure": exposure}
+                        kwargs["workspace"] = workspace
                         if spot_width != 1.0:
                             points_array = np.asarray(self._preview_points)
                             rows = max(2, len(np.unique(
@@ -441,7 +448,10 @@ class ScopeGUI:
                                 0.6, 0.40 * target_size / rows * spot_width)
                         frame = preview_frame(self._preview_points, **kwargs)
                         with self._preview_lock:
-                            self._preview_rgb = frame
+                            # Detach from the workspace buffer: the worker reuses
+                            # it on the next render while the UI may still upload
+                            # this snapshot on the presentation thread.
+                            self._preview_rgb = frame.copy()
                             self._preview_error = ""
                         self._rendered_seq = self._preview_seq
                         self._rendered_exposure = exposure
@@ -565,7 +575,7 @@ class ScopeGUI:
         self.small = self._font(round(13 * ui_scale))
         self.tiny = self._font(round(11 * ui_scale), mono=True)
         layout = responsive_layout(width, height, ui_scale)
-        image = self.Image.new("RGBA", (width, height), (12, 19, 26, 255))
+        image = self._canvas_for_size(width, height)
         draw = self.ImageDraw.Draw(image)
         state = self._state
         metrics = self._metrics
@@ -833,6 +843,15 @@ class ScopeGUI:
                   fill=(151, 169, 179), font=self.tiny)
 
         self._present(image)
+
+    def _canvas_for_size(self, width, height):
+        """Reuse the native UI backing image until the window is resized."""
+        image = self._canvas
+        if image is None or image.size != (width, height):
+            image = self.Image.new("RGBA", (width, height))
+            self._canvas = image
+        image.paste((12, 19, 26, 255), (0, 0, width, height))
+        return image
 
     def _draw_image_only(self, image, draw, width, height):
         """Letterbox the square phosphor preview across the whole window."""

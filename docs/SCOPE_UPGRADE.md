@@ -4522,3 +4522,47 @@ slower than 30 output windows; the nominal-rate policy previously accepted by th
 user treats that as effectively 30, but it is not evidence above 30. Treat the
 offline scope comparison as the remaining release validation, not as a blocker
 to further software implementation.
+
+---
+
+## Appendix A050 — S6 CPU-preview baseline and first optimization — 2026-10-06
+
+Started S6 against decoded fixture frame 150 from
+`modem_tests/fixtures/v7_pixel_motion_16x9.mp4`, at 384/680/1,080/1,600 px,
+using raster, stipple, stochastic, and threshold-contour vector-like paths (3
+timed repetitions after warmup). This is renderer-only evidence; the contour path
+is explicitly not a production XY bake. The original NumPy renderer measured
+1,600-pixel CPU p50s of 116.35 ms raster, 58.31 ms contour, 84.07 ms stochastic,
+and 52.87 ms stipple. Python-tracked peak allocation was 114–121 MB at this size.
+
+The first S6 pass replaces expanded per-splat repeat/index/weight arrays with a
+Numba accumulation kernel; fuses tone mapping, phosphor tint, clipping and uint8
+conversion; and adds a reusable bounded scratch/output workspace. Native preview
+warms production Numba signatures before rendering, retains a detached frame
+snapshot for cross-thread safety, and reuses its RGBA canvas across redraws.
+The web renderer also warms the kernels before its first rendered frame. Existing
+OpenCV Gaussian blur and percentile normalization remain unchanged.
+
+Post-change 1,600-pixel CPU p50s were 99.61 ms raster, 33.97 ms contour, 59.57 ms
+stochastic, and 30.74 ms stipple. At that size the Python-tracked peaks were
+59.7 MB raster, 52.5 MB contour, 53.0 MB stochastic, and 51.8 MB stipple. Thus
+the first pass reduced p50 by approximately 14%, 42%, 29%, and 42% respectively;
+allocation reductions are substantial but the raster CPU cost remains far above
+the current 2-Hz preview interval. Cold Numba compilation is excluded from these
+steady-state measurements.
+
+Pixel parity against a retained legacy NumPy reference passed exactly for the
+tested path, including default spot selection, Gaussian boundary behavior,
+exposure, and final RGB bytes. Reusable workspace identity, exposure changes,
+empty traces and resize mismatch are covered by tests. Preview/web/native-GUI
+focused verification: **22 passed**. Raw post-change sweep:
+`tmp/scope-s6-preview-optimized.json`, SHA256
+`932b861db4dff6805243de9407f4de806e5ee6037936571100a9bc369abac983`; harness
+`tmp/scope_s6_preview_measure.py`, SHA256
+`c5bf2a030e110f52b8066781c1ff6414257176f7940139e3a51934421d0f8fff`.
+
+**S6 remains active.** Remaining charter evidence includes native redraw/upload
+avoidance, direct headless and software-GL comparison, browser accumulation and
+continuous-tap audit, measured preview age/cadence and output impact, and D0
+comparison. In particular, a 1,600-pixel raster preview still costs about 100 ms
+CPU per render; do not raise its refresh cap based on this partial result.

@@ -227,12 +227,13 @@ def _scope_jpeg(size, pts=None, quality=82, exposure=1.0):
     try:
         import cv2
         from scope_out import Scope
-        from scope_bake import preview_frame
+        from scope_bake import _warm_preview_kernels, preview_frame
         if pts is None:
             Scope.want_tap(3.0)
             _, pts = Scope.read_tap()
         if pts is None:
             return None
+        _warm_preview_kernels()
         img = preview_frame(pts, size=size, exposure=exposure)
         ok, buf = cv2.imencode(".jpg", img[:, :, ::-1],
                                [cv2.IMWRITE_JPEG_QUALITY, quality])

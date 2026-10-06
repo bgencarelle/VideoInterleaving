@@ -1,6 +1,8 @@
 import unittest
 from types import SimpleNamespace
 
+from PIL import Image
+
 from scope_controls import KeyMap
 from scope_gui import (ScopeGUI, fit_square_image, make_slider_spec,
                        responsive_layout, slider_default_x,
@@ -9,6 +11,19 @@ from scope_gui import (ScopeGUI, fit_square_image, make_slider_spec,
 
 
 class ScopeSliderMathTests(unittest.TestCase):
+    def test_native_canvas_is_reused_and_recreated_after_resize(self):
+        gui = ScopeGUI.__new__(ScopeGUI)
+        gui.Image = Image
+        gui._canvas = None
+        first = gui._canvas_for_size(32, 24)
+        first.putpixel((0, 0), (255, 0, 0, 255))
+        same = gui._canvas_for_size(32, 24)
+        self.assertIs(first, same)
+        self.assertEqual(same.getpixel((0, 0)), (12, 19, 26, 255))
+        resized = gui._canvas_for_size(40, 24)
+        self.assertIsNot(first, resized)
+        self.assertEqual(resized.size, (40, 24))
+
     def test_default_tick_marks_the_startup_value(self):
         spec = make_slider_spec("density", 1.0)
         left, right = 40, 440
