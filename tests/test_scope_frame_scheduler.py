@@ -489,6 +489,26 @@ def test_standalone_candidate_commits_only_after_scope_accepts_it():
     np.testing.assert_array_equal(emitter._end, frame[-1])
 
 
+def test_timed_raster_queue_does_not_anchor_frame_to_handoff():
+    from tools.scope_screen import _queue_raster_candidate
+
+    class QueueScope:
+        frames_accepted = 0
+        received_handoff = "unset"
+
+        def show_frame(self, frame, handoff=None):
+            self.received_handoff = handoff
+            self.frames_accepted += 1
+            return np.asarray(frame[-1], dtype=np.float32).copy()
+
+    emitter = TraceEmitter(96000, 3200, grid=(8, 12), traversal_hz=30)
+    frame = emitter.emit(np.ones((8, 12), dtype=np.float32), commit=False)
+    scope = QueueScope()
+    assert _queue_raster_candidate(
+        scope, emitter, frame, handoff=np.array([0.25, -0.5]))
+    assert scope.received_handoff is None
+
+
 def test_scope_internal_lowpass_returns_chained_output_endpoint():
     samples = 3200
     luminance = np.ones((16, 24), dtype=np.float32)
