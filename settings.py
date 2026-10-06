@@ -129,6 +129,8 @@ SCOPE_CHANNELS = (1, 2)   # 1-based PortAudio X,Y outputs; e.g. (18, 19)
 SCOPE_LIVE_SIZE = 128     # live-image thumbnail width; bake format is unchanged
 SCOPE_FPS = None          # None -> follow IPS
 SCOPE_SAMPLES = None      # explicit samples/trace; incompatible with mix
+SCOPE_GEOMETRY_SAMPLES = None  # opt-in independent trajectory detail budget
+SCOPE_TRAVERSAL_HZ = None     # opt-in geometry traversal clock
 SCOPE_RENDER_MODE = "vector"  # vector | raster | stochastic | stipple | fusion
                           # Stochastic is a luminance-weighted XY walk; fusion
                           # multiplexes corresponding V/R/S entries by light.

@@ -4119,3 +4119,118 @@ and investigate appearance controls with preview and waveform semantics explicit
 Use the accepted S4 tree and captured D0 as comparison references. S5 implementation
 and release are not claimed by this handoff. Preserve test channels 24/25 and
 product default `SCOPE_CHANNELS = (1, 2)`.
+
+---
+
+## Appendix A044 — S5 time-based raster trajectory implementation — 2026-10-06
+
+**Status: S5 implementation checkpoint; not a full S5 exit.** The user requested
+one bounded implementation pass, explicitly authorized Luna subagents, and
+requested that the working S0–S4 checkpoint be pushed while this work proceeded.
+The isolated S0–S4 tree passed 260 tests / 28 subtests plus 11 integration/lazy-
+import checks and was pushed as `34bc01b8`. Its index snapshot excluded the new
+trajectory code; unrelated working-tree edits were preserved.
+
+### Implementation and review decisions
+
+- Add an opt-in canonical raster detail budget (`geometry_samples`) separate
+  from DAC samples per trace, and time-based traversal (`traversal_hz`, cycles/s).
+  The latter uses sample duration (`samples / samplerate`), not source-image
+  progression or producer wall-clock sleeps. Canonical detail defaults to 3,200
+  when traversal is enabled without an explicit geometry budget.
+- A cached Numba interpolation kernel (`nogil=True`, `fastmath=False`) samples
+  the canonical closed path. Warm it before playback for either independent
+  geometry or timed traversal. Only accepted output commits candidate phase;
+  reset clears committed and pending phase. Default rendering remains on its
+  existing path when neither option is set.
+- Review caught and corrected dependence on prior endpoint, alternating sweep
+  direction and block size. Whole-waveform tests compare two DAC rates at the
+  same physical sample instants and compare partitioned versus unpartitioned
+  static-source output, rather than checking only initial endpoints.
+- Time traversal requires single-field raster with trigger retrace. Partial
+  cycle chunks cannot safely replay unmarked on a missed deadline; explicitly
+  reject that opt-in combination instead of silently creating a flyback seam.
+  Independent geometry is not implemented for fixed Y-T timing. Existing
+  trigger-off, interlace and fixed-Y-T defaults remain on the legacy path.
+- Image changes can change the canonical spatial point at the current phase;
+  the source and traversal clocks are independent but different images do not
+  share identical paths. Timed raster chunks are not automatically complete
+  pictures, so trace cadence must not be used as complete-picture cadence.
+
+### Remaining S5 exit work
+
+One bounded warmed stipple budget sweep used decoded frames 30, 150 and 270
+from the local motion-video fixture, 256/512/768/1,024 point budgets, and
+1,600/3,200 samples at 48/96 kHz. Across eight cells, render p50 ranged from
+9.15 to 19.86 ms and p95 from 10.16 to 29.74 ms. Output lengths matched the
+configured budgets and endpoints were finite. This is renderer-stage cost,
+not measured output cadence or a demonstrated visible-quality improvement.
+Artifact: `tmp/scope-s5-stipple-budget-check.json`, SHA256
+`2ebe48e9b58342642da108fc636acc3656f12222734bddcb6a09aa22d3919db1`.
+Reproduction: `PYTHONPATH=. .venv/bin/python
+tmp/scope_s5_stipple_budget_check.py`. The sweep identified the Python/NumPy
+nearest-neighbor tour kernel, which was then compiled with cached Numba and
+warmed in `StippleEmitter` setup. Permutation parity includes duplicate points,
+equal-distance ties and strided inputs; read-only cache arrays are normalized to
+the warmed signature rather than compiling during rendering.
+
+A bounded paired warmed tour-kernel diagnostic used actual sampled target points
+from decoded fixture frame 150. Reference versus Numba p50 was 2.416 versus
+0.107 ms at 256 requested points, 8.887 versus 0.596 ms at 768, and 13.566
+versus 1.007 ms at 1,024. These are kernel-only improvements (22.6x / 14.9x /
+13.5x), not measured full-pipeline speedups. Artifact:
+`tmp/scope-s5-stipple-tour-numba-paired.json`, SHA256
+`49851a8dc47eeb272830d4336734ad7848132164829713948a1201bdea6bfb8f`.
+
+This is the raster trajectory foundation, not the whole frozen S5 program.
+Vector/continuous/stochastic/fusion clock integration, a demonstrated real-
+content quality/cost frontier, complete stipple budget evaluation, and thickness/intensity
+controls with measured appearance/budget effects remain open. No physical quality,
+30+ complete-picture throughput or complete S5 release is claimed. The user's
+offline tests remain deferred until their S5 release testing.
+
+### Delivered controls and verification
+
+Application baked raster: `--scope-geometry-samples N --scope-traversal-hz HZ`.
+Standalone frame raster: `--geometry-samples N --traversal-hz HZ`. The launcher
+forwards both parameters and validates supported combinations. Calibration and
+device/timing rebuilds use the canonical geometry budget; opt-in modes bypass
+the output-budget-dependent raster preparation cache. Timed output omits legacy
+handoff anchoring so the accepted geometry is not deformed at output. Incompatible
+renderer, continuous-stream, interlace, fixed-Y-T and trigger combinations are
+rejected explicitly. Defaults are unchanged.
+
+Final combined check:
+`PYTHONPATH=tests:. .venv/bin/python -m pytest -q` with the focused scope modules
+listed in A024 plus `test_scope_dac_time`, `test_scope_prepared_cache`,
+`test_scope_trajectory`, `test_scope_trajectory_output`,
+`test_scope_stipple_tour_numba`, `test_lazy_imports` and `test_modem_integration`:
+**291 passed, 28 subtests passed**. Whole-waveform tests verify sample-rate and
+chunk invariance, independently changed speed, candidate rejection/reset, tour
+parity, and that trigger output preserves the timed samples.
+
+One short controlled-video standalone-path smoke used the existing S4 harness
+with a 3,200 canonical budget, 30 traversal cycles/s and trigger enabled:
+`PYTHONPATH=. .venv/bin/python tmp/scope_s5_trajectory_smoke.py`. Pause, off-
+boundary paused seek, resume and looping passed; output was 29.784 traces/s,
+consistent with the added trigger marker duration. Active fresh transitions were
+29.166/s over the short control window; this is not a sustained 30+ picture-rate
+claim. Raw report: `tmp/scope-s4-video-s5-timed-raster-current.json`.
+
+The actual `main.py` baked-raster entry point also started and shut down cleanly
+on null output with the new controls, using a small repo-local bake made from
+`v7_reference_face.png` and a transparent overlay (thumbs-only tiny profile).
+Log: `tmp/scope-s5-application-smoke.log`. The existing `images` directory was
+absent, so the smoke uses explicit fixture paths rather than pretending the
+default content was available. Runnable fixture command:
+
+```bash
+.venv/bin/python main.py --mode scope \
+  --dir tmp/scope-s5-smoke-images --xy-dir tmp/scope-s5-smoke-images_xy \
+  --scope-mode raster --device null --scope-channels 24,25 \
+  --scope-geometry-samples 3200 --scope-traversal-hz 30
+```
+
+**Handoff: S4 complete in the user-accepted software scope; S5 active.** This
+checkpoint delivers tested raster trajectory controls and the accelerated stipple
+tour, with the remaining S5 exit work listed above. It is not a full S5 release.

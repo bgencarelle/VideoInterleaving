@@ -236,6 +236,10 @@ def configure_runtime():
                         help=argparse.SUPPRESS)  # deprecated: = fixed timing
     parser.add_argument("--scope-fps", type=int, help="Scope trace rate (default: IPS)")
     parser.add_argument("--scope-samples", type=int, help="Scope samples per trace")
+    parser.add_argument("--scope-geometry-samples", type=int, metavar="N",
+                        help="Baked raster trajectory detail budget independent of DAC samples")
+    parser.add_argument("--scope-traversal-hz", type=float, metavar="HZ",
+                        help="Timed baked-raster traversal speed in cycles/second; requires trigger and one field")
     parser.add_argument("--scope-fields", type=int, metavar="N",
                         help="Scope raster: interlace. N=2 draws every other "
                              "row per trace and alternates, so the beam "
@@ -751,6 +755,26 @@ def configure_runtime():
                 parser.error("--scope-mix requires baked vector geometry and "
                              "cannot be used with --scope-source images")
 
+        geometry_samples = args.scope_geometry_samples
+        traversal_hz = args.scope_traversal_hz
+        if geometry_samples is not None or traversal_hz is not None:
+            if scope_source != "bake" or requested_render != "raster":
+                parser.error("scope geometry/traversal controls require baked raster rendering")
+            if args.scope_mix is not None:
+                parser.error("scope geometry/traversal controls cannot be combined with --scope-mix")
+            if args.scope_realtime:
+                parser.error("scope geometry/traversal controls cannot be combined with --scope-realtime")
+            if geometry_samples is not None and geometry_samples < 2:
+                parser.error("--scope-geometry-samples must be at least 2")
+            if traversal_hz is not None and (not math.isfinite(traversal_hz) or traversal_hz <= 0):
+                parser.error("--scope-traversal-hz must be finite and greater than zero")
+            if traversal_hz is not None and args.scope_trigger is False:
+                parser.error("--scope-traversal-hz requires the scope trigger; remove --no-scope-trigger")
+            if traversal_hz is not None and args.scope_fields not in (None, 1):
+                parser.error("--scope-traversal-hz requires one field")
+            if args.scope_yt_timing == "fixed" or args.scope_yt:
+                parser.error("independent geometry controls cannot be combined with fixed Y-T timing")
+
         if (args.scope_mix_duty is not None
                 and (not math.isfinite(args.scope_mix_duty)
                      or not 0.0 <= args.scope_mix_duty <= 1.0)):
@@ -844,6 +868,10 @@ def configure_runtime():
             settings.SCOPE_ROW_BIAS = args.scope_row_bias
         if args.scope_samples is not None:
             settings.SCOPE_SAMPLES = args.scope_samples
+        if geometry_samples is not None:
+            settings.SCOPE_GEOMETRY_SAMPLES = geometry_samples
+        if traversal_hz is not None:
+            settings.SCOPE_TRAVERSAL_HZ = traversal_hz
         if args.scope_clear_samples:
             settings.SCOPE_SAMPLES = None
         if args.scope_trim is not None:

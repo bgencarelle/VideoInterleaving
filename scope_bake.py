@@ -265,6 +265,22 @@ def _warm_walk_raw_numba(n, point_dtype=np.float32):
     _walk_raw_numba_kernel(points, weights, max(0, int(n)))
 
 
+@njit(cache=True, nogil=True, fastmath=False)
+def _trajectory_sample_kernel(path, phase, step, count):
+    """Sample a cyclic, canonical path at time-parameterized positions."""
+    out = np.empty((count, 2), dtype=np.float32)
+    size = len(path)
+    for i in range(count):
+        p = (phase + i * step) % 1.0
+        x = p * size
+        j = int(x)
+        f = x - j
+        k = (j + 1) % size
+        out[i, 0] = path[j, 0] + f * (path[k, 0] - path[j, 0])
+        out[i, 1] = path[j, 1] + f * (path[k, 1] - path[j, 1])
+    return out
+
+
 def _walk_raw(P, w, n):
     """Sample n points along polyline P, spending time per arbitrary weights w.
     Same machinery as rasterize, but the weights are brightness rather than
@@ -1133,7 +1149,8 @@ class TraceEmitter:
                   sweep="alternate", dc_comp=None, grid=None, levels=None,
                   autofit=True, row_bias=1.0, precondition=0.0,
                  yt_timing=None, yt_trigger_samples=0,
-                 close_frame=False):
+                 close_frame=False, geometry_samples=None,
+                 traversal_hz=None):
         self.samplerate = samplerate
         self.n = int(samples)
         self.gamma, self.trim, self.density = gamma, trim, density
@@ -1148,16 +1165,48 @@ class TraceEmitter:
         self.yt_timing = yt_timing
         self.yt_trigger_samples = int(yt_trigger_samples)
         self.close_frame = bool(close_frame)
+        self.samplerate = float(samplerate)
+        if not np.isfinite(self.samplerate) or self.samplerate <= 0:
+            raise ValueError("samplerate must be finite and positive")
+        if self.n < 1:
+            raise ValueError("samples must be positive")
+        if geometry_samples is not None and int(geometry_samples) < 2:
+            raise ValueError("geometry_samples must be at least 2")
+        if traversal_hz is not None and (
+                not np.isfinite(float(traversal_hz))
+                or float(traversal_hz) <= 0):
+            raise ValueError("traversal_hz must be finite and positive")
+        if traversal_hz is not None and self.fields != 1:
+            raise ValueError("time traversal does not support interlace fields > 1")
+        if traversal_hz is not None and self.close_frame:
+            raise ValueError(
+                "time traversal does not support close_frame; use trigger retrace")
+        if ((traversal_hz is not None or geometry_samples is not None)
+                and self.yt_timing == "fixed"):
+            raise ValueError("independent geometry does not support fixed Y-T timing")
+        self.geometry_samples = (int(geometry_samples) if geometry_samples is not None
+                                 else (3200 if traversal_hz is not None else self.n))
+        self.traversal_hz = (None if traversal_hz is None
+                             else float(traversal_hz))
+        self._phase = 0.0
+        self._candidate_phase = None
         self._rev, self._end, self._field = False, None, 0
         _warm_walk_raw_numba(
             self.n,
             point_dtype=(np.float64 if self.yt_timing == "fixed"
                          else np.float32))
+        if self.traversal_hz is not None or geometry_samples is not None:
+            _trajectory_sample_kernel(
+                np.zeros((2, 2), np.float32), 0.0,
+                ((self.traversal_hz / self.samplerate)
+                 if self.traversal_hz is not None else 1.0 / self.n), self.n)
 
     def reset(self):
         """Drop chain state. Call after a device swap: the beam is not where
         the chain thinks it is, and continuing would jump the full screen."""
         self._rev, self._end, self._field = False, None, 0
+        self._phase = 0.0
+        self._candidate_phase = None
 
     def emit(self, lum, levels=None, *, field=None, commit=True, start=None,
              prepared_grid=None):
@@ -1169,17 +1218,19 @@ class TraceEmitter:
         """
         if lum is None:
             return None
+        timed = self.traversal_hz is not None
+        independent_geometry = timed or self.geometry_samples != self.n
         alt = self.sweep_mode == "alternate"
         kw = {}
         if self.grid:
             kw["grid_rows"], kw["grid_cols"] = self.grid
         lv = levels if levels is not None else self.levels
-        if alt:
+        if alt and not timed:
             start = self._end if start is None else start
         else:
             start = None
         frame = render_luma(
-            lum, self.n,
+            lum, self.geometry_samples if independent_geometry else self.n,
             gamma=self.gamma, trim=self.trim,
             density=self.density, rows=self.rows, autofit=self.autofit,
             oversample=self.oversample, border=self.border,
@@ -1187,25 +1238,38 @@ class TraceEmitter:
             fields=self.fields,
             field=(self._field if field is None else int(field)) % self.fields,
             levels=lv, palindrome=(self.sweep_mode == "palindrome"),
-            reverse=(alt and self._rev),
+            reverse=(alt and self._rev and not timed),
             start=start,
             # With the trigger marker enabled, Scope supplies an off-picture
             # retrace at each trace boundary. Without it, a missed producer
             # deadline makes Scope replay this whole trace; a short dim close
             # path then bounds the loop seam. The next trace still chains from
             # this endpoint.
-            close=(self.sweep_mode == "retrace" or
-                   (alt and self.close_frame)),
-            loop_anchor=(alt and self.close_frame),
+            close=(True if timed else
+                   (self.sweep_mode == "retrace" or
+                    (alt and self.close_frame))),
+            loop_anchor=(alt and self.close_frame and not timed),
             yt_fixed=(self.yt_timing == "fixed"),
             yt_trigger_samples=self.yt_trigger_samples,
-            prepared_grid=prepared_grid, **kw)
+            prepared_grid=(None if independent_geometry else prepared_grid),
+            **kw)
         if frame is None:
             return None
+        if independent_geometry:
+            # Prepared grids are budget-dependent and are deliberately ignored
+            # here: the canonical grid must use geometry_samples, not DAC n.
+            rate = ((self.traversal_hz / float(self.samplerate)) if timed
+                    else 1.0 / self.n)
+            phase = self._phase
+            frame = _trajectory_sample_kernel(
+                np.ascontiguousarray(frame, dtype=np.float32), phase, rate,
+                self.n)
+            if timed:
+                self._candidate_phase = (phase + self.n * rate) % 1.0
         if self.dc_comp:
             from scope_out import precompensate_hpf
             frame = precompensate_hpf(frame, self.dc_comp, self.samplerate)
-        if alt:
+        if alt and not timed:
             if start is not None:
                 from scope_out import anchor_periodic_frame
                 frame = anchor_periodic_frame(frame, start)
@@ -1219,6 +1283,9 @@ class TraceEmitter:
         if self.sweep_mode == "alternate":
             self._rev = not self._rev
             self._end = np.asarray(endpoint, dtype=np.float32)[:2].copy()
+        if self._candidate_phase is not None:
+            self._phase = self._candidate_phase
+            self._candidate_phase = None
 
 
 def _stochastic_probability(lum, gamma, trim, edge_gain):
@@ -1607,31 +1674,56 @@ def _stipple_image_samples(importance, points):
     return np.unique(flat, return_counts=True)
 
 
+@njit(cache=True, nogil=True, fastmath=False)
+def _greedy_nearest_order_kernel(points, start):
+    """Greedy squared-Euclidean tour; strict comparison preserves first ties."""
+    count = points.shape[0]
+    order = np.empty(count, dtype=np.int64)
+    used = np.zeros(count, dtype=np.uint8)
+    px, py = start[0], start[1]
+    for i in range(count):
+        best_index = -1
+        best_distance = np.inf
+        for j in range(count):
+            if used[j] == 0:
+                dx = points[j, 0] - px
+                dy = points[j, 1] - py
+                distance = dx * dx + dy * dy
+                # Strict comparison matches np.argmin: the first index wins ties.
+                if distance < best_distance:
+                    best_distance = distance
+                    best_index = j
+        order[i] = best_index
+        used[best_index] = 1
+        px, py = points[best_index, 0], points[best_index, 1]
+    return order
+
+
+def _warm_stipple_tour_kernel():
+    """Compile the production contiguous float64 signature during setup."""
+    _greedy_nearest_order_kernel(
+        np.zeros((1, 2), dtype=np.float64),
+        np.zeros(2, dtype=np.float64))
+
+
 def _greedy_nearest_order(points, start):
-    """Exact greedy Euclidean ordering with reusable distance work arrays."""
-    points = np.asarray(points, dtype=np.float64)
+    """Return a stable greedy nearest-neighbour permutation without mutation."""
+    points = np.ascontiguousarray(points, dtype=np.float64)
+    if points.ndim != 2 or points.shape[1] != 2:
+        raise ValueError("points must have shape (n, 2)")
+    if not np.isfinite(points).all():
+        raise ValueError("points must be finite")
     if not len(points):
         return np.empty(0, dtype=np.int64)
-
-    remaining = np.ones(len(points), dtype=bool)
-    dx = np.empty(len(points), dtype=np.float64)
-    dy = np.empty(len(points), dtype=np.float64)
-    distance = np.empty(len(points), dtype=np.float64)
-    squared_y = np.empty(len(points), dtype=np.float64)
-    order = np.empty(len(points), dtype=np.int64)
-    pos = np.asarray(start, dtype=np.float64)
-    for i in range(len(points)):
-        np.subtract(points[:, 0], pos[0], out=dx)
-        np.square(dx, out=distance)
-        np.subtract(points[:, 1], pos[1], out=dy)
-        np.square(dy, out=squared_y)
-        np.add(distance, squared_y, out=distance)
-        distance[~remaining] = np.inf
-        chosen = int(np.argmin(distance))
-        order[i] = chosen
-        remaining[chosen] = False
-        pos = points[chosen]
-    return order
+    pos = np.ascontiguousarray(np.asarray(start, dtype=np.float64).reshape(-1)[:2])
+    if pos.size != 2 or not np.isfinite(pos).all():
+        raise ValueError("start must contain two finite coordinates")
+    # Keep mmap/cache read-only arrays on the already-warmed mutable signature.
+    if not points.flags.writeable:
+        points = points.copy()
+    if not pos.flags.writeable:
+        pos = pos.copy()
+    return _greedy_nearest_order_kernel(points, pos)
 
 
 def _stipple_candidate_samples(cloud, points, gamma, trim, edge_gain):
@@ -1679,6 +1771,7 @@ class StippleEmitter(StochasticEmitter):
             samplerate, samples, gamma=gamma, trim=trim,
             edge_gain=edge_gain, dc_comp=dc_comp, level=level, border=border)
         self.points = max(8, int(points))
+        _warm_stipple_tour_kernel()
 
     def _sample_pixels(self, importance, *, prepared_samples=None,
                        tour_cache=None, source_key=None):

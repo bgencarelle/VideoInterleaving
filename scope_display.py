@@ -559,7 +559,8 @@ def _dev_name_of(scope):
 
 def _swap_device(old_scope, spec, source, fps, samples, main_libs, float_libs,
                  density, trim, rows, fields, row_bias, autofit, invert=False,
-                 x_only=False, channel_pair=(1, 2), resolved_device=False):
+                 x_only=False, channel_pair=(1, 2), resolved_device=False,
+                 geometry_budget=None):
     """Move the running scope to another output device.
 
     Returns (new_scope, new_cal, fresh_sweep_state).
@@ -609,7 +610,8 @@ def _swap_device(old_scope, spec, source, fps, samples, main_libs, float_libs,
         set_output_audio(muted=getattr(old_scope, "output_muted", False))
     new_cal = {}
     try:
-        new_cal = calibrate(main_libs, float_libs, new_scope.samples_per_frame,
+        new_cal = calibrate(main_libs, float_libs,
+                            (geometry_budget or new_scope.samples_per_frame),
                             density=density, trim=trim, rows=rows,
                             fields=fields, row_bias=row_bias, autofit=autofit,
                             invert=invert)
@@ -636,6 +638,8 @@ def run_scope(clock_source=None):
     # --- configuration: all of it from settings ---
     fps = getattr(settings, "SCOPE_FPS", None) or IPS
     samples = getattr(settings, "SCOPE_SAMPLES", None)
+    geometry_samples = getattr(settings, "SCOPE_GEOMETRY_SAMPLES", None)
+    traversal_hz = getattr(settings, "SCOPE_TRAVERSAL_HZ", None)
     render_mode = getattr(settings, "SCOPE_RENDER_MODE", None)
     x_only = bool(getattr(settings, "SCOPE_X_ONLY", False))
     trigger_on = bool(getattr(settings, "SCOPE_TRIGGER", True))
@@ -671,6 +675,11 @@ def run_scope(clock_source=None):
             "raster", "stochastic", "stipple"):
         raise ValueError("live scope images support raster, stochastic, "
                          "or stipple; vector/fusion need an XY bake")
+    if geometry_samples is not None or traversal_hz is not None:
+        if scope_source != "bake" or render_mode != "raster":
+            raise ValueError("scope geometry/traversal controls require baked raster rendering")
+        if traversal_hz is not None and not trigger_on:
+            raise ValueError("SCOPE_TRAVERSAL_HZ requires the scope trigger")
     use_raster = render_mode == "raster"
     use_stochastic = render_mode == "stochastic"
     use_stipple = render_mode == "stipple"
@@ -730,11 +739,26 @@ def run_scope(clock_source=None):
     # sweep is being ignored before deciding whether fixed timing survives
     # printed a claim that then stopped being true. See after those checks.
     fields = max(1, int(getattr(settings, "SCOPE_FIELDS", 1) or 1))
+    if geometry_samples is not None and int(geometry_samples) < 2:
+        raise ValueError("SCOPE_GEOMETRY_SAMPLES must be at least 2")
+    if traversal_hz is not None:
+        traversal_hz = float(traversal_hz)
+        if not math.isfinite(traversal_hz) or traversal_hz <= 0:
+            raise ValueError("SCOPE_TRAVERSAL_HZ must be finite and greater than zero")
+        if fields > 1:
+            raise ValueError("SCOPE_TRAVERSAL_HZ requires one field")
+    if ((geometry_samples is not None or traversal_hz is not None)
+            and yt_timing == "fixed"):
+        raise ValueError("independent geometry controls cannot be combined with fixed Y-T timing")
+    if (geometry_samples is not None or traversal_hz is not None) and realtime:
+        raise ValueError("scope geometry/traversal controls cannot be used in realtime mode")
     fields_explicit = bool(getattr(settings, "SCOPE_FIELDS_EXPLICIT", False))
     dc_comp = getattr(settings, "SCOPE_DC_COMP", None)
     border = float(getattr(settings, "SCOPE_BORDER", 0.0) or 0.0)
     row_bias = float(getattr(settings, "SCOPE_ROW_BIAS", 1.0) or 1.0)
     mix_hz = getattr(settings, "SCOPE_MIX", None)
+    if (geometry_samples is not None or traversal_hz is not None) and mix_hz:
+        raise ValueError("scope geometry/traversal controls cannot be combined with mix")
     _raw_mix_duty = float(getattr(settings, "SCOPE_MIX_DUTY", 0.5))
     if not math.isfinite(_raw_mix_duty):
         print("[SCOPE] non-finite SCOPE_MIX_DUTY; using 0.5")
@@ -1144,7 +1168,9 @@ def run_scope(clock_source=None):
 
     if (use_raster or mix_hz) and not cal:
         try:
-            cal = calibrate(main_libs, float_libs, scope.samples_per_frame,
+            cal = calibrate(main_libs, float_libs,
+                            (geometry_samples or (3200 if traversal_hz is not None
+                                                  else scope.samples_per_frame)),
                             density=density, trim=trim, rows=rows,
                             fields=fields, row_bias=row_bias, autofit=autofit,
                             invert=invert)
@@ -1251,7 +1277,9 @@ def run_scope(clock_source=None):
                         yt_trigger_samples=0,   # Scope prepends the marker its own window
                         grid=((cal["grid_rows"], cal["grid_cols"])
                               if cal else None),
-                        levels=(cal.get("levels") if cal else None))
+                        levels=(cal.get("levels") if cal else None),
+                        geometry_samples=geometry_samples,
+                        traversal_hz=traversal_hz)
                     _measure("raster", lambda k: _raster_probe.emit(
                         composite_luma(ml0, k, fl0, k, invert=invert)))
 
@@ -1290,7 +1318,9 @@ def run_scope(clock_source=None):
                         precondition=raster_precondition,
                         grid=((cal["grid_rows"], cal["grid_cols"])
                               if cal else None),
-                        levels=(cal.get("levels") if cal else None))
+                        levels=(cal.get("levels") if cal else None),
+                        geometry_samples=geometry_samples,
+                        traversal_hz=traversal_hz)
                     _fusion_stochastic = StochasticEmitter(
                         scope.samplerate, scope.samples_per_frame,
                         gamma=walk_gamma, trim=trim,
@@ -1385,7 +1415,9 @@ def run_scope(clock_source=None):
                       trigger_shape=trigger_shape,
                       yt_timing=yt_timing,
                       precondition=raster_precondition,
-                      mode_locked=bool(realtime or mix_hz),
+                      mode_locked=bool(realtime or mix_hz
+                                       or geometry_samples is not None
+                                       or traversal_hz is not None),
                       clock_locked=bool(_index_calculator.midi_mode),
                       audio_muted=gui_enabled,
                       mix_hz=mix_hz, mix_duty=mix_duty,
@@ -1504,7 +1536,8 @@ def run_scope(clock_source=None):
         close_frame=not scope.trigger,
         yt_trigger_samples=0,   # Scope prepends the marker its own window
         grid=_rotation_grid(cal, rotation),
-        levels=(cal.get("levels") if cal else None))
+        levels=(cal.get("levels") if cal else None),
+        geometry_samples=geometry_samples, traversal_hz=traversal_hz)
     _configure_raster_emitter_fields(emitter, render_mode, fields)
     stochastic_emitter = StochasticEmitter(
         scope.samplerate, scope.samples_per_frame,
@@ -1565,6 +1598,8 @@ def run_scope(clock_source=None):
             next_fields = 1
         if next_fps < 1 or next_ips < 1 or not 1 <= next_fields <= 4:
             raise ValueError("invalid picture rate, trace rate, or field count")
+        if traversal_hz is not None and next_fields != 1:
+            raise ValueError("timed raster traversal requires one field")
 
         # The timing request is a new sample budget, so an old explicit
         # --scope-samples value must no longer override the requested rate.
@@ -1573,7 +1608,8 @@ def run_scope(clock_source=None):
             scope, dev, source, next_fps, next_samples,
             main_libs, float_libs, density, trim, rows, next_fields,
             row_bias, autofit, invert, x_only=x_only,
-            channel_pair=channel_pair, resolved_device=True)
+            channel_pair=channel_pair, resolved_device=True,
+            geometry_budget=(geometry_samples or (3200 if traversal_hz is not None else None)))
         scope, cal, sweep = new_scope, new_cal, new_sweep
         fps, samples, fields, IPS = next_fps, next_samples, next_fields, next_ips
         settings.IPS = IPS
@@ -1598,7 +1634,8 @@ def run_scope(clock_source=None):
             yt_timing=yt_timing, yt_trigger_samples=0,
             close_frame=not scope.trigger,
             grid=_rotation_grid(cal, rotation),
-            levels=(cal.get("levels") if cal else None))
+            levels=(cal.get("levels") if cal else None),
+            geometry_samples=geometry_samples, traversal_hz=traversal_hz)
         _configure_raster_emitter_fields(emitter, render_mode, fields)
         stochastic_emitter = StochasticEmitter(
             scope.samplerate, scope.samples_per_frame,
@@ -1972,7 +2009,8 @@ def run_scope(clock_source=None):
                         scope, _want, source, fps, samples,
                         main_libs, float_libs, density, trim, rows, fields,
                         row_bias, autofit, invert, x_only=x_only,
-                        channel_pair=channel_pair)
+                        channel_pair=channel_pair,
+                        geometry_budget=(geometry_samples or (3200 if traversal_hz is not None else None)))
                     dev = ("null" if getattr(scope, "null", False)
                            else scope.stream.device)
                     # The emitter owns the chain and the geometry, so it has to
@@ -1990,7 +2028,9 @@ def run_scope(clock_source=None):
                         close_frame=not scope.trigger,
                         yt_trigger_samples=0,   # Scope prepends the marker its own window
                         grid=_rotation_grid(cal, rotation),
-                        levels=(cal.get("levels") if cal else None))
+                        levels=(cal.get("levels") if cal else None),
+                        geometry_samples=geometry_samples,
+                        traversal_hz=traversal_hz)
                     _configure_raster_emitter_fields(emitter, render_mode, fields)
                     stochastic_emitter = StochasticEmitter(
                         scope.samplerate, scope.samples_per_frame,
@@ -2159,7 +2199,9 @@ def run_scope(clock_source=None):
                     if _recalibrate and (use_raster or mix_hz):
                         try:
                             cal = calibrate(main_libs, float_libs,
-                                            scope.samples_per_frame,
+                                            (geometry_samples or
+                                             (3200 if traversal_hz is not None
+                                              else scope.samples_per_frame)),
                                             density=density, trim=trim,
                                             rows=rows, fields=fields,
                                             row_bias=row_bias,
@@ -2584,6 +2626,9 @@ def _emit(scope, ml, fl, index, render_mode, sweep, sweep_mode,
     def prepare_raster_grid(target, luminance):
         if prepared_cache is None:
             return None
+        if (getattr(target, "traversal_hz", None) is not None
+                or getattr(target, "geometry_samples", target.n) != target.n):
+            return None
         source_key = PreparedImageCache.source_key(
             ml, index, fl, index, raw=False, invert=invert,
             rotation=rotation)
@@ -2783,6 +2828,7 @@ def _emit(scope, ml, fl, index, render_mode, sweep, sweep_mode,
             # It has to cover every renderer once the marker is always on, and
             # show_frame is the one place they all arrive post-filter.
             handoff = (beam_start if beam_start is not None
+                       and getattr(emitter, "traversal_hz", None) is None
                        and (render_mode == "raster" or exact_handoff) else None)
             queued_end = _queue_presented_frame(
                 scope, frame, handoff=handoff, presentation=presentation)

@@ -37,6 +37,31 @@ class ScopeLauncherCommandTests(unittest.TestCase):
         self.assertIn("--scope-gui", command)
         self.assertIn("--no-scope-mix", command)
 
+    def test_trajectory_controls_are_forwarded_to_both_pipelines(self):
+        self.settings.update({"run_mode": "app", "app_source": "bake",
+                              "render_mode": "raster",
+                              "geometry_samples": "2400",
+                              "traversal_hz": "60"})
+        app = build_command(self.settings, root=self.root, python="python")
+        self.assertEqual(app[app.index("--scope-geometry-samples") + 1], "2400")
+        self.assertEqual(app[app.index("--scope-traversal-hz") + 1], "60")
+
+        self.settings.update({"run_mode": "live", "live_source": "test"})
+        live = build_command(self.settings, root=self.root, python="python")
+        self.assertEqual(live[live.index("--geometry-samples") + 1], "2400")
+        self.assertEqual(live[live.index("--traversal-hz") + 1], "60")
+
+    def test_trajectory_controls_reject_unsupported_combinations(self):
+        self.settings.update({"run_mode": "app", "app_source": "bake",
+                              "render_mode": "vector",
+                              "geometry_samples": "2400"})
+        with self.assertRaisesRegex(ValueError, "baked raster"):
+            validate_settings(self.settings, root=self.root)
+        self.settings.update({"render_mode": "raster", "traversal_hz": "60",
+                              "trigger": False})
+        with self.assertRaisesRegex(ValueError, "requires the scope trigger"):
+            validate_settings(self.settings, root=self.root)
+
     def test_launcher_can_start_the_scope_tuner_fullscreen_image_only(self):
         self.settings.update({"run_mode": "app", "app_source": "images",
                               "render_mode": "raster",

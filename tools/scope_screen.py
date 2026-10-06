@@ -78,6 +78,10 @@ def _queue_raster_candidate(scope, emitter, frame, handoff=None,
                             identity=None):
     """Advance raster sweep/field state only when Scope accepts a trace."""
     accepted_before = getattr(scope, "frames_accepted", None)
+    if getattr(emitter, "traversal_hz", None) is not None:
+        # Time traversal uses the periodic trigger retrace as its frame
+        # boundary. Scope's optional handoff anchoring would perturb its clock.
+        handoff = None
     try:
         if identity is not None:
             endpoint = scope.show_frame(frame, handoff=handoff,
@@ -757,13 +761,23 @@ def _profile(args, grab):
     cap = (time.perf_counter() - t0) / 20 * 1000
 
     lum = np.asarray(inner(), dtype=np.float32)
+    profile_grid = None
+    if args.geometry_samples is not None or args.traversal_hz is not None:
+        geometry_budget = args.geometry_samples or 3200
+        profile_grid = plan_grid(
+            lum, geometry_budget, density=args.density, trim=args.trim,
+            rows=args.rows, fields=max(1, args.fields))
     # Time the REAL path, not a hand-rolled approximation of it -- a probe that
     # measures something the program never runs is worse than no probe.
     _probe_em = TraceEmitter(48000, n, gamma=args.gamma, trim=args.trim,
                              density=args.density, rows=args.rows,
                              fields=max(1, args.fields),
                              border=getattr(args, "border", 0.0),
-                             oversample=getattr(args, "oversample", 1))
+                             oversample=getattr(args, "oversample", 1),
+                             geometry_samples=args.geometry_samples,
+                             traversal_hz=args.traversal_hz,
+                             grid=profile_grid,
+                             close_frame=not args.scope_trigger)
     for _ in range(3):
         _probe_em.emit(lum)
     t0 = time.perf_counter()
@@ -832,6 +846,10 @@ def build_parser():
     ap.add_argument("--fps", type=int, default=30,
                     help="traces per second; lower = bigger grid, more flicker")
     ap.add_argument("--samples", type=int, help="samples per trace (overrides --fps)")
+    ap.add_argument("--geometry-samples", type=int, metavar="N",
+                    help="raster trajectory detail budget independent of DAC samples")
+    ap.add_argument("--traversal-hz", type=float, metavar="HZ",
+                    help="timed raster traversal speed in cycles/second; requires trigger and one field")
     ap.add_argument("--trim", type=float, default=0.02,
                     help="drop cells dimmer than this. Useful on dark content; "
                          "leave low for a full-frame source")
@@ -921,6 +939,17 @@ def main(argv=None):
         ap.error("--start-at and --control require --source video")
     if not np.isfinite(args.start_at) or args.start_at < 0:
         ap.error("--start-at must be finite and non-negative")
+    if args.geometry_samples is not None and args.geometry_samples < 2:
+        ap.error("--geometry-samples must be at least 2")
+    if args.traversal_hz is not None and (
+            not np.isfinite(args.traversal_hz) or args.traversal_hz <= 0):
+        ap.error("--traversal-hz must be finite and greater than zero")
+    if args.traversal_hz is not None and not args.scope_trigger:
+        ap.error("--traversal-hz requires the scope trigger; remove --no-scope-trigger")
+    if args.traversal_hz is not None and args.fields > 1:
+        ap.error("--traversal-hz requires --fields 1")
+    if (args.geometry_samples is not None or args.traversal_hz is not None) and args.stream:
+        ap.error("trajectory controls require whole-trace rendering; remove --stream")
     try:
         channel_pair = tuple(int(value.strip())
                              for value in args.scope_channels.split(","))
@@ -1037,11 +1066,13 @@ def main(argv=None):
     # levels are handled separately above and are deliberately adaptive, but
     # slowly (--adapt, in seconds). Geometry cannot be adaptive at all.
     _probe = np.asarray(grab(), dtype=np.float32)
-    _grid_rows, _grid_cols = plan_grid(_probe, n, density=args.density,
+    geometry_budget = (args.geometry_samples if args.geometry_samples is not None
+                       else (3200 if args.traversal_hz is not None else n))
+    _grid_rows, _grid_cols = plan_grid(_probe, geometry_budget, density=args.density,
                                        trim=args.trim, rows=args.rows,
                                        fields=max(1, args.fields))
     print(f"[SCREEN] grid fixed at {_grid_cols}x{_grid_rows} "
-          f"({n * max(1, args.fields) / max(_grid_rows * _grid_cols, 1):.2f} "
+          f"({geometry_budget * max(1, args.fields) / max(_grid_rows * _grid_cols, 1):.2f} "
           f"samples/cell)"
           + (f", interlace x{args.fields}" if args.fields > 1 else ""))
 
@@ -1068,7 +1099,9 @@ def main(argv=None):
             border=getattr(args, "border", 0.0),
             oversample=getattr(args, "oversample", 1),
             sweep="alternate", dc_comp=args.dc_comp,
-            grid=(_grid_rows, _grid_cols), close_frame=not scope.trigger)
+            grid=(_grid_rows, _grid_cols), close_frame=not scope.trigger,
+            geometry_samples=args.geometry_samples,
+            traversal_hz=args.traversal_hz)
         field_group = FieldGroupLatch(max(1, args.fields))
 
         def push():
@@ -1093,7 +1126,9 @@ def main(argv=None):
                 prepared_grid = None
                 # Adaptive percentiles intentionally change tone per captured
                 # picture; do not fill the bounded cache with one-off grids.
-                if source_key is not None and args.adapt <= 0:
+                if (source_key is not None and args.adapt <= 0
+                        and args.geometry_samples is None
+                        and args.traversal_hz is None):
                     grid = emitter.grid or (None, None)
                     prepared_grid = prepared_cache.raster_grid(
                         captured["lum"], source_key, n=emitter.n,

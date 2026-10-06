@@ -110,6 +110,8 @@ def _settings_defaults():
         "fields_explicit": bool(value("SCOPE_FIELDS_EXPLICIT", False)),
         "fps": "" if value("SCOPE_FPS", None) is None else str(value("SCOPE_FPS", None)),
         "samples": "" if value("SCOPE_SAMPLES", None) is None else str(value("SCOPE_SAMPLES", None)),
+        "geometry_samples": "" if value("SCOPE_GEOMETRY_SAMPLES", None) is None else str(value("SCOPE_GEOMETRY_SAMPLES", None)),
+        "traversal_hz": "" if value("SCOPE_TRAVERSAL_HZ", None) is None else str(value("SCOPE_TRAVERSAL_HZ", None)),
         "fields": str(value("SCOPE_FIELDS", 1)),
         "trim": str(value("SCOPE_TRIM", 0.02)),
         "gamma": str(value("SCOPE_GAMMA", 2.2)),
@@ -175,7 +177,8 @@ FIELD_GROUPS = (
                              "trigger_shape", "trigger_us", "lowpass",
                              "rotation", "mirror")),
     ("Image source", ("app_source", "image_dir", "xy_dir", "live_size")),
-    ("Renderer and timing", ("render_mode", "fps", "samples", "fields",
+    ("Renderer and timing", ("render_mode", "fps", "samples",
+                              "geometry_samples", "traversal_hz", "fields",
                               "yt_timing", "realtime", "sweep")),
     ("Raster and tone", ("invert", "trim", "gamma", "density", "rows",
                           "row_bias", "border", "precondition", "autofit")),
@@ -188,7 +191,8 @@ FIELD_GROUPS = (
                             "scope_gui_image_only", "scope_gui_fullscreen")),
     ("Live source", ("live_source", "video_file", "ffmpeg_input", "display",
                       "region")),
-    ("Live sweep and capture", ("live_fps", "live_samples", "live_trim",
+    ("Live sweep and capture", ("live_fps", "live_samples",
+                                  "geometry_samples", "traversal_hz", "live_trim",
                                  "live_gamma", "live_density", "live_rows",
                                  "live_fields", "live_border", "live_oversample",
                                  "adapt",
@@ -206,6 +210,7 @@ FIELD_LABELS = {
     "xy_dir": "Baked XY folder", "live_size": "Runtime thumbnail width",
     "render_mode": "Renderer", "fps": "Scope traces / second",
     "samples": "Samples per trace · overrides FPS", "fields": "Raster fields",
+    "geometry_samples": "Geometry samples", "traversal_hz": "Traversal Hz",
     "yt_timing": "Raster row timing", "realtime": "Realtime raster stream",
     "sweep": "Raster/vector sweep", "invert": "Invert image luminance",
     "trim": "Trim cutoff", "gamma": "Raster gamma", "density": "Samples / cell",
@@ -239,7 +244,8 @@ FIELD_LABELS = {
 FILE_FIELDS = {"video_file"}
 DIR_FIELDS = {"image_dir", "xy_dir"}
 NUMBER_FIELDS = {
-    "trigger_us", "live_size", "fps", "samples", "fields", "trim", "gamma",
+    "trigger_us", "live_size", "fps", "samples", "geometry_samples",
+    "traversal_hz", "fields", "trim", "gamma",
     "density", "precondition", "walk_radius", "walk_stride", "walk_reseed_ms",
     "stochastic_gamma", "walk_edge", "walk_hz", "stipple_points", "rows",
     "row_bias", "border", "dc_comp", "lowpass", "oversample", "mix",
@@ -313,6 +319,26 @@ def validate_settings(settings, outputs=(), root=ROOT):
             raise ValueError("Choose a supported trigger shape")
         if settings.get("yt_timing", "dwell") not in dict(YT_TIMINGS).values():
             raise ValueError("Choose a supported raster row timing")
+        geometry_samples = _number(settings, "geometry_samples", optional=True,
+                                   integer=True)
+        traversal_hz = _number(settings, "traversal_hz", optional=True)
+        if geometry_samples is not None or traversal_hz is not None:
+            if source != "bake" or renderer != "raster":
+                raise ValueError("Geometry/traversal controls require baked raster rendering")
+            if settings.get("yt_timing", "dwell") == "fixed":
+                raise ValueError("Independent geometry controls cannot use fixed Y-T timing")
+            if _number(settings, "mix", optional=True) is not None:
+                raise ValueError("Geometry/traversal controls cannot be combined with whole-trace mix")
+            if geometry_samples is not None and geometry_samples < 2:
+                raise ValueError("Geometry samples must be at least 2")
+            if traversal_hz is not None and traversal_hz <= 0:
+                raise ValueError("Traversal Hz must be greater than zero")
+            if traversal_hz is not None and not settings.get("trigger", True):
+                raise ValueError("Traversal Hz requires the scope trigger")
+            if traversal_hz is not None and _number(settings, "fields", integer=True) > 1:
+                raise ValueError("Traversal Hz requires one field")
+            if settings.get("realtime"):
+                raise ValueError("Geometry/traversal controls cannot be used in realtime mode")
         if settings.get("sweep", "alternate") not in dict(SWEEP_CHOICES).values():
             raise ValueError("Choose a supported raster/vector sweep")
         mix_enabled = source == "bake" and renderer != "fusion"
@@ -369,6 +395,20 @@ def validate_settings(settings, outputs=(), root=ROOT):
         raise ValueError("Choose a supported trigger shape")
     if source == "video" and not str(settings.get("video_file", "")).strip():
         raise ValueError("Choose a video file or URL")
+    geometry_samples = _number(settings, "geometry_samples", optional=True,
+                               integer=True)
+    traversal_hz = _number(settings, "traversal_hz", optional=True)
+    if geometry_samples is not None and geometry_samples < 2:
+        raise ValueError("Geometry samples must be at least 2")
+    if traversal_hz is not None:
+        if traversal_hz <= 0:
+            raise ValueError("Traversal Hz must be greater than zero")
+        if not settings.get("trigger", True):
+            raise ValueError("Traversal Hz requires the scope trigger")
+        if _number(settings, "live_fields", integer=True) > 1:
+            raise ValueError("Traversal Hz requires one field")
+    if (geometry_samples is not None or traversal_hz is not None) and settings.get("stream"):
+        raise ValueError("Geometry/traversal controls require whole-trace rendering")
     if source == "camera" and not str(settings.get("ffmpeg_input", "")).strip():
         raise ValueError("Choose a camera device or FFmpeg input, e.g. v4l2:/dev/video0")
     if source in ("camera", "ffmpeg"):
@@ -453,6 +493,8 @@ def build_command(settings, outputs=(), *, python=sys.executable, root=ROOT,
             command.append("--no-scope-mix")
         for key, flag in (("live_size", "--scope-live-size"),
                           ("fps", "--scope-fps"), ("samples", "--scope-samples"),
+                          ("geometry_samples", "--scope-geometry-samples"),
+                          ("traversal_hz", "--scope-traversal-hz"),
                           ("fields", "--scope-fields"), ("trim", "--scope-trim"),
                           ("gamma", "--scope-gamma"), ("density", "--scope-density"),
                           ("precondition", "--scope-precondition"),
@@ -549,6 +591,8 @@ def build_command(settings, outputs=(), *, python=sys.executable, root=ROOT,
     if str(settings.get("region", "")).strip():
         command.extend(("--region", str(settings["region"]).strip()))
     for key, flag in (("live_fps", "--fps"), ("live_samples", "--samples"),
+                      ("geometry_samples", "--geometry-samples"),
+                      ("traversal_hz", "--traversal-hz"),
                       ("live_trim", "--trim"), ("live_gamma", "--gamma"),
                       ("live_border", "--border"),
                       ("live_oversample", "--oversample"),
@@ -1049,7 +1093,7 @@ class ScopeLauncher:
                     if not math.isfinite(number):
                         raise ValueError
                     integer_field = key in {
-                        "live_size", "fps", "samples", "fields", "walk_radius",
+                        "live_size", "fps", "samples", "geometry_samples", "fields", "walk_radius",
                         "walk_stride", "stipple_points", "rows", "oversample",
                         "rotation", "live_fps", "live_samples", "live_fields",
                         "live_rows", "live_oversample", "downto",
