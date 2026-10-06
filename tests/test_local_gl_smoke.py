@@ -73,7 +73,8 @@ class LocalGLSmokeTests(unittest.TestCase):
                                  run.stdout + "\n" + run.stderr)
                 report = json.loads(result_path.read_text(encoding="utf-8"))
                 self.assertTrue(report["gl_ready"], report)
-                self.assertIn("GL_RENDERER:", report["renderer"])
+                self.assertIsNotNone(report["renderer"], report)
+                self.assertTrue(report["offscreen_target"], report)
                 self.assertGreater(report["gl_composite"], 0, report)
                 self.assertGreater(report["cpu_composite"], 0, report)
                 self.assertEqual(report["bridge_frame_shape"], [120, 80, 3],

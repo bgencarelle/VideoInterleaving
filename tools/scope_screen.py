@@ -43,6 +43,8 @@ from scope_bake import SweepSource, plan_grid, TraceEmitter   # noqa: E402
 from scope_out import Scope, BufferedSource, choose_device  # noqa: E402
 from scope_frame_scheduler import FieldGroupLatch  # noqa: E402
 from scope_prepared_cache import PreparedImageCache  # noqa: E402
+from scope_numeric import (captured_luma, gray_units, positive_percentile,
+                           moving_test_image)  # noqa: E402
 
 
 def _begin_raster_field(field_group, grab, levels_for):
@@ -224,8 +226,7 @@ def shrink(raw, downto):
         if sw > downto:
             src = cv2.resize(src, (downto, max(1, int(sh * downto / sw))),
                              interpolation=cv2.INTER_AREA)
-    return (src[:, :, 2] * 0.2126 + src[:, :, 1] * 0.7152
-            + src[:, :, 0] * 0.0722) / 255.0
+    return captured_luma(src)
 
 
 def screen_source(region=None, downto=160):
@@ -335,8 +336,7 @@ def ffmpeg_source(width=160, fps=12, region=None, input_spec=None,
         buf = _read_exact(proc.stdout, nbytes)
         if buf is None:
             return last[0]
-        last[0] = (np.frombuffer(buf, np.uint8).reshape(h, w)
-                   .astype(np.float32) / 255.0)
+        last[0] = gray_units(np.frombuffer(buf, np.uint8).reshape(h,w))
         metadata[0] = {
             "source_kind": str(source_kind),
             "source_sequence": int(metadata[0]["source_sequence"]) + 1,
@@ -503,7 +503,7 @@ class VideoFileSource:
         self.position = 0.0
         fps = float(self.cap.get(cv2_module.CAP_PROP_FPS) or 0.0)
         count = float(self.cap.get(cv2_module.CAP_PROP_FRAME_COUNT) or 0.0)
-        self.frame_rate = fps if np.isfinite(fps) and fps > 0 else None
+        self.frame_rate = fps if math.isfinite(fps) and fps > 0 else None
         self.duration = (count / fps if count > 0 and fps > 0 else None)
         self._playback_anchor_wall = self._clock()
         self._playback_anchor_position = 0.0
@@ -653,7 +653,7 @@ class VideoFileSource:
                     target = float(position)
                 except (TypeError, ValueError) as exc:
                     raise ValueError("seek position must be a number") from exc
-                if not np.isfinite(target) or target < 0:
+                if not math.isfinite(target) or target < 0:
                     raise ValueError("seek position must be finite and non-negative")
                 self._seek_locked(target)
             elif command == "shutdown":
@@ -731,11 +731,7 @@ def test_source():
 
     def grab():
         t[0] += 1
-        y, x = np.mgrid[0:120, 0:160].astype(np.float32)
-        cx, cy = 80 + 45 * np.sin(t[0] / 40.0), 60 + 30 * np.cos(t[0] / 55.0)
-        img = 0.10 + 0.35 * ((((x // 20) + (y // 20)) % 2) == 0)
-        img += 0.55 * (((x - cx) ** 2 + (y - cy) ** 2) < 260)
-        return np.clip(img, 0, 1)
+        return moving_test_image(t[0])
     return grab
 
 
@@ -883,10 +879,9 @@ def build_parser():
                          "(default 160; the grid is ~56 wide, so this is "
                          "already oversampled)")
     ap.add_argument("--stream", action="store_true",
-                    help="generate row by row for lowest latency. Costs ~3x "
-                         "the CPU because each row is a handful of tiny numpy "
-                         "calls; the default builds a whole trace at once, "
-                         "which is what you want unless latency matters.")
+                    help="generate row by row using compiled preparation and "
+                         "sampling; the default builds complete traces. Queued "
+                         "block depth determines stream latency.")
     ap.add_argument("--buffer-blocks", type=int, default=6,
                     help="blocks queued ahead of the audio callback")
     ap.add_argument("--dc-comp", type=float, metavar="HZ",
@@ -940,14 +935,14 @@ def main(argv=None):
         ap.error("--source camera needs --ffmpeg-input")
     if args.source not in ("video",) and (args.start_at or args.control):
         ap.error("--start-at and --control require --source video")
-    if not np.isfinite(args.start_at) or args.start_at < 0:
+    if not math.isfinite(args.start_at) or args.start_at < 0:
         ap.error("--start-at must be finite and non-negative")
     if args.geometry_samples is not None and args.geometry_samples < 2:
         ap.error("--geometry-samples must be at least 2")
     if not math.isfinite(args.physical_dwell) or not 0.0 <= args.physical_dwell <= 1.0:
         ap.error("--physical-dwell must be between 0 and 1")
     if args.traversal_hz is not None and (
-            not np.isfinite(args.traversal_hz) or args.traversal_hz <= 0):
+            not math.isfinite(args.traversal_hz) or args.traversal_hz <= 0):
         ap.error("--traversal-hz must be finite and greater than zero")
     if args.traversal_hz is not None and not args.scope_trigger:
         ap.error("--traversal-hz requires the scope trigger; remove --no-scope-trigger")
@@ -962,10 +957,10 @@ def main(argv=None):
         channel_pair = parse_channel_pair(channel_pair)
     except (TypeError, ValueError) as exc:
         ap.error(str(exc))
-    if not np.isfinite(args.scope_trigger_us) or args.scope_trigger_us <= 0:
+    if not math.isfinite(args.scope_trigger_us) or args.scope_trigger_us <= 0:
         ap.error("--scope-trigger-us must be finite and greater than zero")
     if args.scope_lowpass is not None and (
-            not np.isfinite(args.scope_lowpass) or args.scope_lowpass <= 0):
+            not math.isfinite(args.scope_lowpass) or args.scope_lowpass <= 0):
         ap.error("--scope-lowpass must be finite and greater than zero")
     gui_enabled = bool(args.scope_gui)
 
@@ -1050,7 +1045,8 @@ def main(argv=None):
             levels = ((current["lo"], current["hi"])
                       if current["lo"] is not None else None)
             return levels, current
-        lo_n, hi_n = float(np.percentile(lit, 2)), float(np.percentile(lit, 98))
+        lo_n, _ = positive_percentile(lit,2.0)
+        hi_n, _ = positive_percentile(lit,98.0)
         if current["lo"] is None:
             proposed = {"lo": lo_n, "hi": hi_n}
         else:

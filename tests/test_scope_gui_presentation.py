@@ -1,9 +1,10 @@
 import threading
 import unittest
+from collections import OrderedDict
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
-from PIL import Image
+from PIL import Image, ImageDraw, ImageFont
 
 from scope_gui import ScopeGUI
 
@@ -90,6 +91,30 @@ class ScopePresentationTests(unittest.TestCase):
         gui._present(Image.new("RGBA", (40, 24)))
         texture.release.assert_called_once()
         self.assertEqual(gui.context.texture.call_count, 2)
+
+    def test_cached_static_text_matches_pillow_and_reuses_surfaces(self):
+        gui = self.make_gui()
+        gui.Image = Image
+        gui.ImageDraw = ImageDraw
+        gui._text_surface_cache = OrderedDict()
+        font = ImageFont.truetype("DejaVuSans.ttf", 17)
+        labels = (
+            ((10, 8), "SCOPE  ·  LIVE TUNER", (239, 245, 249)),
+            ((13.5, 23.7), "startup default", (159, 173, 181)),
+            ((28.25, 37.0), "Phosphor preview  ·  exposure", (119, 145, 160)),
+        )
+        for position, text, color in labels:
+            expected = Image.new("RGBA", (320, 64), (12, 19, 26, 255))
+            actual = expected.copy()
+            ImageDraw.Draw(expected).text(position, text, fill=color, font=font)
+            gui._draw_cached_text(actual, position, text, color, font)
+            self.assertEqual(actual.tobytes(), expected.tobytes())
+            cached_tile = next(reversed(gui._text_surface_cache.values()))
+            repeated = Image.new("RGBA", (320, 64), (12, 19, 26, 255))
+            gui._draw_cached_text(repeated, position, text, color, font)
+            self.assertIs(next(reversed(gui._text_surface_cache.values())),
+                          cached_tile)
+            self.assertEqual(repeated.tobytes(), expected.tobytes())
 
 
 if __name__ == "__main__":

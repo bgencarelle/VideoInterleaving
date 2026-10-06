@@ -76,7 +76,7 @@ notes, that is not an LTC timecode input path. LTC clock support would require
 an audio-input decoder, separate from modem receive framing.
 
 The old `README.md` advertised MIDI/MTC and client/server index synchronization,
-while `docs/SCOPE_MODE.md` said scope stayed in sync with MIDI/MTC. Those claims
+while the retired scope guide said scope stayed in sync with MIDI/MTC. Those claims
 did not describe current runtime behavior and have been corrected to distinguish
 the free-clock runtime from the intended MTC/LTC restoration.
 

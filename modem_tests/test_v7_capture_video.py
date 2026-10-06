@@ -113,8 +113,10 @@ class VideoSourceCommandTests(unittest.TestCase):
                 ['ffmpeg', '-v', 'error', '-y', '-f', 'rawvideo',
                  '-pixel_format', 'rgb24', '-video_size',
                  f'{size[0]}x{size[1]}', '-framerate', '30', '-i', 'pipe:0',
-                 '-vf', 'scale=out_color_matrix=bt709', '-pix_fmt', 'yuv420p',
-                 '-c:v', 'libx264', '-crf', '10', *extra, str(path)],
+                  '-vf', 'scale=out_color_matrix=bt709,setparams=colorspace=unknown',
+                  '-pix_fmt', 'yuv420p',
+                  '-c:v', 'libx264', '-crf', '10',
+                  '-colorspace', 'unknown', *extra, str(path)],
                 input=np.tile(frame[None], (3, 1, 1, 1)).tobytes())
             if made.returncode:
                 self.skipTest('this ffmpeg cannot encode the test clip')

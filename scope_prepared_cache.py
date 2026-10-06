@@ -4,6 +4,7 @@ from collections.abc import Mapping
 from types import MappingProxyType
 
 import numpy as np
+from scope_numeric import cumulative_mass, rotate_cloud
 
 from scope_bake import composite_luma
 
@@ -193,7 +194,7 @@ class PreparedImageCache:
                     tuple(np.asarray(probability).shape))
         return self._prepared(
             "stochastic-cdf", source_key, settings,
-            lambda: (np.cumsum(values), float(values.sum())))
+            lambda: cumulative_mass(values))
 
     def raster_grid(self, luminance, source_key, *, n, density, trim, rows,
                     cols, autofit, grid_rows, grid_cols, row_bias, levels,
@@ -272,14 +273,8 @@ class PreparedImageCache:
                 return cloud
             out = dict(cloud)
             xy = np.asarray(cloud["xy"], dtype=np.float64)
-            u, v = xy[:, 0], xy[:, 1]
             k = rotation // 90
-            if k == 1:
-                out["xy"] = np.column_stack((v, 1.0 - u))
-            elif k == 2:
-                out["xy"] = np.column_stack((1.0 - u, 1.0 - v))
-            else:
-                out["xy"] = np.column_stack((1.0 - v, u))
+            out["xy"] = rotate_cloud(xy,k)
             if k % 2:
                 out["aspect"] = 1.0 / max(float(cloud.get("aspect", 1.0)), 1e-9)
             return out

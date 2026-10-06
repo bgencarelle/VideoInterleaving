@@ -4635,3 +4635,397 @@ and a native draw. No device-backed audio was opened.
 **S6 remains active.** Remaining exit evidence includes static-UI caching, measured
 total CPU/preview age/cadence and output impact, direct CPU-headless and browser
 comparison, continuous-tap audit, and D0 deltas. Defaults remain unchanged.
+
+---
+
+## Appendix A053 — S6 numerical audit / S1 follow-up — 2026-10-06
+
+### Scope and implementation
+
+User direction: ensure NumPy/SciPy computation in scope is replaced by Numba
+and other optimized implementations. Audited the scope modules, standalone
+screen/video entry point, and XY baker. Added `scope_numeric.py`: cached,
+non-fastmath, GIL-releasing CPU kernels for raster area/tone/grid preparation,
+stochastic probability and persistent seeded walking, systematic stipple
+sampling, geometry/occlusion, fusion weighting/selection, preview quantiles,
+source luminance, bake candidate generation, and vertex quantization. Output
+guards, transforms, trigger generation and gain-ramp/channel mapping are compiled
+in `scope_out.py`. Removed redundant output-channel clearing after the measured
+callback screen identified that duplicated work.
+
+Circular anti-alias, low-pass and AC-compensation transforms now use native
+OpenCV CPU DFT plus compiled spectral gains. Actual trace lengths, including
+odd/non-power-of-two lengths, are transformed without padding; periodic seams,
+phase and gain conventions are retained. Retained causal filtering still uses
+the previously accepted Numba recurrence. No filter or trajectory default was
+retuned. NumPy remains array storage, layout/interchange and file I/O, plus
+independent test references. No SciPy imports or interpreted NumPy numerical
+function calls remain in the audited production files. A source audit regression
+enforces that boundary, including the baker.
+
+Startup warms production signatures, including read-only cached arrays,
+strided output frames and decimated oversample layouts. Independent tests pin
+seeded RNG/visited/phase continuity across chunks, float32 cumulative rounding,
+quantized bake coordinates/luminance/edge/mass, circular transform equivalence,
+and no signature growth during output-mapping/guard use.
+
+### Baselines and bounded measurements
+
+Pre-edit branch/worktree were recorded; unrelated application/modem/doc changes
+were preserved. Previous accepted S6 baseline is the pre-audit `7d450285` file
+snapshot in `tmp/scope-compute-audit/before/`; D0 is unchanged
+`/tmp/opencode/scope-d0-runtime` (`7ff4902c`). Snapshot manifest SHA256:
+`73b35815cc41ec6851aa68af70c465ee5191911853aec342fb4d1772083f0ed8`.
+
+On decoded motion-fixture frame 150, matched 48/96-kHz renderer-only screens
+used 1,600/3,200 samples, raster grid 48x80 with fixed levels, and 768 stipple
+points. Three five-second trials per cell yielded approximate previous/current
+p50 costs of **0.88/0.19 ms raster**, **10.19/0.46 ms stochastic**, and
+**1.03/0.84 ms stipple** at 48 kHz. D0 costs were 1.07/10.25/8.63 ms respectively.
+These initial screens overlapped functional checking/compilation and are bounded
+renderer evidence, not controlled end-to-end or hardware results. Stochastic
+and stipple comparison frames were identical; raster maximum XY delta was
+1.085e-5. The initial summary's `warm_cache_startup` label does not establish
+cache reuse; the separate cold/warm measurement below supersedes it.
+
+The subsequent isolated **60-second static-raster null-output** comparison used
+48 kHz, 1,600 samples, 512-sample callbacks, test channels 24/25, preview off,
+and identical 30-Hz producer requests. D0 / previous S6 / migrated snapshot:
+
+| Metric | D0 | Previous S6 | Migrated |
+| --- | ---: | ---: | ---: |
+| Process CPU, one-core percent | 5.76 | 5.17 | 2.23 |
+| Renderer + submission p50/p95, ms | 1.637/2.139 | 1.400/1.949 | 0.455/0.605 |
+| Callback p50/p95, ms | 0.0227/0.0436 | 0.0261/0.0646 | 0.0291/0.0634 |
+| Producer lateness p95, ms | 0.129 | 0.129 | 0.134 |
+| Pending-frame replacements | 78 | 78 | 79 |
+
+Each arm made 1,801 measured producer requests and 5,626 callbacks. The migrated
+arm had no kernel-signature growth. Callback median and pending replacements
+did not improve; no picture-cadence, moving-source, PortAudio or physical result
+is inferred. Snapshot source hashes are retained in `NULL_SUMMARY.json`; final
+follow-ups remove the duplicate clear and add decimation-layout warming.
+
+An isolated 100-render, 680-pixel preview comparison was **pixel-identical**.
+Previous/current wall p50/p95 were **8.177/9.771 vs 8.258/8.857 ms**; aggregate
+CPU p50 was **15.298 vs 15.711 ms**. This is numerical migration with essentially
+flat median preview cost, not a preview-throughput win. OpenCV used one thread;
+the pre-existing Numba preview worker policy was retained.
+
+Final shared-kernel startup measurement used a fresh isolated cache directory:
+**46.01 s cold compilation**, **0.839 s fresh-process disk-cache warmup**, and
+approximately 1.4 microseconds for repeated same-process warmup. These exclude
+module imports and other application/device startup, and ran alongside functional
+verification. Deployment targets must populate and verify their own cache.
+
+### Verification, artifacts and handoff
+
+Final explicit scope-only suite plus lazy-import tests: **346 passed, 30 subtests
+passed**. Interactive `test_scope_pair.py` was excluded. Direct standalone frame
+and continuous-stream startup/run/shutdown passed with null output and channels
+24/25; stream additionally exercised retained 3-kHz low-pass and 50-Hz AC
+compensation. No audio device was opened. `git diff --check` passed.
+
+Artifacts are under `tmp/scope-compute-audit/`. Reproduce with `measure.py`,
+`preview_measure.py`, `null_pipeline.py`, `startup.py`, and `verify.py` using the
+repository Python from the repository root. `startup.py` requires an unused cache
+directory for a genuinely cold repeat. Key summary SHA256s:
+
+- `NULL_SUMMARY.json`:
+  `6d62646a3aa87a2be957267200ac5a329f7efe6efb74bf800d6caa904bcb3c67`
+- `PREVIEW_SUMMARY.json`:
+  `6eab309e3f3b3a0db06b90867ec19cbfdc40f95bf923bb342fea4a9c17bfc47a`
+- `startup.json`:
+  `0ae43e97afcaf57162b31c34f6350d0172337030f626c3db7974c447f8c1337f`
+- `accepted-tests.log`:
+  `addb77b702457d52c193227452aaf71712034c1609bc08d17c58c8d99d874d19`
+
+**Handoff:** The requested scope/XY-baker NumPy/SciPy numerical audit and software
+migration are complete. S6 remains active: retain A052's outstanding presentation,
+moving-source preview-age/cadence/output-impact and D0 comparison requirements.
+This check-in does not complete S6/S7 or replace hardware validation. Keep the
+audited compute boundary and exact-signature warmup when adding new scope paths.
+
+---
+
+## Appendix A054 — S6 presentation validation and S7 start — 2026-10-06
+
+**Status:** S6 software/presentation evidence accepted; S7 active. No physical
+device, analog/tape, or interactive-browser claim is made.
+
+### Provenance and implementation
+
+Branch `scope-mode-upgrade`, HEAD `7d4502854e0d2ad8bb0e32a1b7516811775497bf`;
+the worktree also contained unrelated pre-existing edits, which were preserved.
+The matched moving-video audit used the D0 snapshot `7ff4902c`, previous-S6
+snapshot `7d450285`, and the current dirty snapshot. The shared fixture was
+`modem_tests/fixtures/v7_pixel_motion_16x9.mp4`, SHA256
+`7542e4b0287b3f9485f1d4ad7c1d7ccbe330e9272c8bce7f7c61a7f0c6f37864`.
+Each of the three runs per cell had a 10-second warmup and a 60-second
+measurement window. Requests were 30 captures/s and 30 traces/s, null output at
+96 kHz/3,200 samples,
+512-frame output blocks, channels 24/25, with pause at 8 seconds, seek to 7.25
+seconds at 11 seconds, and resume at 14 seconds. Preview modes were disabled,
+680px CPU-headless at 2 Hz, and native GUI under Xvfb/llvmpipe. Trial order was
+interleaved across the nine cells. All 27 runs completed with successful control
+acks and natural fixture-loop transitions.
+
+The native GUI now retains up to 512 rasterized text surfaces. The unchanged UI
+canvas is reused; text tiles preserve Pillow's integer and fractional-origin
+rasterization, and selective texture uploads remain in place. Scope mode's `/`
+route now serves `templates/scope.html`; the MJPEG handler creates one reusable
+preview workspace per connection rather than allocating scratch arrays per frame.
+Panel geometry, slider tracks, and state-dependent controls are still composed
+on each rate-limited redraw; this check-in caches repeated text rasterization, not
+the entire static panel as a single background surface.
+
+### Moving-video comparison
+
+Medians across the three runs in each cell:
+
+| Snapshot | Preview | One-core CPU % | Trace rate Hz | Fresh source transitions / active s | Media-lag p95 ms | Callback p99 / max ms |
+|---|---|---:|---:|---:|---:|---:|
+| D0 | Off | 18.13 | 30.00 | 27.78 | 99.7 | 0.054 / 0.766 |
+| Previous S6 | Off | 20.05 | 30.00 | 29.53 | 97.0 | 0.072 / 0.903 |
+| Migrated | Off | 16.73 | 30.00 | 29.25 | 96.7 | 0.063 / 0.164 |
+| D0 | CPU-headless | 22.47 | 30.00 | 27.68 | 67.0 | 0.061 / 0.751 |
+| Previous S6 | CPU-headless | 23.72 | 30.00 | 29.41 | 97.0 | 0.080 / 0.571 |
+| Migrated | CPU-headless | 20.05 | 30.00 | 29.60 | 102.3 | 0.077 / 0.268 |
+| D0 | Native software GL | 114.50 | 29.97 | 25.31 | 67.0 | 0.837 / 6.431 |
+| Previous S6 | Native software GL | 48.37 | 29.98 | 28.92 | 101.3 | 0.154 / 4.920 |
+| Migrated | Native software GL | 43.43 | 29.98 | 28.86 | 101.9 | 0.090 / 4.300 |
+
+All cells kept approximately 30 output traces/s. CPU-headless render age p95 and
+median cadence were **67.9 ms / 528.6 ms (D0)**, **38.7 / 512.8 ms (previous)**,
+and **39.1 / 512.3 ms (migrated)**. Native-software-GL render-age p95 and median
+worker cadence were **75.3 / 112.9 ms (D0)**, **46.6 / 523.2 ms (previous)**,
+and **39.6 / 517.9 ms (migrated)**. Native presentation-age p95 / median
+presentation interval were **159.9 / 113.8 ms**, **513.9 / 638.6 ms**, and
+**511.6 / 641.5 ms**, respectively. D0's faster preview loop consumed more than
+one CPU core in the software-GL cell. These are process-group/null-output
+measurements; CPU percentages can exceed 100% and are not device timings.
+
+### Static UI, size, visual, and HTTP evidence
+
+| Preview size | D0 p50 CPU ms | Previous S6 p50 ms | Migrated p50 ms |
+|---:|---:|---:|---:|
+| 384 | 7.52 | 1.97 | 2.24 |
+| 512 | 13.13 | 4.28 | 4.13 |
+| 680 | 19.40 | 7.43 | 7.27 |
+| 700 | 22.01 | 7.90 | 8.10 |
+| 1,024 | 47.87 | 10.27 | 10.49 |
+| 1,600 | 108.13 | 25.26 | 26.25 |
+
+Size sweep: 25 warm renders/size, identical shared 3,200-point float32 trace from
+fixture frame 150; these are CPU-only renderer timings, not end-to-end capture or
+GUI timings. In a separate matched 1280x800 Pillow canvas test, direct text
+drawing vs cached text was pixel-identical; p50/p95 CPU fell from **19.02/22.90**
+to **15.28/18.69 ms** over 200 draws per mode, with 40 cached surfaces using
+325 kB. Area-resizing phosphor output to a common 512px comparison gave previous
+S6 vs migrated mean channel error at most **0.000009**, maximum **1** code value,
+and no channels over 4 code values across tested sizes. The text-cache UI parity
+test is exact. D0 vs migrated was also within 1 code value through 768px; the
+1,024px and 1,600px common-size comparisons had mean errors **0.428** and **0.327**,
+p95 **2** in both, p99 **6** and **4**, and maxima **13** and **9**, respectively.
+These higher-size deltas reflect the bounded large-preview filtering path. These
+comparisons do not establish physical-phosphor parity.
+
+The actual scope-mode root returned the scope dashboard; the HTTP MJPEG endpoint
+returned 12 valid, distinct 384x384 JPEGs at median **71.5 ms** / p95 **71.9 ms**
+interval (about 14 Hz), median 14.4 kB/frame. Instrumentation saw tap captures
+continue while connected and stop **3,035 ms** after disconnect, within the
+three-second renewable tap lease plus callback observation. The HTTP route and
+stream were exercised end-to-end, and the existing Node renderer-parity test
+covers the browser-side luminance-to-trace calculation. The desktop browser
+bridge reported no connected browser and no local Chromium/Firefox was installed;
+interactive DOM execution/screenshot remains unverified.
+
+A post-cache 20-second native-software-GL smoke passed at 29.8 traces/s and
+39.1% one-core process-group CPU; render-age p95 was 39.7 ms, worker interval
+median 517.6 ms, callback p99 0.085 ms, and maximum callback 8.83 ms. The isolated
+maximum exceeded the 5.33 ms software block period; S7 must continue tracking
+tail margin. No physical callback/device conclusion follows.
+
+### Checks, artifacts, and handoff
+
+Passed 36 focused GUI, preview, dashboard-route, and lazy-import tests, including
+cached-text pixel parity, workspace preview parity, and selective-upload behavior;
+`git diff --check` and syntax compilation passed. The route test preserves the
+general monitor in non-scope modes. The earlier 346-test scope/numerical suite and
+null output smoke are recorded in A053.
+
+Artifacts and SHA256:
+
+- `tmp/scope-s6-moving-audit/MOVING_PREVIEW_SUMMARY.json`:
+  `8df4497b22e6eaac3d9ebb293b901ed7a884f0551f9d493771e289e411279a7c`
+- `tmp/scope-s6-moving-audit/PREVIEW_SIZE_SWEEP.json`:
+  `68929db454e59a3453f325173da50e0278de3eb077db42588f0b3545d673f31e`
+- `tmp/scope-s6-moving-audit/GUI_TEXT_CACHE_BENCHMARK.json`:
+  `51f4c07d63856174cc0bac04074bf178c71de4a96037006e6f118b465d9197e9`
+- `tmp/scope-s6-browser-audit/http_stream_audit.json`:
+  `5d3b52913aa7a7a7e427c8e9d82d99154fb51aa8ab933ac218d081e3f5df6c28`
+- Reproduction harnesses are in `tmp/scope-s6-moving-audit/` and
+  `tmp/scope-s6-browser-audit/`; all temporary captures stay under gitignored
+  `tmp/`.
+
+**Claims:** S6's static presentation, CPU-headless/native-software-GL comparison,
+size sweep, matched moving-video response, HTTP browser route, and continuous-tap
+lease have software evidence. Interactive browser runtime and physical output
+remain open limitations. Defaults were not changed.
+
+**Handoff:** Last completed stage: S6 software/presentation validation. Active
+stage: S7 scheduling/buffer and complete-route validation. An exploratory
+18-cell 48/96-kHz × 256/512/1024-frame × 2/4/6-block `BufferedSource` sweep is
+recorded in Appendix A055 below. A verified loopback route and physical scope are
+still required for PortAudio and analog/tape validation; do not infer them from
+null output.
+
+---
+
+## Appendix A055 — S7 null-output buffer frontier — 2026-10-06
+
+The first S7 scheduling/buffer sweep is complete. This is exploratory software
+evidence on the current migrated snapshot, not a D0/P0 comparison or a hardware
+validation. The fixture was the same moving-video file and SHA256 recorded in
+A054. The harness ran `tools/scope_screen.py --source video --device null
+--fps 30 --capture-fps 30 --stream --control`; `Scope.samplerate` was explicitly
+set to 48 or 96 kHz, with block size 256/512/1024 and `BufferedSource` depth
+2/4/6. Each cell had a 3-second warmup and 20-second measured interval, one run
+per cell, in deterministic shuffled order. NullStream drove the callback; no
+PortAudio device was opened. Telemetry wrapped callback and generation calls and
+sampled queue occupancy at 20 Hz, so reported CPU/timing includes low-level
+instrumentation overhead.
+
+| Rate kHz | Block frames | Depth blocks | Queue capacity ms | Trace rate Hz | CPU % of one core | Callback p99 ms | Callback-start interval p99 ms | Underruns |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 48 | 256 | 2 | 10.67 | 29.999 | 18.40 | 0.387 | 5.368 | 0 |
+| 48 | 256 | 4 | 21.33 | 29.999 | 19.15 | 0.373 | 5.376 | 0 |
+| 48 | 256 | 6 | 32.00 | 29.999 | 19.15 | 0.430 | 5.377 | 0 |
+| 48 | 512 | 2 | 21.33 | 29.999 | 17.45 | 0.546 | 10.712 | 0 |
+| 48 | 512 | 4 | 42.67 | 29.999 | 16.85 | 0.493 | 10.724 | 0 |
+| 48 | 512 | 6 | 64.00 | 29.999 | 16.65 | 0.402 | 10.704 | 0 |
+| 48 | 1,024 | 2 | 42.67 | 30.015 | 16.20 | 0.672 | 21.402 | 0 |
+| 48 | 1,024 | 4 | 85.33 | 29.983 | 16.25 | 0.658 | 21.374 | 0 |
+| 48 | 1,024 | 6 | 128.00 | 29.983 | 16.05 | 0.608 | 21.371 | 0 |
+| 96 | 256 | 2 | 5.33 | 29.999 | 23.25 | 0.360 | 2.706 | 0 |
+| 96 | 256 | 4 | 10.67 | 29.995 | 23.40 | 0.349 | 2.708 | 0 |
+| 96 | 256 | 6 | 16.00 | 29.999 | 25.20 | 0.321 | 2.718 | 0 |
+| 96 | 512 | 2 | 10.67 | 29.999 | 20.15 | 0.406 | 5.395 | 0 |
+| 96 | 512 | 4 | 21.33 | 29.999 | 20.65 | 0.480 | 5.370 | 0 |
+| 96 | 512 | 6 | 32.00 | 29.999 | 21.30 | 0.532 | 5.385 | 0 |
+| 96 | 1,024 | 2 | 21.33 | 29.999 | 18.65 | 0.514 | 10.712 | 0 |
+| 96 | 1,024 | 4 | 42.67 | 29.999 | 18.40 | 0.517 | 10.713 | 0 |
+| 96 | 1,024 | 6 | 64.00 | 29.999 | 18.10 | 0.544 | 10.743 | 0 |
+
+All 18 runs held approximately 30 traces/s with zero recorded ring underruns.
+Median sampled occupancy was at capacity for each configuration; the observed
+minimum was one block at depth 2 and depth-minus-one blocks at depths 4 and 6.
+The callback-start p99 is a software-clock interval,
+not PortAudio callback jitter. For the six depth-2 cells, a separate 20-second
+follow-up recorded every generated block and video-source decode event:
+
+| Rate kHz | Block frames | Queue capacity ms | Generation p99 / max ms | Video decode p99 / max ms | Callback duration p99 / max ms | CPU % |
+|---:|---:|---:|---:|---:|---:|---:|
+| 48 | 256 | 10.67 | 0.540 / 1.058 | 2.937 / 3.184 | 0.370 / 0.744 | 18.30 |
+| 48 | 512 | 21.33 | 0.854 / 1.104 | 2.906 / 6.728 | 0.502 / 1.093 | 17.25 |
+| 48 | 1,024 | 42.67 | 1.250 / 1.894 | 2.960 / 7.787 | 0.562 / 1.533 | 16.90 |
+| 96 | 256 | 5.33 | 0.562 / 6.357 | 3.063 / 6.168 | 0.351 / 5.872 | 23.45 |
+| 96 | 512 | 10.67 | 0.759 / 1.234 | 3.001 / 3.310 | 0.418 / 1.012 | 20.25 |
+| 96 | 1,024 | 21.33 | 1.163 / 2.021 | 2.859 / 6.188 | 0.534 / 1.276 | 18.00 |
+
+For the 96-kHz/256-frame cell, the isolated generation and callback maxima were
+longer than its 2.67-ms block period, yet the depth-2 ring did not underrun in
+these runs. The 512-frame/depth-2 candidate reduced the 1,024-frame queue's
+21.33-ms capacity to 10.67 ms, kept the generation p99 at 0.76 ms and video
+decode p99 at 3.00 ms, and had zero underruns in the initial and detail runs.
+This is a candidate for the next soak, not a proven default: 20 seconds per
+detail cell cannot establish long-tail behavior or device scheduling margins.
+No application or CLI defaults were changed.
+
+The detail capture-decode p99 uses per-frame `VideoFileSource` timestamps. Its
+separate periodic-status sample of `last_capture_duration_ms` is only about 71
+observations/run and is not substituted for per-frame decode statistics. The
+device, loopback, real-screen-capture, GUI/headless mode-transition, D0/P0,
+physical-scope, and analog/tape parts of S7 remain open.
+
+Artifacts and SHA256:
+
+- `tmp/scope-s7-buffer-audit/S7_BUFFER_SWEEP.json`:
+  `0f8b1097d984f16fd01c5c52bc6c846ddafd22eaf77ee45e8dde8050b7bc4790`
+- `tmp/scope-s7-buffer-audit/S7_BUFFER_GENERATION_DETAIL.json`:
+  `a9f81165d275120e314ae5b55876349a19b81735eaa6d1629b8aad7edbd3d50e`
+- `tmp/scope-s7-buffer-audit/S7_CAPTURE_DECODE_DETAIL.json`:
+  `2a1d24ac84179283a410958e83d23767a1c440af7216edaba08d52c015133a4a`
+- Reproduction and analysis harnesses: `tmp/scope-s7-buffer-audit.py`,
+  `tmp/scope-s7-buffer-generation-detail.py`, and
+  `tmp/scope-s7-capture-decode-analysis.py`.
+
+**Handoff:** S7 remains active. A ten-minute 96-kHz/512-frame/depth-2
+NullStream soak is running as a next check-in; it does not validate an audio
+device. After recording its underrun/cadence/CPU/queue evidence, pursue repeat
+trials and supported-mode checks, then use only an explicitly verified route
+and physical scope for PortAudio and analog validation. Keep defaults frozen
+until matched evidence covers the complete route.
+
+---
+
+## Appendix A056 — S7 ten-minute null-output soak — 2026-10-06
+
+The A055 candidate completed a 10-second warmup and 600-second measured
+moving-video soak at 96 kHz, 512-frame blocks, and ring depth 2. The source,
+fixture hash, null route, and instrumentation match A055. The process exited
+successfully. Results:
+
+- Software sample-count-derived trace rate: **29.9981 Hz**.
+- Recorded ring underruns: **0**.
+- Measured process CPU: **20.11% of one core**.
+- Callback durations, 112,493 measured calls: p50 **0.0743 ms**, p95
+  **0.2451 ms**, p99 **0.4383 ms**, maximum **5.1451 ms**, against a
+  **5.3333-ms** block period.
+- Queue occupancy, 11,972 samples: p50/p95/p99 **10.6667 ms** (capacity).
+
+This supports sustained software generation at the candidate settings on this
+host. It does not establish fresh-picture cadence from the sample count, hardware
+deadline margins, PortAudio/DAC performance, or physical-scope quality. S7 stays
+open and defaults remain unchanged.
+
+Artifact: `tmp/scope-s7-buffer-audit/S7_NULL_SOAK.json`, SHA256
+`0346fd7639c9485e83854c65a99a43c5aaad368fbbbed0b55713ec5d134364d8`.
+Harness: `tmp/scope-s7-buffer-soak.py`; raw trace, run summary, and log are under
+`tmp/scope-s7-buffer-audit/96k-bs512-d2-r201*`.
+
+**Handoff:** The null-output sweep, generation/decode follow-up, and ten-minute
+soak are recorded. Prepare to integrate the user's incoming branch changes,
+preserving the dirty worktree and evidence. After integration, run affected
+checks and continue supported-mode/settings validation and final matched D0/P0
+comparison. Interactive-browser runtime and explicitly verified device-route
+and physical-scope validation remain open.
+
+---
+
+## Appendix A057 — Incoming modem integration check-in — 2026-10-06
+
+Pulled `scope-mode-upgrade` by fast-forward from `7d450285` to `d6589751` and
+reapplied the saved local work. The sole textual conflict in
+`animation_modem/v7.py` was resolved by retaining the incoming thread-local
+nested-body auto-level context together with the local final-mix EOF/body and
+metadata ceilings. The nested auto-level test now checks use of the measured
+final framing ceiling, rather than the historical header-only `BODY_PEAK`.
+The default no-EOF encoder path and opt-in nested auto-level behavior are both
+retained; this integration does not change scope defaults or stage status.
+
+Integration test fixtures were reconciled with the combined wire: the mono EOF
+packet fingerprint now pins the intentional EOF-level-fit output; aspect-signal
+tests explicitly select the reference DCT kernel rather than a saved GUI kernel;
+the untagged HD clip explicitly clears filter-derived color-space metadata for
+FFmpeg versions that propagate it. The nested utilization assertion measures
+available EOF headroom and retains its final header-order checks after the
+standalone status-tone overlay.
+
+Post-integration checks passed: **196 scope/dashboard tests**, **26 application,
+lazy-import, and ASCII tests**, browser renderer parity, offscreen local GL
+smoke, modem dependency imports, staged-Python syntax compilation, and diff
+whitespace checks. The full modem suite passed **948 tests** after the fixture
+corrections above; the reverse nested live-receiver test also passed in that
+run. The pre-pull backup and named stash retain the original dirty
+worktree for recovery; generated source-list manifests remain local artifacts.

@@ -44,6 +44,7 @@ import time
 
 from numba import njit
 import numpy as np
+from scope_numeric import circular_filter, circle_points
 
 ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
 if ROOT_DIR not in sys.path:
@@ -91,13 +92,7 @@ def lowpass_circular(frame, cutoff_hz, samplerate, order=4):
     n = len(frame)
     if not cutoff_hz or cutoff_hz <= 0 or cutoff_hz >= samplerate / 2 or n < 4:
         return frame.astype(np.float32)
-    freqs = np.fft.rfftfreq(n, d=1.0 / samplerate)
-    with np.errstate(divide="ignore", over="ignore"):
-        mag = 1.0 / np.sqrt(1.0 + (freqs / float(cutoff_hz)) ** (2 * order))
-    out = np.empty_like(frame)
-    for ch in range(frame.shape[1]):
-        out[:, ch] = np.fft.irfft(np.fft.rfft(frame[:, ch]) * mag, n=n)
-    return out.astype(np.float32)
+    return circular_filter(frame, samplerate, cutoff_hz, order=order)
 
 
 class CascadedOnePole:
@@ -145,13 +140,12 @@ def bench_frame(n):
     """Circle plus rotating square -- known geometry, so filter effects are
     unambiguous rather than confused with content."""
     from scope_out import rasterize
-    th = np.linspace(0, 2 * np.pi, 128, endpoint=False)
-    circle = np.stack([0.7 * np.cos(th), 0.7 * np.sin(th)], axis=1)
+    circle = circle_points(128,0.7)
     circle = np.vstack([circle, circle[:1]])
     s = 0.4
     square = np.array([[-s, -s], [s, -s], [s, s], [-s, s], [-s, -s]])
     spokes = [np.array([[0, 0], [0.7 * math.cos(a), 0.7 * math.sin(a)]])
-              for a in np.linspace(0, np.pi, 5, endpoint=False)]
+               for a in (i*math.pi/5 for i in range(5))]
     return rasterize([circle, square] + spokes, n)
 
 

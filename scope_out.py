@@ -9,6 +9,7 @@ available, ~200-500 mV/div, and start with the system volume low.
 """
 
 import re
+import math
 import sys
 import threading
 import time
@@ -21,6 +22,8 @@ except Exception:                    # usable standalone, outside the repo
     settings_mod = None
 import numpy as np
 from numba import njit
+from scope_numeric import (circular_filter, finite_array, scale_clip,
+                           warm_scope_numeric, luma_bytes, scale_float32, circle_points)
 try:
     import sounddevice as sd
 except Exception as _sd_err:            # deliberately broad -- see below
@@ -77,24 +80,76 @@ def beam_is_parked(frame, eps=PARK_PTP, x_only=False):
     ptp per channel rather than diff(): no allocation of an (n, 2) temporary in
     a path that runs once per trace. In X-only mode only the emitted axis matters.
     """
-    f = np.asarray(frame)
-    if len(f) < 2:
-        return True
-    # ptp propagates NaN and inf, so either is caught from the reductions we
-    # already need -- `not (v >= 0)` is True for NaN and `v == inf` for inf.
-    # An isfinite().all() here would be correct too, but it allocates a full
-    # boolean array, and this runs on the audio thread once per callback.
-    px = np.ptp(f[:, 0])
-    if x_only:
-        if not (px >= 0.0) or px == np.inf:
-            return True
-        return bool(px < eps)
-    py = np.ptp(f[:, 1])
-    if not (px >= 0.0) or not (py >= 0.0) or px == np.inf or py == np.inf:
-        # Not a picture. Treat it as parked so the caller replaces it with
-        # something the deflection amplifiers can actually follow.
-        return True
-    return bool(px < eps and py < eps)
+    return bool(_parked_kernel(np.asarray(frame), float(eps), bool(x_only)))
+
+
+@njit(cache=True, nogil=True, fastmath=False)
+def _frame_peak_kernel(frame):
+    peak = 0.0
+    for value in frame.flat: peak = max(peak, abs(value))
+    return peak
+
+
+@njit(cache=True, nogil=True, fastmath=False)
+def _output_map_kernel(out, frame, count, first, second, x_only, gain, previous, ramp_count):
+    channels = 1 if x_only else 2
+    if out.shape[1] > channels:
+        out[:] = 0.0
+    for i in range(count):
+        value = gain
+        if ramp_count > 1 and i < ramp_count:
+            # Keep the historical float32 gain-ramp arithmetic.
+            value = np.float32(np.float32(i / (ramp_count-1)) * np.float32(gain-previous))
+            value = np.float32(value + np.float32(previous))
+        out[i, first] = frame[i, 0] * value
+        if not x_only: out[i, second] = frame[i, 1] * value
+
+
+@njit(cache=True, nogil=True, fastmath=False)
+def _transform_frame_kernel(src, angle, mirror):
+    out = src.copy()
+    for i in range(len(src)):
+        x, y = src[i, 0], src[i, 1]
+        if angle == 90: x, y = -y, x
+        elif angle == 180: x, y = -x, -y
+        elif angle == 270: x, y = y, -x
+        out[i, 0] = -x if mirror else x
+        out[i, 1] = y
+    return out
+
+
+@njit(cache=True, nogil=True, fastmath=False)
+def _parked_kernel(frame, eps, x_only):
+    if len(frame) < 2: return True
+    for axis in range(1 if x_only else 2):
+        low = np.inf; high = -np.inf
+        for i in range(len(frame)):
+            value = frame[i, axis]
+            if not np.isfinite(value): return True
+            low = min(low, value); high = max(high, value)
+        if high-low >= eps:
+            # Need to examine the other axis for invalid samples even if one
+            # axis already proves motion.
+            for j in range(axis+1, 1 if x_only else 2):
+                for i in range(len(frame)):
+                    if not np.isfinite(frame[i,j]): return True
+            return False
+    return True
+
+
+@njit(cache=True, nogil=True, fastmath=False)
+def _unpark_kernel(frame, phase, level):
+    n = max(2, len(frame)); radius = level * 0.02
+    x = float(frame[0,0]) if len(frame) else 0.0
+    y = float(frame[0,1]) if len(frame) else 0.0
+    if not np.isfinite(x) or not np.isfinite(y): x = y = 0.0
+    bound = level-radius
+    x = min(bound,max(-bound,x)); y = min(bound,max(-bound,y))
+    out = np.empty((n,2),np.float32)
+    for i in range(n):
+        angle = 2.0*np.pi*(i+phase)/n
+        out[i,0] = x+radius*np.cos(angle); out[i,1] = y+radius*np.sin(angle)
+    return out
 
 
 def unpark_frame(frame, phase=0, level=LEVEL, eps=PARK_PTP):
@@ -107,21 +162,7 @@ def unpark_frame(frame, phase=0, level=LEVEL, eps=PARK_PTP):
     frames do not retrace the identical ring.
     """
     f = np.ascontiguousarray(np.asarray(frame, dtype=np.float32)[:, :2])
-    n = max(2, len(f))
-    radius = level * 0.02
-    centre = np.asarray(f[0] if len(f) else (0.0, 0.0), dtype=np.float64)
-    if not np.isfinite(centre).all():
-        centre = np.zeros(2)          # a NaN park has no position to keep
-    # Clamp the CENTRE, not the finished ring. Clipping the ring is what made
-    # this function able to produce a parked beam of its own: a park at the
-    # -0.936 pedestal that render_yt_grid uses for empty rows is outside
-    # +-LEVEL on both axes, so every point of the ring clipped to the same
-    # corner and the guard reported success while the dot kept burning.
-    centre = np.clip(centre, -(level - radius), level - radius)
-    th = 2.0 * np.pi * (np.arange(n) + int(phase)) / n
-    out = centre + radius * np.column_stack([np.cos(th), np.sin(th)])
-    return np.ascontiguousarray(out[:len(f)] if len(f) >= 2 else out,
-                                dtype=np.float32)
+    return _unpark_kernel(f, int(phase), float(level))
 
 
 def rotate_frame(frame, degrees):
@@ -137,16 +178,7 @@ def rotate_frame(frame, degrees):
     src = np.asarray(frame, dtype=np.float32)
     if angle == 0:
         return np.ascontiguousarray(src)
-    out = np.empty_like(src)
-    if angle == 90:
-        out[:, 0] = -src[:, 1]
-        out[:, 1] = src[:, 0]
-    elif angle == 180:
-        out[:] = -src
-    else:  # 270
-        out[:, 0] = src[:, 1]
-        out[:, 1] = -src[:, 0]
-    return np.ascontiguousarray(out)
+    return _transform_frame_kernel(np.ascontiguousarray(src), angle, False)
 
 
 def mirror_frame(frame, mirror):
@@ -164,9 +196,7 @@ def mirror_frame(frame, mirror):
     src = np.asarray(frame, dtype=np.float32)
     if not mirror:
         return np.ascontiguousarray(src)
-    out = src.copy()
-    out[:, 0] = -out[:, 0]
-    return np.ascontiguousarray(out)
+    return _transform_frame_kernel(np.ascontiguousarray(src), 0, True)
 
 
 @njit(cache=True, nogil=True, fastmath=False)
@@ -240,7 +270,7 @@ def redistribute_dwell(frame, strength=0.0, x_only=False):
     """
     src = np.asarray(frame, dtype=np.float32)
     strength = float(strength)
-    if not np.isfinite(strength) or not 0.0 <= strength <= 1.0:
+    if not math.isfinite(strength) or not 0.0 <= strength <= 1.0:
         raise ValueError("physical dwell strength must be between 0 and 1")
     if strength == 0.0 or len(src) < 3:
         return np.ascontiguousarray(src)
@@ -248,6 +278,27 @@ def redistribute_dwell(frame, strength=0.0, x_only=False):
         return np.ascontiguousarray(src)
     return _redistribute_dwell_kernel(np.ascontiguousarray(src), strength,
                                       bool(x_only))
+
+
+@njit(cache=True, nogil=True, fastmath=False)
+def _anchor_kernel(src, target, slope_fraction):
+    dx=float(target[0])-float(src[0,0]);dy=float(target[1])-float(src[0,1])
+    distance=np.hypot(dx,dy)
+    if distance<=1e-8:return src
+    out=src.copy()
+    if len(src)<4:
+        out[0]=target;return out
+    baseline=max(np.hypot(float(src[0,0])-float(src[-1,0]),
+                          float(src[0,1])-float(src[-1,1])),1e-9)
+    for i in range(1,len(src)):
+        baseline=max(baseline,np.hypot(float(src[i,0])-float(src[i-1,0]),
+                                      float(src[i,1])-float(src[i-1,1])))
+    width=max(1,min(int(np.ceil(distance/(max(slope_fraction,1e-6)*baseline))), (len(src)-1)//2))
+    for i in range(len(src)):
+        weight=1.0-i/width if i<=width else ((i-(len(src)-width)+1)/width if i>=len(src)-width else 0.0)
+        out[i,0]=float(src[i,0])+weight*dx;out[i,1]=float(src[i,1])+weight*dy
+    out[0]=target
+    return out
 
 
 def anchor_periodic_frame(frame, start, *, slope_fraction=0.25):
@@ -266,32 +317,36 @@ def anchor_periodic_frame(frame, start, *, slope_fraction=0.25):
     if not len(src):
         return np.ascontiguousarray(src)
     target = np.asarray(start, dtype=np.float32).reshape(2)
-    delta = target.astype(np.float64) - src[0].astype(np.float64)
-    distance = float(np.linalg.norm(delta))
-    if distance <= 1e-8:
-        return np.ascontiguousarray(src)
-    if len(src) < 4:
-        out = src.copy()
-        out[0] = target
-        return out
-
-    points = src.astype(np.float64)
-    step = np.linalg.norm(np.diff(points, axis=0), axis=1)
-    seam = float(np.linalg.norm(points[0] - points[-1]))
-    baseline = max(float(step.max(initial=0.0)), seam, 1e-9)
-    fraction = max(float(slope_fraction), 1e-6)
-    width = int(np.ceil(distance / (fraction * baseline)))
-    width = max(1, min(width, (len(src) - 1) // 2))
-
-    weights = np.zeros(len(src), dtype=np.float64)
-    weights[:width + 1] = 1.0 - np.arange(width + 1) / width
-    weights[-width:] = np.arange(1, width + 1) / width
-    points += weights[:, None] * delta
-    points[0] = target
-    return np.ascontiguousarray(points, dtype=np.float32)
+    return _anchor_kernel(np.ascontiguousarray(src), target, float(slope_fraction))
 
 
 TRIGGER_SHAPES = ("ramp", "step")
+
+
+@njit(cache=True, nogil=True, fastmath=False)
+def _clip_trigger_kernel(out, level, floor):
+    for i in range(len(out)):
+        # np.clip preserves NaN; comparisons preserve that behavior here.
+        if out[i,0]<floor:out[i,0]=floor
+        elif out[i,0]>level:out[i,0]=level
+        if out[i,1]<-1.0:out[i,1]=-1.0
+        elif out[i,1]>1.0:out[i,1]=1.0
+    return out
+
+
+@njit(cache=True, nogil=True, fastmath=False)
+def _trigger_kernel(src, cycle, marker, offset, level, step):
+    out=src.copy()
+    hold=max(1,marker//8);span=max(1,marker-2*hold-1)
+    for i in range(len(src)):
+        phase=(i+offset)%cycle
+        if step:
+            if phase<max(2,marker//2):out[i,0]=-level
+            elif phase<marker:out[i,0]=level
+        elif phase<marker:
+            t=min(1.0,max(0.0,(phase-hold)/span))
+            out[i,0]=-level+2.0*level*t;out[i,1]=level
+    return out
 
 
 def clip_for_trigger(frame, level=LEVEL, floor=-0.98):
@@ -305,13 +360,11 @@ def clip_for_trigger(frame, level=LEVEL, floor=-0.98):
     pedestal at -0.936 that is deliberately outside the picture range.
     """
     out = np.array(frame, dtype=np.float32, copy=True)
-    np.clip(out[:, 0], floor, level, out=out[:, 0])
     # Y is bounded too. It cannot forge a trigger -- nothing looks at Y -- but
     # a single +inf from a filter or a division upstream drives the vertical
     # deflection to whatever the amplifier will do, and the marker's own rail
     # is the largest legitimate value on that axis.
-    np.clip(out[:, 1], -1.0, 1.0, out=out[:, 1])
-    return out
+    return _clip_trigger_kernel(out,float(level),float(floor))
 
 
 def trigger_frame(frame, trigger_samples=24, trigger_level=0.99,
@@ -348,30 +401,12 @@ def trigger_frame(frame, trigger_samples=24, trigger_level=0.99,
     count = len(src)
     if count == 0:
         return np.empty((0, 2), dtype=np.float32)
-    out = np.ascontiguousarray(src[:, :2]).copy()
     cycle = max(1, int(period if period is not None else count))
     marker = max(4, min(int(trigger_samples), cycle))
-    phase = (np.arange(count, dtype=np.int64) + int(offset)) % cycle
     level = min(1.0, max(float(trigger_level), LEVEL + 0.01))
 
-    if shape == "step":
-        low = phase < max(2, marker // 2)
-        high = (phase >= max(2, marker // 2)) & (phase < marker)
-        out[low, 0] = -level
-        out[high, 0] = level
-        return out
-
-    inside = phase < marker
-    if not inside.any():
-        return out
-    p = phase[inside].astype(np.float64)
-    hold = max(1, marker // 8)
-    span = max(1, marker - 2 * hold - 1)
-    # Monotonic: exactly one crossing of any threshold in (-level, +level).
-    t = np.clip((p - hold) / span, 0.0, 1.0)
-    out[inside, 0] = (-level + 2.0 * level * t).astype(np.float32)
-    out[inside, 1] = np.float32(level)
-    return out
+    return _trigger_kernel(np.ascontiguousarray(src[:,:2]),cycle,marker,
+                           int(offset),float(level),shape=="step")
 
 
 # The name this shipped under. Kept so settings.py edits, saved command lines
@@ -398,19 +433,19 @@ def marker_window(count, trigger_level=0.99, shape="ramp"):
     """
     n = max(2, int(count))
     level = min(1.0, max(float(trigger_level), LEVEL + 0.01))
-    out = np.empty((n, 2), dtype=np.float32)
-    if shape == "step":
-        split = max(1, n // 2)
-        out[:split] = (-level, level)
-        out[split:] = (level, level)
-        return out
-    if shape != "ramp":
+    if shape not in TRIGGER_SHAPES:
         raise ValueError(f"trigger shape must be one of {TRIGGER_SHAPES}")
-    hold = max(1, n // 8)
-    span = max(1, n - 2 * hold - 1)
-    t = np.clip((np.arange(n, dtype=np.float64) - hold) / span, 0.0, 1.0)
-    out[:, 0] = (-level + 2.0 * level * t).astype(np.float32)
-    out[:, 1] = np.float32(level)
+    return _marker_kernel(n,float(level),shape=="step")
+
+
+@njit(cache=True, nogil=True, fastmath=False)
+def _marker_kernel(n,level,step):
+    out=np.empty((n,2),np.float32)
+    hold=max(1,n//8);span=max(1,n-2*hold-1)
+    for i in range(n):
+        if step:out[i,0]=-level if i<max(1,n//2) else level
+        else:out[i,0]=-level+2.0*level*min(1.0,max(0.0,(i-hold)/span))
+        out[i,1]=level
     return out
 
 
@@ -539,7 +574,7 @@ def predict_dac_monotonic_ns(time_info, callback_monotonic_ns,
         offset = float(sample_offset)
     except (AttributeError, TypeError, ValueError):
         return None
-    if not all(np.isfinite(value) for value in
+    if not all(math.isfinite(value) for value in
                (current_time, dac_time, rate, offset)) or rate <= 0:
         return None
     delta_s = dac_time - current_time + offset / rate
@@ -678,23 +713,56 @@ def lowpass_frame(frame, samplerate, cutoff_hz, taper_hz=0.0):
     n = len(frame)
     if not cutoff_hz or cutoff_hz <= 0 or n < 8:
         return np.asarray(frame, dtype=np.float32)
-    F = np.fft.rfft(np.asarray(frame, dtype=np.float64), axis=0)
-    freqs = np.fft.rfftfreq(n, 1.0 / float(samplerate))
-    if taper_hz and taper_hz > 0:
-        x = np.clip((cutoff_hz + taper_hz - freqs) / float(taper_hz), 0.0, 1.0)
-        gain = 0.5 - 0.5 * np.cos(np.pi * x)          # raised cosine
-    else:
-        gain = (freqs <= cutoff_hz).astype(np.float64)
-    out = np.fft.irfft(F * gain[:, None], n=n, axis=0)
-    return np.ascontiguousarray(out, dtype=np.float32)
+    return circular_filter(np.asarray(frame), samplerate, cutoff_hz,
+                           kind=1, taper=taper_hz)
+
+
+@njit(cache=True, nogil=True, fastmath=False)
+def _screen_kernel(points,width,height):
+    scale=max(width,height)/2.0;out=np.empty_like(points)
+    for i in range(len(points)):
+        out[i,0]=(points[i,0]-width/2.0)/scale
+        out[i,1]=(points[i,1]-height/2.0)/scale
+    return out
 
 
 def from_screen(points, width, height):
     """Pixel coords -> [-1, 1], aspect preserved, origin at centre."""
     p = np.asarray(points, dtype=np.float64).reshape(-1, 2)
-    s = max(width, height) / 2.0
-    return np.stack([(p[:, 0] - width / 2.0) / s,
-                     (p[:, 1] - height / 2.0) / s], axis=1)
+    return _screen_kernel(p,float(width),float(height))
+
+
+@njit(cache=True, nogil=True, fastmath=False)
+def _vector_frame_kernel(points,jumps,n,smooth,level,jump_gain):
+    out=np.empty((n,2),np.float64)
+    if len(points)==0:
+        for i in range(n):
+            theta=2.0*np.pi*i/n
+            out[i,0]=np.cos(theta);out[i,1]=np.sin(theta)
+    else:
+        weights=np.empty(len(points)-1,np.float64)
+        cumulative=np.zeros(len(points),np.float64)
+        for i in range(len(weights)):
+            weights[i]=max(1e-9,np.hypot(points[i+1,0]-points[i,0],points[i+1,1]-points[i,1])*(jump_gain if jumps[i] else 1.0))
+            cumulative[i+1]=cumulative[i]+weights[i]
+        segment=0
+        for i in range(n):
+            target=(cumulative[-1]/n)*i
+            while segment<len(weights)-1 and cumulative[segment+1]<=target:segment+=1
+            fraction=(target-cumulative[segment])/weights[segment]
+            for axis in range(2):out[i,axis]=points[segment,axis]+fraction*(points[segment+1,axis]-points[segment,axis])
+    if smooth>1 and len(points):
+        filtered=np.empty_like(out)
+        for i in range(n):
+            for axis in range(2):
+                value=0.0
+                for j in range(smooth):value+=out[(i+(smooth-1)//2-j)%n,axis]*(1.0/smooth)
+                filtered[i,axis]=value
+        out=filtered
+    result=np.empty((n,2),np.float32)
+    for i in range(n):
+        for axis in range(2):result[i,axis]=min(level,max(-level,out[i,axis]*level))
+    return result
 
 
 def rasterize(polylines, n=SAMPLES_PER_FRAME):
@@ -717,39 +785,20 @@ def rasterize(polylines, n=SAMPLES_PER_FRAME):
         # Never park the beam: 0 V on both channels is a stationary
         # full-brightness dot at centre screen, which burns phosphor on
         # analog CRTs.  Idle on a circle so the energy stays spread out.
-        th = np.linspace(0, 2 * np.pi, n, endpoint=False)
-        return (LEVEL * np.stack([np.cos(th), np.sin(th)], axis=1)).astype(np.float32)
+        return _vector_frame_kernel(np.empty((0,2),np.float64),np.empty(0,np.bool_),
+                                    int(n),int(SMOOTH),float(LEVEL),float(JUMP_GAIN))
 
     P = np.vstack(pts)
     P = np.vstack([P, P[0]])                  # close loop back to the start
     is_jump.append(True)
-
-    seg = np.diff(P, axis=0)
-    length = np.hypot(seg[:, 0], seg[:, 1])
-    w = np.where(np.array(is_jump), length * JUMP_GAIN, length)
-    w = np.maximum(w, 1e-9)
-
-    cum = np.concatenate([[0.0], np.cumsum(w)])
-    t = np.linspace(0.0, cum[-1], n, endpoint=False)
-    i = np.clip(np.searchsorted(cum, t, side="right") - 1, 0, len(w) - 1)
-    f = ((t - cum[i]) / w[i])[:, None]
-    out = P[i] + f * (P[i + 1] - P[i])
-
-    if SMOOTH > 1:
-        k = np.ones(SMOOTH) / SMOOTH
-        pad = SMOOTH
-        out = np.stack([
-            np.convolve(np.r_[c[-pad:], c, c[:pad]], k, mode="same")[pad:-pad]
-            for c in out.T
-        ], axis=1)
 
     # Fixed gain only.  Per-frame mean-centring or peak-normalising would
     # re-fit every frame to the screen, destroying registration across a
     # matted sequence: the image would swim as content moves and lurch on
     # folder switches.  Geometry arrives already in canvas coords [-1, 1];
     # the clip guards smoothing overshoot, it is not a scaler.
-    out = np.clip(out * LEVEL, -LEVEL, LEVEL)
-    return np.ascontiguousarray(out, dtype=np.float32)
+    return _vector_frame_kernel(P,np.asarray(is_jump,dtype=np.bool_),int(n),
+                                int(SMOOTH),float(LEVEL),float(JUMP_GAIN))
 
 
 def precompensate_hpf(frame, corner_hz, samplerate, max_boost=8.0, level=LEVEL):
@@ -786,19 +835,9 @@ def precompensate_hpf(frame, corner_hz, samplerate, max_boost=8.0, level=LEVEL):
     n = len(frame)
     if not corner_hz or corner_hz <= 0 or n < 4:
         return frame.astype(np.float32)
-    f = np.fft.rfftfreq(n, d=1.0 / samplerate)
-    corr = np.ones(len(f), dtype=complex)
-    with np.errstate(divide="ignore", invalid="ignore"):
-        corr[1:] = 1.0 + corner_hz / (1j * f[1:])
-    mag = np.abs(corr)
-    over = mag > max_boost
-    corr[over] = corr[over] / mag[over] * max_boost
-    corr[0] = 0.0                       # DC cannot pass; do not try
-
-    out = np.empty_like(frame)
-    for c in range(frame.shape[1]):
-        out[:, c] = np.fft.irfft(np.fft.rfft(frame[:, c]) * corr, n=n)
-    peak = np.abs(out).max()
+    out = circular_filter(frame, samplerate, corner_hz, kind=2,
+                          max_boost=max_boost, dtype=np.float64)
+    peak = _frame_peak_kernel(out)
     # Renormalising is only meaningful if something survived DC removal.  A
     # constant frame is ENTIRELY bin 0, so killing that bin leaves nothing but
     # FFT round-off -- and `level / peak` then amplifies that round-off to full
@@ -808,8 +847,7 @@ def precompensate_hpf(frame, corner_hz, samplerate, max_boost=8.0, level=LEVEL):
     # let the caller's park guard deal with it.
     if peak < 1e-3:
         return np.asarray(frame, dtype=np.float32)
-    out *= level / peak
-    return out.astype(np.float32)
+    return scale_clip(out, level / peak, -level, level).astype(np.float32)
 
 
 class BufferedSource:
@@ -997,10 +1035,32 @@ class Scope:
                   `samples` as rate/fps.  Frames may vary in length at runtime;
                   the callback handles it.
         """
+        warm_scope_numeric()
+        scratch = np.zeros((4, 2), dtype=np.float32)
+        for frame in (scratch, scratch[::2]):
+            _output_map_kernel(scratch, frame, 0, 0, 1, False, 1.0, 1.0, 0)
+            _parked_kernel(frame, float(PARK_PTP), False)
+        readonly=scratch.copy()
+        readonly.setflags(write=False)
+        for frame in (readonly,readonly[::2]):
+            _output_map_kernel(scratch,frame,0,0,1,False,1.0,1.0,0)
+            _parked_kernel(frame,float(PARK_PTP),False)
+        _transform_frame_kernel(readonly,0,False)
+        _anchor_kernel(readonly,np.zeros(2,np.float32),0.25)
+        _unpark_kernel(scratch, 0, float(LEVEL))
+        _transform_frame_kernel(scratch, 0, False)
+        _anchor_kernel(scratch, np.zeros(2,np.float32), 0.25)
+        _clip_trigger_kernel(scratch,float(LEVEL),-0.98)
+        _trigger_kernel(scratch,4,4,0,0.99,False)
+        _marker_kernel(4,0.99,False)
+        _screen_kernel(np.zeros((2,2),np.float64),2.0,2.0)
+        _vector_frame_kernel(np.zeros((2,2),np.float64),np.zeros(1,np.bool_),4,
+                             int(SMOOTH),float(LEVEL),float(JUMP_GAIN))
+        _frame_peak_kernel(np.zeros((2,2), np.float64))
         self.invert_y = invert_y
         self.swap_xy = swap_xy
         self.x_only = bool(x_only)
-        if (not np.isfinite(physical_dwell)
+        if (not math.isfinite(physical_dwell)
                 or not 0.0 <= float(physical_dwell) <= 1.0):
             raise ValueError("physical_dwell must be between 0 and 1")
         self.physical_dwell = float(physical_dwell)
@@ -1121,9 +1181,7 @@ class Scope:
         self.blocksize = int(blocksize or 0)
         self.output_muted = False
         self._output_gain = 1.0
-        self._output_gain_indices = np.arange(
-            max(1, self.blocksize or 512), dtype=np.float32)
-        self._output_gain_ramp = np.empty_like(self._output_gain_indices)
+        self._output_gain_ramp = np.empty(max(1,self.blocksize or 512),dtype=np.float32)
         if self.null:
             print(f"[SCOPE] no audio device (--device null): generating at "
                   f"{samplerate:.0f} Hz for the browser to render")
@@ -1137,42 +1195,16 @@ class Scope:
 
     def _write_output(self, outdata, frame):
         """Map XY geometry to the selected physical output layout."""
-        if self.output_channels > (1 if self.x_only else 2):
-            outdata.fill(0.0)
         gain = 0.0 if self.output_muted else 1.0
         if gain == 0.0 and self._output_gain == 0.0:
             outdata.fill(0.0)
             return
 
         count = min(len(frame), len(outdata))
-        ramp_count = 0
-        if self._output_gain != gain:
-            ramp_count = min(count, len(self._output_gain_ramp))
-            if ramp_count > 1:
-                ramp = self._output_gain_ramp[:ramp_count]
-                np.divide(self._output_gain_indices[:ramp_count],
-                          ramp_count - 1, out=ramp)
-                np.multiply(ramp, gain - self._output_gain, out=ramp)
-                np.add(ramp, self._output_gain, out=ramp)
-
-        channels = (0,) if self.x_only else (0, 1)
-        output_channels = (self.channel_indices[0],) if self.x_only else (
-            self.channel_indices[0], self.channel_indices[1])
-        if gain == 1.0 and self._output_gain == 1.0:
-            for source_channel, output_channel in zip(channels, output_channels):
-                outdata[:count, output_channel] = frame[:count, source_channel]
-            self._output_gain = gain
-            return
-        if ramp_count > 1:
-            ramp = self._output_gain_ramp[:ramp_count]
-            for source_channel, output_channel in zip(channels, output_channels):
-                np.multiply(frame[:ramp_count, source_channel], ramp,
-                            out=outdata[:ramp_count, output_channel])
-        else:
-            ramp_count = 0
-        for source_channel, output_channel in zip(channels, output_channels):
-            np.multiply(frame[ramp_count:count, source_channel], gain,
-                        out=outdata[ramp_count:count, output_channel])
+        ramp_count = min(count, len(self._output_gain_ramp)) if self._output_gain != gain else 0
+        _output_map_kernel(outdata, frame, count, int(self.channel_indices[0]),
+                           int(self.channel_indices[1]) if not self.x_only else 0,
+                           bool(self.x_only), gain, float(self._output_gain), ramp_count)
         self._output_gain = gain
 
     def set_output_audio(self, muted=None):
@@ -1268,8 +1300,7 @@ class Scope:
                     # so the marker is stamped on a sample counter instead. It
                     # costs the same handful of samples per period; they just
                     # come out of the sweep rather than being reserved.
-                    np.clip(rendered[:, 0], -0.98, LEVEL, out=rendered[:, 0])
-                    np.clip(rendered[:, 1], -1.0, 1.0, out=rendered[:, 1])
+                    _clip_trigger_kernel(rendered,float(LEVEL),-0.98)
                     self._stamp_marker(rendered, self._yt_pos)
                     self._yt_pos = ((self._yt_pos + frames)
                                     % self.samples_per_frame)
@@ -1439,7 +1470,7 @@ class Scope:
         if lum is None:
             return
         try:
-            q = np.clip(np.asarray(lum, dtype=np.float32), 0.0, 1.0)
+            q = luma_bytes(np.asarray(lum,dtype=np.float32))
             if cls._output_rotation:
                 q = np.rot90(q, k=cls._output_rotation // 90)
             if cls._output_mirror:
@@ -1451,7 +1482,7 @@ class Scope:
                 q = np.ascontiguousarray(q[:, ::-1])
             with cls._luma_lock:
                 cls._luma["seq"] += 1
-                cls._luma["data"] = (q * 255.0).astype(np.uint8)
+                cls._luma["data"] = q
         except Exception:
             pass
 
@@ -1491,7 +1522,7 @@ class Scope:
         """
         if len(frame) == 0:
             return
-        pts = np.array(frame, dtype=np.float32, copy=True) / max(LEVEL, 1e-9)
+        pts = scale_float32(np.asarray(frame,dtype=np.float32),1.0/max(LEVEL,1e-9))
         k = Scope._tap_fields
         if k > 1:
             # Join consecutive traces into a whole picture. They are already
@@ -1570,7 +1601,7 @@ class Scope:
         """Call this once per drawn frame from your render loop."""
         f = rasterize(polylines, self.samples_per_frame)
         if self.invert_y:
-            f[:, 1] *= -1                     # screen y-down -> scope y-up
+            f = _transform_frame_kernel(f,180,True)  # screen y-down -> scope y-up
         if self.swap_xy:
             f = np.ascontiguousarray(f[:, ::-1])
         self.show_frame(f)
@@ -1649,10 +1680,9 @@ if __name__ == "__main__":
                     scope.show_frame(frame)
                 else:
                     a = time.time() - t0
-                    th = np.linspace(0, 2 * np.pi, 96, endpoint=False)
-                    circle = np.stack([0.6 * np.cos(th), 0.6 * np.sin(th)], 1)
+                    circle = circle_points(96,0.6)
                     circle = np.vstack([circle, circle[:1]])
-                    sq = 0.35 * np.array([[-1, -1], [1, -1], [1, 1], [-1, 1], [-1, -1]])
+                    sq = np.array([[-.35,-.35],[.35,-.35],[.35,.35],[-.35,.35],[-.35,-.35]])
                     c, sn = math.cos(a), math.sin(a)
                     scope.show([circle, sq @ np.array([[c, -sn], [sn, c]])])
                 time.sleep(1 / 30)

@@ -13,6 +13,7 @@ import threading
 import time
 
 import numpy as np
+from scope_numeric import image_bytes
 
 
 @dataclass(frozen=True)
@@ -159,7 +160,7 @@ class RuntimeScopeImageSource:
                 raise ValueError(f"unsupported live scope image array: {path} "
                                  f"({array.shape})")
             if array.dtype != np.uint8:
-                array = np.clip(array, 0, 255).astype(np.uint8)
+                array = image_bytes(np.ascontiguousarray(array))
             return Image.fromarray(np.asarray(array).copy())
         return Image.open(path)
 

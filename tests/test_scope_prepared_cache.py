@@ -123,23 +123,14 @@ def test_stochastic_probability_cache_is_setting_and_source_versioned():
 def test_stochastic_sparse_fallback_cdf_matches_uncached_random_walk():
     from scope_bake import StochasticEmitter
 
-    class TrackingEmitter(StochasticEmitter):
-        def __init__(self, *args, **kwargs):
-            self.fallbacks = 0
-            super().__init__(*args, **kwargs)
-
-        def _find_white(self, probability, cdf=None):
-            self.fallbacks += 1
-            return super()._find_white(probability, cdf=cdf)
-
     probability = np.zeros((32, 48), dtype=np.float64)
     probability[17, 29] = 0.8
     source = Library()
     key = PreparedImageCache.source_key(source, 0, None, 0, raw=True)
     cache = PreparedImageCache()
-    reference = TrackingEmitter(
+    reference = StochasticEmitter(
         48000, 512, seed=17, radius=1, stride=1, reseed_ms=0.0)
-    cached = TrackingEmitter(
+    cached = StochasticEmitter(
         48000, 512, seed=17, radius=1, stride=1, reseed_ms=0.0)
     expected = reference.emit_probability(probability)
 
@@ -148,7 +139,8 @@ def test_stochastic_sparse_fallback_cdf_matches_uncached_random_walk():
     actual = cached.emit_probability(probability, cdf=cdf_provider)
     np.testing.assert_array_equal(actual, expected)
     np.testing.assert_array_equal(cached._end, reference._end)
-    assert cached.fallbacks > 0 and reference.fallbacks == cached.fallbacks
+    assert cached._global_searches > 0
+    assert reference._global_searches == cached._global_searches
     assert cache.snapshot()["entries"] == 1
 
 
