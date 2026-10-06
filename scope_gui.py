@@ -228,6 +228,9 @@ class ScopeGUI:
         self._rendered_spot_width = None
         self._font_cache = {}
         self._canvas = None
+        self._last_draw_signature = None
+        self._refresh_revision = 0
+        self._uploaded_image = None
         self.texture = None
         self.program = None
         self.vao = None
@@ -374,6 +377,7 @@ class ScopeGUI:
         glfw.set_mouse_button_callback(self.window, self._on_mouse_button)
         glfw.set_cursor_pos_callback(self.window, self._on_cursor)
         glfw.set_key_callback(self.window, self._on_key)
+        glfw.set_window_refresh_callback(self.window, self._on_refresh)
 
     def _font(self, size, mono=False):
         key = int(size), bool(mono)
@@ -482,11 +486,34 @@ class ScopeGUI:
         if self.close_requested:
             return []
         now = time.monotonic()
-        if now - self._last_draw >= 1.0 / GUI_REDRAW_HZ:
+        signature = self._draw_signature()
+        if (signature != self._last_draw_signature
+                and now - self._last_draw >= 1.0 / GUI_REDRAW_HZ):
             self._draw()
+            # Record the pre-draw snapshot. A worker publication during drawing
+            # will differ on the next poll and cannot be cleared accidentally.
+            self._last_draw_signature = signature
+            self._last_draw_preview_rgb = self._signature_preview_rgb
             self._last_draw = now
         actions, self._actions = self._actions, []
         return actions
+
+    def _draw_signature(self):
+        with self._preview_lock:
+            # Pin the snapshot as well as its identity so Python cannot recycle
+            # its id between publications and make a new frame look unchanged.
+            self._signature_preview_rgb = self._preview_rgb
+            preview = (id(self._preview_rgb), self._preview_error)
+        return (repr(self._state), repr(self._metrics), preview,
+                self.glfw.get_window_size(self.window),
+                self.glfw.get_framebuffer_size(self.window),
+                self.image_only, self.fullscreen, self.message,
+                self._dragging, self._drag_value,
+                self.preview_exposure, self.preview_spot_width,
+                getattr(self, "_refresh_revision", 0))
+
+    def _on_refresh(self, _window):
+        self._refresh_revision += 1
 
     def set_fullscreen(self, enabled):
         """Switch between the fitted window and the primary display mode."""
@@ -879,14 +906,27 @@ class ScopeGUI:
             return
         self.context.viewport = (0, 0, framebuffer[0], framebuffer[1])
         self.context.clear(0.04, 0.06, 0.08, 1.0)
-        raw = image.tobytes()
         if self.texture is None or self.texture.size != image.size:
             if self.texture is not None:
                 self.texture.release()
-            self.texture = self.context.texture(image.size, 4, raw, alignment=1)
+            self.texture = self.context.texture(
+                image.size, 4, image.tobytes(), alignment=1)
             self.texture.filter = (self.moderngl.LINEAR, self.moderngl.LINEAR)
+            self._uploaded_image = image.copy()
         else:
-            self.texture.write(raw, alignment=1)
+            from PIL import ImageChops
+            previous = self._uploaded_image
+            # RGBA alpha is usually constant, so include differences in all
+            # color channels when determining the changed rectangle.
+            bounds = (ImageChops.difference(image, previous)
+                      .convert("RGB").getbbox()) if previous is not None else (
+                          0, 0, image.width, image.height)
+            if bounds is not None:
+                left, top, right, bottom = bounds
+                self.texture.write(image.crop(bounds).tobytes(),
+                                   viewport=(left, top, right - left,
+                                             bottom - top), alignment=1)
+                self._uploaded_image = image.copy()
         self.texture.use(location=0)
         self.vao.render(mode=self.moderngl.TRIANGLES, vertices=3)
         self.glfw.swap_buffers(self.window)

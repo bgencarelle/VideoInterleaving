@@ -4602,3 +4602,36 @@ harness SHA256 remains
 software-GL/browser measurements, continuous-tap behavior, preview age/cadence,
 and output-scheduling impact still need evidence. This follow-up addresses the
 largest identified renderer bottleneck; it does not complete the S6 exit.
+
+---
+
+## Appendix A052 — S6 presentation review and corrections — 2026-10-06
+
+Reviewed the uncommitted native-presentation attempt after repeated test failures.
+Its test incorrectly expected consecutive redraws inside the 5-Hz rate limit,
+and repeatedly extended unrelated assertions rather than addressing the first
+failure. The implementation compared source/render sequences instead of published
+preview snapshots, could clear a concurrent worker dirty update, omitted resize
+and local UI invalidation, and still uploaded the entire texture on every draw.
+Replaced that attempt and its faulty test with snapshot-based invalidation and
+deterministic clock-controlled behavioral tests.
+
+Native polling now invalidates on state/metrics, published RGB/error, window and
+framebuffer size, local controls/message/drag, and OS refresh requests. It retains
+the pre-draw snapshot so a worker publication during a draw is detected on the
+next poll. Unchanged polls skip redraw while still pumping input events; changes
+inside the rate-limit interval remain pending. Presentation compares RGB pixels
+(the native UI's alpha is opaque) and uploads only their changed bounding rectangle.
+Unchanged images require no upload; texture resize forces recreation. This does
+not yet cache static UI drawing or establish a net CPU win on moving content.
+
+Focused preview/web/GUI tests passed **27 tests**; the expanded scope-only suite
+passed **307 tests, 30 subtests** before the final OS-refresh addition, followed
+by the 27-test focused rerun. A real software-GL check under
+`xvfb-run -a env LIBGL_ALWAYS_SOFTWARE=1` reported llvmpipe LLVM 19.1.7 and verified
+exact texture readback after a single-pixel partial upload, unchanged re-presentation,
+and a native draw. No device-backed audio was opened.
+
+**S6 remains active.** Remaining exit evidence includes static-UI caching, measured
+total CPU/preview age/cadence and output impact, direct CPU-headless and browser
+comparison, continuous-tap audit, and D0 deltas. Defaults remain unchanged.
