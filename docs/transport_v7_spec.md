@@ -132,14 +132,23 @@ stays below them:
 
 - The band-limited header's peak is 3 dB below full scale, the same in
   every packet (`HEADER_PEAK_DB`). The end marker's pulses are at the
-  header's pulse level (`emitted_pulse_level`).
-- The body is band-limited separately. If its peak would come within 1.5 dB
-  of the header's peak (`BODY_BELOW_HEADER_DB`) the whole body of that packet
-  is scaled down to that ceiling; otherwise it is sent as coded. The pilots
-  are in the body and carry its scale, so the receiver needs no signal.
-- The timing tones are added afterwards at a level that follows the body.
-  With them the header's peak is about 2.5 dB below full scale. A header
-  nearer full scale costs lossy codecs frames (MP3 at 192 kbit/s and below).
+  header's pulse level (`emitted_pulse_level`). The shaped header peak is
+  therefore about 1.5 dB above the EOF pulse level.
+- For EOF-marked packets, the image body is scaled after the body-derived
+  timing tones are included. Its final peak is kept at least 1.5 dB below the
+  lower final peak of the header and EOF regions. The metadata symbol is
+  scaled separately and kept at least 0.5 dB below the final body peak. Quiet
+   components are not raised to meet these ceilings by default. Experimental
+   nested senders opt into thread-local `body_auto_level()`, which can raise
+   a quiet body by up to 12 dB before the final EOF-aware level fit. The final
+   framing/body/metadata margins still apply to those packets.
+- The timing tones are added at a level that follows the body. They are
+  included in the final level measurements, since they can add constructively
+  to the body, header, metadata or EOF. With them the header's peak is about
+  2.5 dB below full scale. A header nearer full scale costs lossy codecs
+  frames (MP3 at 192 kbit/s and below).
+- The low-level no-EOF encoder path retains the historical body ceiling
+  relative to the header peak (`BODY_BELOW_HEADER_DB`).
 
 The preamble's edge detector uses a Schmitt band of ±0.2 of the nominal
 header amplitude (`EDGE_HYSTERESIS`).
@@ -523,7 +532,7 @@ must keep these passing, and a new profile must be added to each:
 | Speed acquisition from 0.25× to 4× on the base wire | `modem_tests/test_v7_speed.py` |
 | Reverse acquisition, turn-arounds, slow reverse, tape rocking | `modem_tests/test_v7_reverse.py` |
 | Level independence: the same recording at a quarter and at four times the level decodes to the same statuses | `modem_tests/test_v7_level_independence.py` |
-| Emitted levels: header peak 2 to 3.2 dB under full scale in every packet, body at least 1 dB under the header, nothing over full scale | `modem_tests/test_v7_levels.py` |
+| Emitted levels: header/EOF/body/metadata hierarchy after tone mixing, with no full-scale overflow | `modem_tests/test_v7_levels.py` |
 
 The profiles under reverse and speed test are Fold 500, Aspect Fold 500,
 aspect-mono-500 and one channel of stereo-slices; the channel models are

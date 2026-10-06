@@ -148,6 +148,15 @@ class ServerConfig:
         """Get the monitor port for the current mode."""
         return self.get_ports().monitor
 
+    def get_mode(self) -> str:
+        """Return the configured application mode."""
+        if self._current_mode is None:
+            raise RuntimeError(
+                "ServerConfig not initialized. Call set_mode() first, "
+                "typically done in main.py configure_runtime()"
+            )
+        return self._current_mode
+
     def get_stream_port(self) -> Optional[int]:
         """Get the stream port for the current mode (None if not used)."""
         return self.get_ports().stream
@@ -177,4 +186,3 @@ def get_config() -> ServerConfig:
 def get_ports() -> PortConfig:
     """Convenience function to get current port configuration."""
     return _config.get_ports()
-

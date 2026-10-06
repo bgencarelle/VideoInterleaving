@@ -1039,7 +1039,7 @@ def max_wire_speed(rate):
 def encode_pulse_frame(model, values, counter, aspect_code=0, source_index=None,
                        loop=None, direction=1, pilot_tones=False,
                        pilot_tone_gate_preamble=False, eof_marker=False,
-                       pulse_profile_code=1):
+                       pulse_profile_code=1, extra_tone_mixer=None):
     """One edge-counted pulse-framed V7 body for low-latency live transport.
 
     ``counter`` is the packet count: counter mod 7 picks the tail slice, which
@@ -1053,20 +1053,25 @@ def encode_pulse_frame(model, values, counter, aspect_code=0, source_index=None,
         source_index=source_index, loop=loop, direction=direction,
         pilot_tones=pilot_tones,
         pilot_tone_gate_preamble=pilot_tone_gate_preamble,
-        eof_marker=eof_marker, pulse_profile_code=pulse_profile_code)
+        eof_marker=eof_marker, pulse_profile_code=pulse_profile_code,
+        extra_tone_mixer=extra_tone_mixer)
 
 
-# Emitted levels. The header's pulses peak HEADER_PEAK_DB below full scale,
-# the same in every packet, and the end marker's pulses are at the header's
-# pulse level. The picture body is scaled down wherever its peak would come
-# within BODY_BELOW_HEADER_DB of the header's peak. The timing tones are
-# added afterwards at a level that follows the body (up to about .06), which
-# puts the header's final peak about 2.5 dB below full scale. A header
-# nearer full scale costs lossy codecs frames (MP3 192 and below).
+# Emitted levels. The header's shaped peak is HEADER_PEAK_DB below full scale,
+# and the EOF pulses use the same pulse plateau as the header. EOF-marked
+# packets are measured after tone mixing: the body stays at least
+# 1.5 dB below the lower final header/EOF peak, and metadata stays 0.5 dB below
+# the body.
+# BODY_BELOW_HEADER_DB remains the pre-limiter for legacy no-EOF packets.
+# Timing tones are scaled with body RMS; a header nearer full scale costs lossy
+# codecs frames (MP3 at 192 kbit/s and below).
 HEADER_PEAK_DB = 3.0
 BODY_BELOW_HEADER_DB = 1.5
 HEADER_PEAK = 10**(-HEADER_PEAK_DB/20)
 BODY_PEAK = HEADER_PEAK*10**(-BODY_BELOW_HEADER_DB/20)
+BODY_BELOW_EOF_DB = 1.5
+METADATA_BELOW_BODY_DB = .5
+
 # Per-packet auto-level, off for the historical wire (where only a loud body
 # is scaled).  Inside ``body_auto_level()`` every packet's body is raised to
 # the ceiling a loud one is held at, by at most BODY_AUTO_LEVEL_MAX_DB.
@@ -1107,12 +1112,16 @@ def emitted_pulse_level(profile_code=1):
 
 def encode_pulse_frame_coeffs(model, coeffs, counter, aspect_code=0,
                               source_index=None, loop=None, direction=1,
-                               pilot_tones=False,
-                               pilot_tone_gate_preamble=False,
-                               eof_marker=False, pilot_values=None,
-                               pulse_profile_code=1, right_coeffs=None):
+                              pilot_tones=False,
+                              pilot_tone_gate_preamble=False,
+                              eof_marker=False, pilot_values=None,
+                              pulse_profile_code=1, right_coeffs=None,
+                              extra_tone_mixer=None):
     """Pulse-frame transformed source coefficients without another DCT pass.
-    ``right_coeffs``: see encode_frame_coeffs (two mono wires, one packet)."""
+    ``right_coeffs``: see encode_frame_coeffs (two mono wires, one packet).
+    ``extra_tone_mixer``, when supplied, adds deterministic body-RMS-scaled
+    tones after EOF insertion; EOF-mode level fitting includes their
+    contribution."""
     body = encode_frame_coeffs(model, coeffs, counter,
                                pilot_values=pilot_values,
                                right_coeffs=right_coeffs)
@@ -1129,13 +1138,12 @@ def encode_pulse_frame_coeffs(model, coeffs, counter, aspect_code=0,
     meta_wave = np.fft.irfft(mx, n=N)
     meta_pcm = np.concatenate([meta_wave[-CP:], meta_wave])*model.scale
     meta_start = PULSE.SYNC_LEN+FRAME
-    # Shape the ordinary pulse/body packet first.  The metadata symbol has its
+    # Shape the ordinary pulse/body packet first. The metadata symbol has its
     # own cyclic prefix and is inserted afterward so the long packet shaper
-    # cannot smear the preceding image symbol across its pilots/data.
-    # The header goes out at one fixed level, the same in every packet, and
-    # the picture body is scaled down wherever its peak would pass
-    # BODY_PEAK: the header is then always the loudest part, so it clips
-    # first. The pilots are in the body and carry its scale to the receiver.
+    # cannot smear the preceding image symbol across its pilots/data. The
+    # header level is fixed per profile. EOF packets get a final-mix limiter
+    # below, after marker and timing-tone contributions are present; the
+    # no-EOF path retains the historical body/header pre-limit.
     shaped = shape_emission(out, EMISSION_EDGE_HZ, RATE)
     peak = float(np.max(np.abs(shaped)))
     if peak > BODY_PEAK:
@@ -1144,21 +1152,96 @@ def encode_pulse_frame_coeffs(model, coeffs, counter, aspect_code=0,
         # Per-packet auto-level (see body_auto_level).
         shaped *= np.float32(min(BODY_PEAK/peak, 10**(BODY_AUTO_LEVEL_MAX_DB/20)))
     header, pulse_level = _shaped_preamble(int(pulse_profile_code))
-    shaped += header
-    shaped[meta_start:meta_start+META_SYMBOL, :] += meta_pcm[:, None]
+    if not eof_marker:
+        # Preserve the historical no-EOF wire. Production live packets carry
+        # EOF and use the final-mix level budget below.
+        shaped += header
+        shaped[meta_start:meta_start+META_SYMBOL, :] += meta_pcm[:, None]
+        if pilot_tones:
+            shaped = _add_pilot_tones(shaped, counter,
+                                      gate_preamble=pilot_tone_gate_preamble)
+        if extra_tone_mixer is not None:
+            shaped = np.asarray(extra_tone_mixer(shaped), dtype=np.float32)
+        return shaped
+
+    marker = np.concatenate([
+        np.full(run, level, np.float32)
+        for run, level in zip(EOF_MARKER_RUNS, EOF_MARKER_LEVELS)
+    ])*np.float32(pulse_level)
+    body_region = slice(PULSE.SYNC_LEN, PULSE.SYNC_LEN+FRAME)
+    header_region = slice(0, PULSE.SYNC_LEN)
+    metadata_region = slice(meta_start, meta_start+META_SYMBOL)
+    eof_region = slice(EOF_MARKER_OFFSET, PULSE_FRAME)
+    body_ratio = 10**(-BODY_BELOW_EOF_DB/20)
+    metadata_ratio = 10**(-METADATA_BELOW_BODY_DB/20)
+
+    def assemble_unmixed(body_gain, metadata_gain):
+        packet = shaped*np.float32(body_gain)
+        packet += header
+        packet[metadata_region] += meta_pcm[:, None]*np.float32(metadata_gain)
+        packet[eof_region] += marker[:, None]
+        return packet
+
+    # Both built-in and Fold-500 pilot overlays are body-RMS-scaled, so their
+    # complete waveform can be measured once at unit body gain and then scaled
+    # with the body during the limiter search. This keeps phase and tone mixing
+    # in the measured packet without rebuilding the tone template each trial.
+    unit_packet = assemble_unmixed(1.0, 1.0)
+    unit_mixed = unit_packet
     if pilot_tones:
-        # Add after the per-packet shaper so phase is exact across packets.
-        # Time compression remains downstream and shifts the tone frequencies
-        # together with the pulse wire.
-        shaped = _add_pilot_tones(shaped, counter,
-                                  gate_preamble=pilot_tone_gate_preamble)
-    if eof_marker:
-        marker = np.concatenate([
-            np.full(run, level, np.float32)
-            for run, level in zip(EOF_MARKER_RUNS, EOF_MARKER_LEVELS)
-        ])*np.float32(pulse_level)
-        shaped[EOF_MARKER_OFFSET:PULSE_FRAME, :] += marker[:, None]
-    return shaped
+        unit_mixed = _add_pilot_tones(
+            unit_mixed, counter, gate_preamble=pilot_tone_gate_preamble)
+        if extra_tone_mixer is not None:
+            unit_mixed = np.asarray(extra_tone_mixer(unit_mixed),
+                                    dtype=np.float32)
+    elif extra_tone_mixer is not None:
+        unit_mixed = np.asarray(extra_tone_mixer(unit_mixed), dtype=np.float32)
+    tone_overlay = unit_mixed-unit_packet
+
+    def assemble(body_gain, metadata_gain):
+        packet = assemble_unmixed(body_gain, metadata_gain)
+        packet += tone_overlay*np.float32(body_gain)
+        return packet
+
+    def region_peak(packet, region):
+        return float(np.max(np.abs(packet[region])))
+
+    def body_is_below_framing(packet):
+        framing_peak = min(region_peak(packet, header_region),
+                           region_peak(packet, eof_region))
+        return region_peak(packet, body_region) <= framing_peak*body_ratio
+
+    # Find the highest image-body gain that leaves a 1.5 dB final-sample
+    # margin under both framing regions. Tone amplitude follows body RMS, so
+    # every trial reassembles the actual post-tone packet.
+    body_gain = 1.0
+    packet = assemble(body_gain, 1.0)
+    if not body_is_below_framing(packet):
+        low, high = 0.0, body_gain
+        for _ in range(16):
+            trial_gain = (low+high)*.5
+            trial = assemble(trial_gain, 1.0)
+            if body_is_below_framing(trial):
+                low = trial_gain
+            else:
+                high = trial_gain
+        body_gain = low
+        packet = assemble(body_gain, 1.0)
+
+    # Metadata is a separate, quieter payload symbol. Limit it only when its
+    # final peak (including the timing tone) would reach the image-body peak.
+    metadata_limit = region_peak(packet, body_region)*metadata_ratio
+    if region_peak(packet, metadata_region) > metadata_limit:
+        low, high = 0.0, 1.0
+        for _ in range(16):
+            trial_gain = (low+high)*.5
+            trial = assemble(body_gain, trial_gain)
+            if region_peak(trial, metadata_region) <= metadata_limit:
+                low = trial_gain
+            else:
+                high = trial_gain
+        packet = assemble(body_gain, low)
+    return packet
 
 
 def encode_pulse_stream(model, values, start_counter=1, aspect_codes=None,

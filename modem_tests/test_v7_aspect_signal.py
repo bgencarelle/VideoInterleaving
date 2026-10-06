@@ -59,7 +59,7 @@ def _send(argv, still, seconds='0.4'):
     try:
         args = v7_live.parser().parse_args([
             'send', '--device', 'memory', '--source', 'test',
-            '--seconds', seconds, '--no-log', *argv])
+            '--seconds', seconds, '--no-log', '--dct-kernel', 'reference', *argv])
         v7_live.run_send(args)
     finally:
         v7_live._capture = previous_capture

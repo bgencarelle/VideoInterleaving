@@ -4,8 +4,9 @@ Example:
     xvfb-run -a env LIBGL_ALWAYS_SOFTWARE=1 \
         .venv/bin/python tools/local_gl_smoke.py --dir images_sbs
 
-The runner verifies actual GL compositing and checks that the sender bridge
-publishes the source-sized composite rather than the fullscreen framebuffer.
+The runner verifies actual GL compositing into a headless framebuffer and
+checks that the sender bridge publishes the source-sized composite rather
+than a visible fullscreen window.
 It disables app listeners and the Wayland-only pointer helper so this
 diagnostic has no network or desktop side effects.
 """
@@ -44,7 +45,7 @@ def main():
     result_path = Path(args.result).resolve() if args.result else None
 
     # Receive one real rendered frame through the same bridge used by the
-    # sender source, while main.py runs its ordinary local display loop.
+    # sender source, while main.py runs its offscreen local render loop.
     listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     listener.bind(('127.0.0.1', 0))
     listener.listen(1)
@@ -111,6 +112,17 @@ def main():
     # This is an X11 smoke run, so avoid the optional Wayland pointer utility.
     display_manager = importlib.import_module("display_manager")
     display_manager._move_wlrctl_offscreen_once = lambda _window: None
+    display_init = display_manager.display_init
+
+    def checked_display_init(state):
+        target = display_init(state)
+        bridge['offscreen_target'] = isinstance(
+            target, (display_manager.HeadlessWindow,
+                     display_manager.LegacyHeadlessFBO,
+                     display_manager.LegacyHeadlessWindow))
+        return target
+
+    display_manager.display_init = checked_display_init
 
     # No viewer is needed to verify local GL compositing; keep the test from
     # opening any application listeners.
@@ -141,15 +153,19 @@ def main():
     log_text = log_path.read_text(encoding="utf-8", errors="replace") \
         if log_path.exists() else ""
     renderer_line = next((line for line in log_text.splitlines()
-                          if "[DISPLAY] GL_RENDERER:" in line), None)
+                          if ("[DISPLAY] GL_RENDERER:" in line or
+                              "[DISPLAY] GL Context:" in line)), None)
     backend_ready = ("[DISPLAY] Renderer backend: moderngl" in log_text or
-                     "[DISPLAY] Renderer backend: legacy (PyOpenGL)" in log_text)
+                     "[DISPLAY] Renderer backend: legacy (PyOpenGL)" in log_text or
+                     "[DISPLAY] Headless GL ready:" in log_text or
+                     "[DISPLAY] Headless legacy GL ready:" in log_text)
     gl_ready = backend_ready and renderer_line is not None
     report = {
         **counts,
         "gl_ready": gl_ready,
         "renderer": renderer_line,
         "timer_expired": timer_expired,
+        "offscreen_target": bridge.get('offscreen_target', False),
         "bridge_frame_shape": bridge.get('shape'),
         "bridge_frame_has_pixels": bridge.get('has_pixels', False),
         "bridge_frame_contrast": bridge.get('contrast', 0.0),
@@ -164,6 +180,7 @@ def main():
     print(json.dumps(report, indent=2), file=sys.__stdout__)
 
     return 0 if (app_status == 0 and gl_ready and timer_expired and
+                  bridge.get('offscreen_target') and
                   bridge.get('shape') and bridge.get('contrast', 0.0) > 1.0 and
                   counts["gl_composite"] > 0 and
                   counts["cpu_composite"] > 0) else 1

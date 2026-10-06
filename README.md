@@ -149,7 +149,8 @@ can be browsed or dropped onto the window, paused, restarted, sought, and resume
 from the last position. Screen capture supports MSS and FFmpeg; camera inputs
 can be supplied as an FFmpeg `FMT:SRC` string.
 
-Scope mode needs an XY bake generated from the image library:
+The baked scope source uses an XY bake generated from the image library;
+`--scope-source images` uses runtime thumbnails without a bake:
 
 ```bash
 .venv/bin/python utilities/convert_to_xy.py -i images -o images_xy
@@ -160,8 +161,8 @@ Scope mode needs an XY bake generated from the image library:
 Stereo output sends X on the left channel and Y on the right. For a
 single-input Y-T scope, connect the X output; the X trigger marker is enabled
 by default. Use `--device null` for the virtual/browser-rendered path without
-opening an audio device. See [`docs/SCOPE_MODE.md`](docs/SCOPE_MODE.md) for
-renderer, connection, and sample-budget details.
+opening an audio device. See [`docs/SCOPE_UPGRADE.md`](docs/SCOPE_UPGRADE.md), the
+authoritative scope plan, operational reference, and append-only progress ledger.
 
 The same GUI can run the unbaked live source directly. For example, to drive a
 single-input scope from a video file without opening the GUI:

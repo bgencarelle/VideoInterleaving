@@ -218,6 +218,7 @@ def run_display(clock_source=CLOCK_MODE):
         from local_frame_bridge import LatestFramePublisher
         frame_publisher = LatestFramePublisher(local_frame_port)
         atexit.register(frame_publisher.close)
+    is_local_frame_source = frame_publisher is not None
     local_frame_rate = float(getattr(settings, 'LOCAL_FRAME_FPS', FPS) or 15)
     local_frame_period = 1.0 / max(local_frame_rate, .1)
     next_local_frame = 0.0
@@ -239,11 +240,12 @@ def run_display(clock_source=CLOCK_MODE):
         print("   -> This may indicate a configuration error")
     
     is_web = server_mode and not is_ascii
-    is_headless = is_web or is_ascii
+    is_headless = is_web or is_ascii or is_local_frame_source
     # ASCII has its own rate knob: unlike MJPEG, its small text frames are not
     # constrained by the web capture bandwidth setting.
-    capture_rate = (getattr(settings, "ASCII_FPS", 15)
-                    if is_ascii else SERVER_CAPTURE_RATE)
+    capture_rate = (getattr(settings, "ASCII_FPS", 15) if is_ascii else
+                    (1.0 / local_frame_period if is_local_frame_source else
+                     SERVER_CAPTURE_RATE))
     capture_interval = 1.0 / capture_rate
     last_server_capture = time.time()
     last_captured_index = None
@@ -251,7 +253,7 @@ def run_display(clock_source=CLOCK_MODE):
     # at their output cadence instead of rendering extra frames that are never
     # published.
     loop_fps = FPS
-    if (is_web or is_ascii) and capture_rate and capture_rate > 0:
+    if (is_web or is_ascii or is_local_frame_source) and capture_rate and capture_rate > 0:
         loop_fps = min(FPS, capture_rate) if FPS and FPS > 0 else capture_rate
 
     # --- LOGGING ---
@@ -590,7 +592,7 @@ def run_display(clock_source=CLOCK_MODE):
                     main_texture, float_texture, BACKGROUND_COLOR,
                     main_is_sbs=cur_m_sbs, float_is_sbs=cur_f_sbs
                 )
-                if (frame_publisher is not None and not is_headless and has_gl and
+                if (frame_publisher is not None and has_gl and
                         time.monotonic() >= next_local_frame):
                     if (bridge_main is not None and
                             not isinstance(bridge_main, (str, dict))):
@@ -604,7 +606,7 @@ def run_display(clock_source=CLOCK_MODE):
 
             # Capture (Only for Images/Headless Web)
             should_capture = False
-            if is_headless or not has_gl:
+            if ((is_headless and not is_local_frame_source) or not has_gl):
                 now = time.time()
                 # Headless output is already paced by the monotonic ticker
                 # below. Applying the same interval again against wall-clock

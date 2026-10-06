@@ -7,6 +7,7 @@ reproduce the same waveform rather than advancing the path.
 import math
 
 import numpy as np
+from scope_numeric import finite_array
 
 
 class VectorTrajectory:
@@ -39,7 +40,7 @@ class VectorTrajectory:
         points = np.ascontiguousarray(path, dtype=np.float32)
         if points.ndim != 2 or points.shape[1] != 2 or len(points) < 2:
             raise ValueError("canonical vector path must contain XY points")
-        if not np.isfinite(points).all():
+        if not finite_array(points):
             raise ValueError("canonical vector path must be finite")
         if not points.flags.writeable:
             points = points.copy()

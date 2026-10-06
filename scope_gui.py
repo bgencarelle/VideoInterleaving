@@ -6,6 +6,8 @@ are imported when the GUI is constructed, so ordinary/headless scope startup
 does not depend on them.
 """
 from dataclasses import dataclass
+from collections import OrderedDict
+import math
 import threading
 import time
 
@@ -14,6 +16,7 @@ WINDOW_SIZE = (1280, 800)
 MIN_WINDOW_SIZE = (900, 600)
 PREVIEW_SIZE = 680
 MAX_PREVIEW_RENDER_SIZE = 1600
+TEXT_SURFACE_CACHE_LIMIT = 512
 # CPU/GL work is optional and must not crowd the independently scheduled DAC
 # producer, especially on software-rendered desktops. Input events are still
 # polled at the engine tick; only visible UI/preview refresh is capped here.
@@ -227,6 +230,7 @@ class ScopeGUI:
         self._rendered_exposure = None
         self._rendered_spot_width = None
         self._font_cache = {}
+        self._text_surface_cache = OrderedDict()
         self._canvas = None
         self._last_draw_signature = None
         self._refresh_revision = 0
@@ -400,6 +404,49 @@ class ScopeGUI:
         self._font_cache[key] = font
         return font
 
+    def _draw_cached_text(self, image, xy, text, fill, font):
+        """Composite a cached, pixel-identical rasterized text surface."""
+        text = str(text)
+        try:
+            color = tuple(int(value) for value in fill)
+            if len(color) == 3:
+                rgba = color + (255,)
+            elif len(color) == 4:
+                rgba = color
+            else:
+                raise ValueError("unsupported text color")
+            left, top, right, bottom = map(int, font.getbbox(text))
+            x, y = float(xy[0]), float(xy[1])
+        except (TypeError, ValueError, AttributeError):
+            self.ImageDraw.Draw(image).text(xy, text, fill=fill, font=font)
+            return
+        if right <= left or bottom <= top:
+            return
+
+        # Pillow rasterizes fractional text origins. Keep the fractional phase
+        # in the cache key and the integer origin outside the tile so cached
+        # surfaces exactly match ImageDraw at both integer and centered labels.
+        origin_x = math.floor(x + left) - 1
+        origin_y = math.floor(y + top) - 1
+        if origin_x < 0 or origin_y < 0:
+            self.ImageDraw.Draw(image).text(xy, text, fill=fill, font=font)
+            return
+        key = (id(font), text, color,
+               x - math.floor(x), y - math.floor(y))
+        cache = self._text_surface_cache
+        tile = cache.get(key)
+        if tile is None:
+            tile = self.Image.new(
+                "RGBA", (right - left + 3, bottom - top + 3), (0, 0, 0, 0))
+            self.ImageDraw.Draw(tile).text(
+                (x - origin_x, y - origin_y), text, fill=rgba, font=font)
+            cache[key] = tile
+            if len(cache) > TEXT_SURFACE_CACHE_LIMIT:
+                cache.popitem(last=False)
+        else:
+            cache.move_to_end(key)
+        image.alpha_composite(tile, (origin_x, origin_y))
+
     def _start_preview_worker(self):
         self._preview_thread = threading.Thread(
             target=self._preview_loop, name="ScopePreview", daemon=True)
@@ -446,8 +493,8 @@ class ScopeGUI:
                         kwargs["workspace"] = workspace
                         if spot_width != 1.0:
                             points_array = np.asarray(self._preview_points)
-                            rows = max(2, len(np.unique(
-                                np.round(points_array[:, 1], 5))))
+                            from scope_numeric import preview_rows
+                            rows = preview_rows(np.asarray(points_array,dtype=np.float32))
                             kwargs["spot"] = max(
                                 0.6, 0.40 * target_size / rows * spot_width)
                         frame = preview_frame(self._preview_points, **kwargs)
@@ -617,8 +664,8 @@ class ScopeGUI:
         draw.rectangle((0, 0, width, header_height), fill=(10, 18, 25, 255))
         title_x, title_y = unit(22), unit(15)
         title = "SCOPE  ·  LIVE TUNER"
-        draw.text((title_x, title_y), title, fill=(239, 245, 249),
-                  font=self.font)
+        self._draw_cached_text(image, (title_x, title_y), title,
+                               (239, 245, 249), self.font)
         fullscreen_label = "Restore [F11]" if self.fullscreen else "Fullscreen [F11]"
         button_width = max(unit(112),
                            round(self.small.getlength(fullscreen_label))
@@ -632,10 +679,11 @@ class ScopeGUI:
         draw.rounded_rectangle(
             button_rect, radius=unit(4), fill=(20, 36, 47),
             outline=(53, 78, 94), width=max(1, unit(1)))
-        draw.text((button_rect[0] + (button_width -
-                                    self.small.getlength(fullscreen_label)) / 2,
-                   button_rect[1] + unit(8)),
-                  fullscreen_label, fill=(216, 229, 237), font=self.small)
+        self._draw_cached_text(
+            image, (button_rect[0] + (button_width -
+                                     self.small.getlength(fullscreen_label)) / 2,
+                    button_rect[1] + unit(8)),
+            fullscreen_label, (216, 229, 237), self.small)
         self._hits["fullscreen:toggle"] = button_rect
 
         image_only_label = "Image only [F10]"
@@ -648,10 +696,11 @@ class ScopeGUI:
         draw.rounded_rectangle(
             image_only_rect, radius=unit(4), fill=(20, 36, 47),
             outline=(53, 78, 94), width=max(1, unit(1)))
-        draw.text((image_only_rect[0] + (image_only_width -
-                                        self.small.getlength(image_only_label)) / 2,
-                   image_only_rect[1] + unit(8)),
-                  image_only_label, fill=(216, 229, 237), font=self.small)
+        self._draw_cached_text(
+            image, (image_only_rect[0] + (image_only_width -
+                                         self.small.getlength(image_only_label)) / 2,
+                    image_only_rect[1] + unit(8)),
+            image_only_label, (216, 229, 237), self.small)
         self._hits["image_only:toggle"] = image_only_rect
 
         header = (f"{metrics.get('device', 'connecting')}   ·   "
@@ -662,9 +711,10 @@ class ScopeGUI:
         header_right = image_only_rect[0] - unit(12)
         header_width = max(0, header_right - header_left)
         if header_width:
-            draw.text((header_left, unit(18)),
-                      self._fit_text(header, self.small, header_width),
-                      fill=(155, 187, 204), font=self.small)
+            self._draw_cached_text(
+                image, (header_left, unit(18)),
+                self._fit_text(header, self.small, header_width),
+                (155, 187, 204), self.small)
 
         preview_rect = layout["preview_rect"]
         draw.rounded_rectangle(preview_rect, radius=6, fill=(6, 10, 13, 255),
@@ -684,32 +734,34 @@ class ScopeGUI:
             image.alpha_composite(pic.convert("RGBA"), (preview_x, preview_y))
         else:
             msg = preview_error or "Waiting for the first scope trace…"
-            draw.text((preview_rect[0] + unit(22),
-                       preview_rect[1] + unit(24)),
-                      self._fit_text(msg, self.small,
-                                     preview_rect[2] - preview_rect[0]
-                                     - unit(44)),
-                      fill=(151, 174, 192), font=self.small)
-        draw.text((preview_rect[0] + unit(16), layout["preview_caption_y"]),
-                  self._fit_text(
-                      "Phosphor preview  ·  exposure changes this preview only",
-                      self.tiny, preview_rect[2] - preview_rect[0] - unit(32)),
-                  fill=(119, 145, 160), font=self.tiny)
+            self._draw_cached_text(
+                image, (preview_rect[0] + unit(22),
+                        preview_rect[1] + unit(24)),
+                self._fit_text(msg, self.small,
+                               preview_rect[2] - preview_rect[0] - unit(44)),
+                (151, 174, 192), self.small)
+        self._draw_cached_text(
+            image, (preview_rect[0] + unit(16), layout["preview_caption_y"]),
+            self._fit_text(
+                "Phosphor preview  ·  exposure changes this preview only",
+                self.tiny, preview_rect[2] - preview_rect[0] - unit(32)),
+            (119, 145, 160), self.tiny)
 
         panel = layout["panel"]
         draw.rounded_rectangle(panel, radius=6, fill=(15, 24, 32, 255),
                                outline=(49, 69, 83, 255), width=unit(1))
-        draw.text((panel[0] + unit(18), panel[1] + unit(13)), "Live controls",
-                  fill=(231, 240, 246), font=self.font)
+        self._draw_cached_text(
+            image, (panel[0] + unit(18), panel[1] + unit(13)), "Live controls",
+            (231, 240, 246), self.font)
         draw.line((panel[0] + unit(18), panel[1] + unit(43),
                    panel[2] - unit(18), panel[1] + unit(43)),
                   fill=(42, 58, 70), width=unit(1))
         draw.line((panel[2] - unit(182), panel[1] + unit(25),
                    panel[2] - unit(182), panel[1] + unit(34)),
                   fill=(243, 178, 85), width=unit(2))
-        draw.text((panel[2] - unit(174), panel[1] + unit(22)),
-                  "startup default",
-                  fill=(159, 173, 181), font=self.tiny)
+        self._draw_cached_text(
+            image, (panel[2] - unit(174), panel[1] + unit(22)),
+            "startup default", (159, 173, 181), self.tiny)
 
         controls_top = panel[1] + unit(52)
         available_controls_height = panel[3] - controls_top
@@ -729,11 +781,12 @@ class ScopeGUI:
             readout = _format_value(name, value)
             if disabled and name in ("fields", "rows"):
                 readout = "Raster only"
-            draw.text((track_left, top + unit(3)), SLIDER_LABELS[name],
-                      fill=label_color, font=self.small)
-            draw.text((panel[2] - unit(112), top + unit(3)), readout,
-                      fill=(115, 132, 145) if disabled else (235, 242, 247),
-                      font=self.tiny)
+            self._draw_cached_text(
+                image, (track_left, top + unit(3)), SLIDER_LABELS[name],
+                label_color, self.small)
+            self._draw_cached_text(
+                image, (panel[2] - unit(112), top + unit(3)), readout,
+                (115, 132, 145) if disabled else (235, 242, 247), self.tiny)
             y = top + max(unit(24), slider_row_height - unit(8))
             thumb = min(unit(6), max(1, slider_row_height // 8))
             marker_half = min(unit(9), max(1, slider_row_height // 4))
@@ -780,11 +833,11 @@ class ScopeGUI:
             draw.rounded_rectangle(rect, radius=unit(4), fill=fill,
                                    outline=outline, width=unit(1))
             text_width = self.small.getlength(mode.title())
-            draw.text((left + (mode_width - text_width) / 2,
-                       mode_y + unit(8)),
-                      mode.title(),
-                      fill=(231, 241, 247) if not disabled else (113, 127, 136),
-                      font=self.small)
+            self._draw_cached_text(
+                image, (left + (mode_width - text_width) / 2,
+                        mode_y + unit(8)), mode.title(),
+                (231, 241, 247) if not disabled else (113, 127, 136),
+                self.small)
             if not disabled:
                 self._hits[f"mode:{mode}"] = rect
 
@@ -810,10 +863,11 @@ class ScopeGUI:
                 fill=(42, 83, 105) if active else (20, 36, 47),
                 outline=(84, 153, 181) if active else (53, 78, 94), width=1)
             label_width = self.small.getlength(label)
-            draw.text((left + (button_width - label_width) / 2,
-                       button_y + unit(8)), label,
-                      fill=(231, 241, 247) if audio_button
-                      else (216, 229, 237), font=self.small)
+            self._draw_cached_text(
+                image, (left + (button_width - label_width) / 2,
+                        button_y + unit(8)), label,
+                (231, 241, 247) if audio_button else (216, 229, 237),
+                self.small)
             if audio_button:
                 self._hits["audio:toggle"] = rect
             else:
@@ -835,39 +889,44 @@ class ScopeGUI:
             schedule_text = "--"
         errors = (f"xruns {metrics.get('dropouts', 0)}/"
                   f"{metrics.get('underruns', 0)}")
-        draw.text((panel[0] + unit(18), stats_y),
-                  self._fit_text(
-                      f"{trace_hz:.1f} trace/s  ·  {picture_hz:.1f} picture/s  ·  "
-                      f"{samples:,} samples  ·  grid {grid}",
-                      self.small, panel[2] - panel[0] - unit(36)),
-                  fill=(158, 190, 205), font=self.small)
-        draw.text((panel[0] + unit(18), stats_y + unit(21)),
-                   self._fit_text(
-                       f"{metrics.get('fields', 1)} fields  ·  {buffer_kind} "
-                       f"{buffer_text}  ·  stream {dac_latency:.1f}ms  ·  "
-                       f"scheduled DAC {schedule_text}  ·  {errors}",
-                      self.tiny, panel[2] - panel[0] - unit(36)),
-                  fill=(218, 153, 122) if (metrics.get("dropouts", 0)
-                                            or metrics.get("underruns", 0))
-                  else (133, 158, 173), font=self.tiny)
+        self._draw_cached_text(
+            image, (panel[0] + unit(18), stats_y),
+            self._fit_text(
+                f"{trace_hz:.1f} trace/s  ·  {picture_hz:.1f} picture/s  ·  "
+                f"{samples:,} samples  ·  grid {grid}",
+                self.small, panel[2] - panel[0] - unit(36)),
+            (158, 190, 205), self.small)
+        self._draw_cached_text(
+            image, (panel[0] + unit(18), stats_y + unit(21)),
+            self._fit_text(
+                f"{metrics.get('fields', 1)} fields  ·  {buffer_kind} "
+                f"{buffer_text}  ·  stream {dac_latency:.1f}ms  ·  "
+                f"scheduled DAC {schedule_text}  ·  {errors}",
+                self.tiny, panel[2] - panel[0] - unit(36)),
+            (218, 153, 122) if (metrics.get("dropouts", 0)
+                                or metrics.get("underruns", 0))
+            else (133, 158, 173), self.tiny)
         note = self.message
         if note:
-            draw.text((panel[0] + unit(18), panel[3] - unit(23)),
-                      self._fit_text(note, self.tiny,
-                                     panel[2] - panel[0] - unit(36)),
-                      fill=(243, 178, 85), font=self.tiny)
+            self._draw_cached_text(
+                image, (panel[0] + unit(18), panel[3] - unit(23)),
+                self._fit_text(note, self.tiny,
+                               panel[2] - panel[0] - unit(36)),
+                (243, 178, 85), self.tiny)
         footer_height = max(36, unit(36))
         draw.rectangle((0, height - footer_height, width, height),
                        fill=(9, 15, 20, 255))
-        draw.text((unit(20), height - unit(27)),
-                  "XY starts muted; Hear XY enables the DAC. Muted XY leaves a "
-                  "center dot on a physical scope (no Z blanking channel).",
-                  fill=(151, 169, 179), font=self.tiny)
+        self._draw_cached_text(
+            image, (unit(20), height - unit(27)),
+            "XY starts muted; Hear XY enables the DAC. Muted XY leaves a "
+            "center dot on a physical scope (no Z blanking channel).",
+            (151, 169, 179), self.tiny)
         footer_note = ("Gamma/trim tune dwell; scope intensity sets tube brightness. "
                        "F10 image only · F11 fullscreen · Esc restore/close · Q close.")
-        draw.text((unit(20), height - unit(13)),
-                  self._fit_text(footer_note, self.tiny, width - unit(40)),
-                  fill=(151, 169, 179), font=self.tiny)
+        self._draw_cached_text(
+            image, (unit(20), height - unit(13)),
+            self._fit_text(footer_note, self.tiny, width - unit(40)),
+            (151, 169, 179), self.tiny)
 
         self._present(image)
 
@@ -897,8 +956,9 @@ class ScopeGUI:
         else:
             message = error or "Waiting for the first scope trace…"
             text_width = self.small.getlength(message)
-            draw.text(((width - text_width) / 2, height // 2), message,
-                      fill=(151, 174, 192), font=self.small)
+            self._draw_cached_text(
+                image, ((width - text_width) / 2, height // 2), message,
+                (151, 174, 192), self.small)
 
     def _present(self, image):
         framebuffer = self.glfw.get_framebuffer_size(self.window)

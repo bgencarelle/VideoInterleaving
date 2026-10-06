@@ -13,7 +13,7 @@ import sys
 import settings
 from shared_state import exchange_web
 from lightweight_monitor import monitor_data, HTML_TEMPLATE
-from server_config import get_config
+from server_config import get_config, MODE_SCOPE
 
 MAX_VIEWERS = getattr(settings, 'MAX_VIEWERS', 20)
 _hb_lock = threading.Lock()
@@ -222,7 +222,7 @@ def _scope_opts(path):
     return size, exposure
 
 
-def _scope_jpeg(size, pts=None, quality=82, exposure=1.0):
+def _scope_jpeg(size, pts=None, quality=82, exposure=1.0, workspace=None):
     """Render the parked trace to JPEG bytes, or None if there is nothing."""
     try:
         import cv2
@@ -234,7 +234,10 @@ def _scope_jpeg(size, pts=None, quality=82, exposure=1.0):
         if pts is None:
             return None
         _warm_preview_kernels()
-        img = preview_frame(pts, size=size, exposure=exposure)
+        kwargs = {"size": size, "exposure": exposure}
+        if workspace is not None:
+            kwargs["workspace"] = workspace
+        img = preview_frame(pts, **kwargs)
         ok, buf = cv2.imencode(".jpg", img[:, :, ::-1],
                                [cv2.IMWRITE_JPEG_QUALITY, quality])
         return buf.tobytes() if ok else None
@@ -255,7 +258,14 @@ class MonitorHandler(RobustHandlerMixin, http.server.BaseHTTPRequestHandler):
             self.send_response(200)
             self.send_header('Content-Type', 'text/html; charset=utf-8')
             self.end_headers()
-            self.wfile.write(HTML_TEMPLATE.encode('utf-8'))
+            page = HTML_TEMPLATE
+            try:
+                if get_config().get_mode() == MODE_SCOPE:
+                    with open("templates/scope.html", "r", encoding="utf-8") as f:
+                        page = f.read()
+            except (OSError, RuntimeError):
+                pass
+            self.wfile.write(page.encode('utf-8'))
 
         elif self.path == "/data":
             self.send_response(200)
@@ -424,6 +434,15 @@ class MonitorHandler(RobustHandlerMixin, http.server.BaseHTTPRequestHandler):
             from scope_out import Scope
         except Exception:
             return
+        workspace = None
+        try:
+            from scope_bake import PreviewWorkspace, _warm_preview_kernels
+            _warm_preview_kernels()
+            workspace = PreviewWorkspace(size)
+        except Exception:
+            # Older render snapshots have no reusable workspace API. The
+            # compatibility renderer still supplies the same JPEG stream.
+            pass
         try:
             while True:
                 Scope.want_tap(3.0)          # holding the connection IS the ask
@@ -436,7 +455,8 @@ class MonitorHandler(RobustHandlerMixin, http.server.BaseHTTPRequestHandler):
                     continue
                 idle = 0.0
                 last_seq = seq
-                blob = _scope_jpeg(size, pts, exposure=exposure)
+                blob = _scope_jpeg(size, pts, exposure=exposure,
+                                   workspace=workspace)
                 if blob is None:
                     continue
                 try:

@@ -80,14 +80,14 @@ class MonoVideoWireTests(unittest.TestCase):
                 pilot_timing='tone-seeded', frame_boundary='eof',
                 state=v7.PulseState(tail_memory=False))
 
-    def test_mono_fold_500_packets_are_bit_identical(self):
+    def test_mono_fold_500_packets_match_eof_level_budget_wire(self):
         audio = MonoFreshFoldWire(self.model).encode(
             self.model, [self.values]*3)
         digest = hashlib.sha256(
             np.ascontiguousarray(audio, dtype='<f4').tobytes()).hexdigest()
         self.assertEqual(
             digest,
-            'bc53e1cd76da09bb9f0601585aa8b36fc8dd7984e739e85a3006c452bacd4a76')
+            '96e7f10b52d0d4bfc0d51ab6bf1962ac16e7bac3f8a49b71754d9c42c539c436')
 
     def test_colour_order_keeps_head_and_is_a_permutation(self):
         order = colour_order(self.model)

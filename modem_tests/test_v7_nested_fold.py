@@ -108,7 +108,12 @@ class LiveTests(unittest.TestCase):
         for mode in ('mono nested', 'stereo nested'):
             audio = self.rig.audio(mode, self.rgb, 3)
             for start in range(0, len(audio), size):
-                for channel in audio[start:start+size].T:
+                packet = audio[start:start+size]
+                framing_peak = min(
+                    float(np.max(np.abs(packet[:v7.PULSE.SYNC_LEN]))),
+                    float(np.max(np.abs(packet[v7.EOF_MARKER_OFFSET:]))))
+                ceiling = framing_peak*10**(-v7.BODY_BELOW_EOF_DB/20)
+                for channel in packet.T:
                     if not np.any(channel):
                         continue
                     header = float(np.max(np.abs(channel[:v7.PULSE.SYNC_LEN])))
@@ -116,8 +121,11 @@ class LiveTests(unittest.TestCase):
                     # The header stays the loudest part, so it clips first...
                     self.assertGreater(20*np.log10(header/peak), 1.0, mode)
                     self.assertLess(float(np.max(np.abs(channel))), 1.0)
-                    # ...and the body uses the headroom under it.
-                    self.assertGreater(peak, .9*v7.BODY_PEAK, mode)
+                    # EOF packets use the lower framing ceiling instead of
+                    # historical BODY_PEAK. These standalone wires add their
+                    # status-tone overlay afterwards; the header-order checks
+                    # above also cover that final overlay.
+                    self.assertGreater(peak, .9*ceiling, mode)
         # Outside the nested senders the historical wire is unchanged.
         model = self.rig.base
         quiet = model.mu+.3*np.sqrt(model.lam)*np.random.default_rng(4).standard_normal(len(model.mu))

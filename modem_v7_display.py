@@ -146,8 +146,10 @@ def encode_folded_coefficients_packet(
         model, coefficients, absolute,
         aspect_code=aspect_code, source_index=source_index,
         loop=loop, direction=direction, pilot_tones=False,
-        eof_marker=eof_marker)
-    return add_fold500_coded_pilot(audio, absolute)
+        eof_marker=eof_marker,
+        extra_tone_mixer=lambda packet: add_fold500_coded_pilot(
+            packet, absolute))
+    return audio
 
 
 def packet(library, model, absolute, source_index, selection, *,

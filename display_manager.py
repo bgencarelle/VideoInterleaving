@@ -946,8 +946,10 @@ def display_init(state: DisplayState):
     # --- PATH A: SERVER / HEADLESS MODE ---
     is_server = settings.SERVER_MODE
     is_ascii = getattr(settings, 'ASCII_MODE', False)
+    is_local_frame_output = (
+        getattr(settings, 'LOCAL_FRAME_PORT', None) is not None)
 
-    if is_server or is_ascii:
+    if is_server or is_ascii or is_local_frame_output:
         use_gl = getattr(settings, "HEADLESS_USE_GL", False)
 
         if not use_gl:
@@ -960,6 +962,11 @@ def display_init(state: DisplayState):
             h = getattr(settings, 'ASCII_HEIGHT', 60)
             width = w if w % 2 == 0 else w + 1
             height = h if h % 2 == 0 else h + 1
+        elif is_local_frame_output and not is_server:
+            width, height = map(int, state.image_size)
+            if width < 1 or height < 1:
+                raise ValueError("local frame render target must be non-empty")
+            print(f"[DISPLAY] Local sender offscreen target: {width}x{height}")
         else:
             # Always use HEADLESS_RES from settings - do not calculate from image size
             headless_res = getattr(settings, "HEADLESS_RES", (640, 480))

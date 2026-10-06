@@ -33,6 +33,7 @@ from pathlib import Path
 from types import MappingProxyType
 
 import numpy as np
+from scope_numeric import rotate_cloud, array_percentile
 
 import settings
 import scope_out as _scope_out
@@ -106,13 +107,12 @@ def _rotate_stipple_cloud(cloud, rotation):
         return cloud
     out = dict(cloud)
     xy = np.asarray(cloud["xy"], dtype=np.float64)
-    u, v = xy[:, 0], xy[:, 1]
     if k == 1:
-        out["xy"] = np.column_stack((v, 1.0 - u))
+        out["xy"] = rotate_cloud(xy,1)
     elif k == 2:
-        out["xy"] = np.column_stack((1.0 - u, 1.0 - v))
+        out["xy"] = rotate_cloud(xy,2)
     else:
-        out["xy"] = np.column_stack((1.0 - v, u))
+        out["xy"] = rotate_cloud(xy,3)
     if k % 2:
         out["aspect"] = 1.0 / max(float(cloud.get("aspect", 1.0)), 1e-9)
     return out
@@ -935,7 +935,7 @@ def run_scope(clock_source=None):
         def _has_drawable_geometry(lib):
             if lib is None or len(lib.verts) == 0:
                 return False
-            return lib.flags is None or bool(np.any(lib.flags != 2))
+            return lib.flags is None or any(flag != 2 for flag in lib.flags)
 
         if not any(_has_drawable_geometry(lib)
                    for lib in main_libs + float_libs):
@@ -2477,9 +2477,9 @@ def run_scope(clock_source=None):
                     for _name, _values in _source_timing_values.items():
                         if _values:
                             _md["scope_source_age_ms_window"][_name] = {
-                                "p50": float(np.percentile(_values, 50)),
-                                "p95": float(np.percentile(_values, 95)),
-                                "p99": float(np.percentile(_values, 99)),
+                                "p50": array_percentile(np.asarray(_values),50.0),
+                                "p95": array_percentile(np.asarray(_values),95.0),
+                                "p99": array_percentile(np.asarray(_values),99.0),
                                 "max": float(max(_values)),
                             }
                         else:
@@ -2507,7 +2507,7 @@ def run_scope(clock_source=None):
                     _deadline_lateness = _producer_stats[
                         "deadline_lateness_ms"]
                     _md["scope_producer_p95_lateness_ms"] = (
-                        float(np.percentile(_deadline_lateness, 95))
+                        array_percentile(np.asarray(_deadline_lateness),95.0)
                         if _deadline_lateness else 0.0)
                     _md["scope_presentations_requested"] = int(
                         _producer_stats["attempted"])

@@ -9,6 +9,7 @@ from PIL import Image
 from animation_modem import v7
 from animation_modem.v7_coded_pilot import add_fold500_coded_pilot
 from animation_modem.v7_fold import Fold500
+from modem_v7_display import encode_folded_coefficients_packet
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -67,6 +68,16 @@ class ApplicationFoldTests(unittest.TestCase):
         actual = add_fold500_coded_pilot(packet, 5)
         expected = tone_code.add_tone_code(
             packet, 5, tone_code.encode_status(tone_code.FOLD_500))
+        np.testing.assert_array_equal(actual, expected)
+
+    def test_production_fold_path_mixes_coded_pilot_inside_level_fitting(self):
+        coefficients = Fold500(self.model).encode_coefficients(self.values)
+        actual = encode_folded_coefficients_packet(
+            self.model, coefficients, 5, 2, 3)
+        expected = v7.encode_pulse_frame_coeffs(
+            self.model, coefficients, 5, aspect_code=3, source_index=2,
+            pilot_tones=False, eof_marker=True,
+            extra_tone_mixer=lambda packet: add_fold500_coded_pilot(packet, 5))
         np.testing.assert_array_equal(actual, expected)
 
     def test_fold_table_rejects_the_nearest_encoding_model(self):
