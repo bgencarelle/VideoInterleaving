@@ -1,24 +1,27 @@
 # V7 higher-resolution converter handoff
 
-The requested higher-detail converter is **not solved**. The experimental
-fixed-support residual converter (`tools/v7_patch_residual.py`) successfully
-encodes one face image into the existing stereo aspect-fold-500 audio packet
-and decodes with a separate receiver. The 576×768 output remains blurry and
-has wave artifacts; larger raster dimensions are not additional resolved detail.
+The higher-detail goal is **not solved**. The original theory folded
+higher-dimensional source-detail vectors into fewer analog amplitudes using
+Shannon–Kotel’nikov-style serpentine mappings. More strips reduced source
+projection error but amplified channel error and boundary failures. Recursive
+packing compounded sensitivity. Three-to-two offers 1.5× coordinate capacity,
+not 1.5× resolution per axis; strip confirmations showed no general gain.
 
-Fixed a benchmark double inverse-DCT: `base_values()` already returns spatial
-values. Earlier residual `source-screen` and `source-screen-v2` results are
-invalid. Regression tests verify the production direct-DCT path is called once.
-Patch fitting now uses sequential residual seeds and continuous frequency
-refinement; independent synthetic quadratures pass the provisional 10% error
-threshold. Natural-picture improvement remains small and inconsistent.
+Work shifted to source-aware waves, contours and DCT residuals. The final
+fixed-support converter carries frequencies and quadrature amplitudes in
+displaced conventional luma slots. Useful synthesized detail has not consistently
+compensated for lost base coefficients.
 
-Local artifacts (gitignored): `tmp/v7-one-image-roundtrip/` contains the original,
-audio-decoded comparison, experimental image, WAV and summary. Reproduce with
-`tmp/v7_one_image_roundtrip.py` while available locally. Refined source results:
+Fixed a benchmark double inverse-DCT: `base_values()` is already spatial.
+Earlier residual `source-screen` and `source-screen-v2` results are invalid.
+Regressions confirm one production direct-DCT source call. Synthetic fitting
+passes, but natural-image gains remain small and inconsistent.
+
+`tools/v7_one_image_roundtrip.py` encodes a face through stereo aspect-fold-500
+audio and an independent decoder. Its 576×768 output is blurry with wave
+artifacts. Local outputs: `tmp/v7-one-image-roundtrip/`; refined source summary:
 `tmp/v7-patch-detail/source-screen-refined-v2/`. Always show images inline.
 
-Verification: 30 focused/integration tests passed, followed by the patch-fitting
-regression after its final adjustment. Preserve wire resources, independent
-frames, source-first qualification, matched volume and Numba numerical kernels.
-No 1.5× resolution claim or tape validation is established.
+Thirty focused/integration tests passed, plus the final fitting regression.
+Preserve wire resources, independent frames, matched volume, source-first
+qualification and Numba computation. No 1.5× gain or tape validation is established.
