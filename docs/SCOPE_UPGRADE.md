@@ -4404,3 +4404,45 @@ and `test_v7_mono_video.MonoVideoWireTests.test_mono_fold_500_packets_are_bit_id
 No modem/V7 source or test changes were included in this S5 patch. These two
 failures remain visible rather than being represented as a passing repository-wide
 check.
+
+---
+
+## Appendix A048 — S5 decoded-content XY occupancy frontier — 2026-10-06
+
+To replace the earlier source-luma-at-sample proxy and its pre-integration
+stipple speed labels, ran `tmp/scope_s5_occupancy_frontier.py` on decoded frames
+30, 150 and 270 from the checked-in 16:9 motion-video fixture. It exercises the
+actual timed `TraceEmitter` and `StippleEmitter`, with accepted complete
+trajectory exposures at 15 and 30 cycles/s, both 48 kHz / 1,600 samples and
+96 kHz / 3,200 samples. Raster canonical budgets are 1,600/3,200/6,400;
+stipple point budgets are 256/512/768/1,024. Three complete exposures per frame
+and cell were timed after one warmup. Total: 28 budget/rate/speed cells.
+
+The software quality proxy compares the normalized 64x64 XY occupancy histogram
+against normalized source-luminance bins using total-variation distance (lower is
+closer). Across cells, renderer p50/p95 ranges were 4.20–14.33 ms for raster and
+8.37–21.03 ms for stipple. Mean distance by stipple point budget across rates and
+speeds was 0.730 (256), 0.638 (512), 0.582 (768), and 0.556 (1,024); corresponding
+median p50/p95 were 13.41/14.51, 14.06/14.26, 13.84/14.61, and 14.70/15.65 ms.
+This indicates a measurable occupancy/cost tradeoff on these decoded images,
+not perceptual quality. Raster distance averaged about 0.477 across geometry
+budgets; raising canonical geometry did not improve this output-sample-limited
+proxy. Reproduction and raw per-cell results:
+
+```bash
+PYTHONPATH=. .venv/bin/python tmp/scope_s5_occupancy_frontier.py
+```
+
+JSON SHA256 `0e8b907eacad88fcbfd288ff5b68ed4d0ab62c69ea64d4f66eaa23983b623423`;
+harness SHA256 `2ebe7ecd26efa5aa5a055fb6b9cdd21d83ed6d00d8341c3400289b53f4502ac3`.
+The artifact is `tmp/scope-s5-occupancy-frontier.json`.
+
+**Result:** S5 now has measured real-content software occupancy/cost coverage,
+budget sweeps, sample-rate independence, independently varied speed, and
+appearance-control cost/extent evidence. It still does not demonstrate 30+
+complete-picture output cadence, perceived/physical quality, or fusion-specific
+clock decoupling. The existing marker makes a configured 30-Hz trace slightly
+slower than 30 output windows; the nominal-rate policy previously accepted by the
+user treats that as effectively 30, but it is not evidence above 30. Treat the
+offline scope comparison as the remaining release validation, not as a blocker
+to further software implementation.
