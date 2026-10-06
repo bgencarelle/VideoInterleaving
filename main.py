@@ -237,9 +237,9 @@ def configure_runtime():
     parser.add_argument("--scope-fps", type=int, help="Scope trace rate (default: IPS)")
     parser.add_argument("--scope-samples", type=int, help="Scope samples per trace")
     parser.add_argument("--scope-geometry-samples", type=int, metavar="N",
-                        help="Baked raster trajectory detail budget independent of DAC samples")
+                        help="Baked vector/raster trajectory detail budget independent of DAC samples")
     parser.add_argument("--scope-traversal-hz", type=float, metavar="HZ",
-                        help="Timed baked-raster traversal speed in cycles/second; requires trigger and one field")
+                        help="Timed baked vector/raster traversal speed in cycles/second; requires trigger and one field")
     parser.add_argument("--scope-fields", type=int, metavar="N",
                         help="Scope raster: interlace. N=2 draws every other "
                              "row per trace and alternates, so the beam "
@@ -758,8 +758,8 @@ def configure_runtime():
         geometry_samples = args.scope_geometry_samples
         traversal_hz = args.scope_traversal_hz
         if geometry_samples is not None or traversal_hz is not None:
-            if scope_source != "bake" or requested_render != "raster":
-                parser.error("scope geometry/traversal controls require baked raster rendering")
+            if scope_source != "bake" or requested_render not in ("vector", "raster"):
+                parser.error("scope geometry/traversal controls require baked vector or raster rendering")
             if args.scope_mix is not None:
                 parser.error("scope geometry/traversal controls cannot be combined with --scope-mix")
             if args.scope_realtime:

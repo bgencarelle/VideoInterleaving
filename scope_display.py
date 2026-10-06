@@ -38,6 +38,7 @@ import settings
 import scope_out as _scope_out
 from scope_frame_scheduler import FieldGroupLatch, ScopeFrameScheduler
 from scope_prepared_cache import PreparedImageCache
+from scope_trajectory import VectorTrajectory
 
 _REQUIRED_SCOPE_OUT_API = 7
 _scope_out_api = getattr(_scope_out, "SCOPE_OUT_API_VERSION", 0)
@@ -676,8 +677,8 @@ def run_scope(clock_source=None):
         raise ValueError("live scope images support raster, stochastic, "
                          "or stipple; vector/fusion need an XY bake")
     if geometry_samples is not None or traversal_hz is not None:
-        if scope_source != "bake" or render_mode != "raster":
-            raise ValueError("scope geometry/traversal controls require baked raster rendering")
+        if scope_source != "bake" or render_mode not in ("vector", "raster"):
+            raise ValueError("scope geometry/traversal controls require baked vector or raster rendering")
         if traversal_hz is not None and not trigger_on:
             raise ValueError("SCOPE_TRAVERSAL_HZ requires the scope trigger")
     use_raster = render_mode == "raster"
@@ -1539,6 +1540,10 @@ def run_scope(clock_source=None):
         levels=(cal.get("levels") if cal else None),
         geometry_samples=geometry_samples, traversal_hz=traversal_hz)
     _configure_raster_emitter_fields(emitter, render_mode, fields)
+    vector_trajectory = (VectorTrajectory(
+        geometry_samples or (3200 if traversal_hz is not None else None),
+        traversal_hz) if render_mode == "vector" and
+        (geometry_samples is not None or traversal_hz is not None) else None)
     stochastic_emitter = StochasticEmitter(
         scope.samplerate, scope.samples_per_frame,
         gamma=walk_gamma, trim=trim, radius=walk_radius, stride=walk_stride,
@@ -1637,6 +1642,8 @@ def run_scope(clock_source=None):
             levels=(cal.get("levels") if cal else None),
             geometry_samples=geometry_samples, traversal_hz=traversal_hz)
         _configure_raster_emitter_fields(emitter, render_mode, fields)
+        if vector_trajectory is not None:
+            vector_trajectory.reset()
         stochastic_emitter = StochasticEmitter(
             scope.samplerate, scope.samples_per_frame,
             gamma=walk_gamma, trim=trim, radius=walk_radius,
@@ -1699,6 +1706,9 @@ def run_scope(clock_source=None):
             endpoint = request["scope"].last_accepted_endpoint
         if endpoint is not None:
             beam_end = np.asarray(endpoint, dtype=np.float32)[:2].copy()
+        trajectory = request.get("vector_trajectory")
+        if trajectory is not None:
+            trajectory.accept()
         has_raster = (mode == "raster" or
                       (mode == "fusion"
                        and "r" in request["fusion_components"]))
@@ -1781,7 +1791,8 @@ def run_scope(clock_source=None):
                     source_thumbnails=(
                         (decoded_pair.main, decoded_pair.floating)
                         if decoded_pair is not None else None),
-                    defer_state=(mix_mode == "raster"))
+                    defer_state=(mix_mode == "raster"),
+                    vector_trajectory=active.get("vector_trajectory"))
 
             def commit_active(endpoint):
                 commit_accepted_trace(
@@ -1826,6 +1837,7 @@ def run_scope(clock_source=None):
                 fields=active["fields"], rotation=active["rotation"],
                 presentation=presentation_identity(
                     active, mode, field, decoded_pair),
+                vector_trajectory=active.get("vector_trajectory"),
                 # The random walk dominates stochastic render cost; measured
                 # cache hits did not improve end-to-end timing and added a
                 # small cost. Keep its preparation uncached in application mode.
@@ -1858,6 +1870,7 @@ def run_scope(clock_source=None):
             "lowpass": lowpass, "oversample": oversample, "cal": cal,
             "dc_comp": dc_comp, "border": border, "invert": invert,
             "emitter": emitter, "stochastic_emitter": stochastic_emitter,
+            "vector_trajectory": vector_trajectory,
             "stipple_emitter": stipple_emitter,
             "fusion_multiplexer": fusion_multiplexer,
             "fusion_components": fusion_components,
@@ -2032,6 +2045,8 @@ def run_scope(clock_source=None):
                         geometry_samples=geometry_samples,
                         traversal_hz=traversal_hz)
                     _configure_raster_emitter_fields(emitter, render_mode, fields)
+                    if vector_trajectory is not None:
+                        vector_trajectory.reset()
                     stochastic_emitter = StochasticEmitter(
                         scope.samplerate, scope.samples_per_frame,
                         gamma=walk_gamma, trim=trim, radius=walk_radius,
@@ -2595,7 +2610,7 @@ def _emit(scope, ml, fl, index, render_mode, sweep, sweep_mode,
           stochastic_gamma=2.0, stochastic_edge=0.0, stipple_emitter=None,
           fusion_multiplexer=None, invert=False, rotation=0,
           presentation=None, defer_state=False, prepared_cache=None,
-          source_thumbnails=None):
+          source_thumbnails=None, vector_trajectory=None):
     n = scope.samples_per_frame
 
     def prepare_luma(main, main_index, floating, float_index, *, raw=False,
@@ -2848,13 +2863,31 @@ def _emit(scope, ml, fl, index, render_mode, sweep, sweep_mode,
             return end
     else:
         # empty -> safe idle circle, never a parked dot
-        frame = (prepared_cache.vector_frame(
-            ml, index, fl, index, samples=n, min_feature=min_feature,
-            rotation=rotation) if prepared_cache is not None else
-            rotate_frame(rasterize(
-                merge(ml, index, fl, index, min_feature=min_feature), n),
-                rotation))
-        if invert:
+        if vector_trajectory is not None:
+            canonical_n = vector_trajectory.geometry_samples or n
+            canonical = (prepared_cache.vector_frame(
+                ml, index, fl, index, samples=canonical_n,
+                min_feature=min_feature, rotation=rotation)
+                if prepared_cache is not None else rotate_frame(rasterize(
+                    merge(ml, index, fl, index, min_feature=min_feature),
+                    canonical_n), rotation))
+            if invert:
+                inverse_luma = prepare_luma(
+                    ml, index, fl, index, raw=True, invert=True)
+                weights = trace_luminance_weights(
+                    inverse_luma, canonical, gamma=gamma, trim=trim)
+                if weights is not None:
+                    canonical = retime_trace_by_weights(canonical, weights)
+            frame = vector_trajectory.emit(
+                canonical, n, scope.samplerate)
+        else:
+            frame = (prepared_cache.vector_frame(
+                ml, index, fl, index, samples=n, min_feature=min_feature,
+                rotation=rotation) if prepared_cache is not None else
+                rotate_frame(rasterize(
+                    merge(ml, index, fl, index, min_feature=min_feature), n),
+                    rotation))
+        if invert and vector_trajectory is None:
             inverse_luma = prepare_luma(
                 ml, index, fl, index, raw=True, invert=True)
             weights = trace_luminance_weights(

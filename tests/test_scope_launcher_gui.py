@@ -53,14 +53,24 @@ class ScopeLauncherCommandTests(unittest.TestCase):
 
     def test_trajectory_controls_reject_unsupported_combinations(self):
         self.settings.update({"run_mode": "app", "app_source": "bake",
-                              "render_mode": "vector",
+                              "render_mode": "stochastic",
                               "geometry_samples": "2400"})
-        with self.assertRaisesRegex(ValueError, "baked raster"):
+        with self.assertRaisesRegex(ValueError, "baked vector or raster"):
             validate_settings(self.settings, root=self.root)
         self.settings.update({"render_mode": "raster", "traversal_hz": "60",
                               "trigger": False})
         with self.assertRaisesRegex(ValueError, "requires the scope trigger"):
             validate_settings(self.settings, root=self.root)
+
+    def test_baked_vector_command_accepts_independent_trajectory_controls(self):
+        self.settings.update({"run_mode": "app", "app_source": "bake",
+                              "render_mode": "vector", "geometry_samples": "3200",
+                              "traversal_hz": "15"})
+        validate_settings(self.settings, root=self.root)
+        command = build_command(self.settings, root=self.root, python="python")
+        self.assertEqual(command[command.index("--scope-mode") + 1], "vector")
+        self.assertEqual(command[command.index("--scope-geometry-samples") + 1], "3200")
+        self.assertEqual(command[command.index("--scope-traversal-hz") + 1], "15")
 
     def test_launcher_can_start_the_scope_tuner_fullscreen_image_only(self):
         self.settings.update({"run_mode": "app", "app_source": "images",

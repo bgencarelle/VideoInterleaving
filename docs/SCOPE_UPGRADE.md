@@ -4234,3 +4234,67 @@ default content was available. Runnable fixture command:
 **Handoff: S4 complete in the user-accepted software scope; S5 active.** This
 checkpoint delivers tested raster trajectory controls and the accelerated stipple
 tour, with the remaining S5 exit work listed above. It is not a full S5 release.
+
+---
+
+## Appendix A045 — S5 vector trajectory extension — 2026-10-06
+
+This checkpoint extends the independent geometry budget and traversal clock to
+the baked vector renderer. The application and launcher accept the existing
+`--scope-geometry-samples` and `--scope-traversal-hz` controls for baked vector
+as well as raster; stochastic/fusion and whole-trace mix remain outside this
+opt-in path. The default vector renderer remains the comparison reference.
+
+A small real-content vector bake for the startup smoke was generated from the
+A044 fixture image and transparent overlay using:
+
+```bash
+.venv/bin/python utilities/convert_to_xy.py \
+  -i tmp/scope-s5-smoke-images -o tmp/scope-s5-vector-smoke_xy --profile tiny
+```
+
+Generated bakes and measurements remain under `tmp/`. This extends S5's clock
+work; it does not claim a complete S5 release, physical quality improvement or
+the still-unfinished appearance-control budget evaluation.
+
+### Implementation and verification
+
+- `scope_trajectory.py::VectorTrajectory` prewarms the cached float32 sampler,
+  prepares candidates without advancing committed phase, and advances only on
+  accepted application output. Geometry-only mode traverses a complete canonical
+  cycle per trace; timed mode advances by drawing sample duration. Trigger marker
+  duration is separate from that drawing-duration clock, as in A044 raster.
+- Canonical vector construction uses the fixed geometry budget and the existing
+  budget-keyed vector cache. Rotation and inversion weighting happen before
+  timed sampling, so the output sample budget does not redefine those operations.
+  Canonical interpolation covers a full cycle when changing detail budgets.
+- Existing vector output already omits raster handoff anchoring. Integration
+  tests verify the actual `_emit`/output transaction retains those samples and
+  rejected queue candidates do not advance phase. Device and timing rebuilds
+  drain the producer and reset the vector phase. Changes in source geometry can
+  still relocate the point at the current phase; timed output requires trigger.
+- The guarantee is for the unfiltered trajectory waveform. Optional legacy
+  per-trace circular low-pass processing can alter chunk-boundary behavior; this
+  checkpoint does not claim filter/chunk invariance or physical beam quality.
+- Final combined focused scope, lazy-import and modem-integration verification:
+  **298 passed, 28 subtests passed**. Added tests compare entire DAC-rate and
+  chunk-partition waveforms, independent speed changes, geometry-only full-cycle
+  output, rejection/reset, and application queue handoff. Launcher vector flag
+  forwarding is also covered.
+- `main.py` baked-vector startup and Ctrl+C shutdown passed on null output with
+  test channels 24/25, 3,200 geometry samples and 15 traversal cycles/s. Log:
+  `tmp/scope-s5-vector-application-smoke.log`. This is a startup/control-path
+  check, not a cadence benchmark.
+
+```bash
+.venv/bin/python main.py --mode scope \
+  --dir tmp/scope-s5-smoke-images --xy-dir tmp/scope-s5-vector-smoke_xy \
+  --scope-mode vector --device null --scope-channels 24,25 \
+  --scope-geometry-samples 3200 --scope-traversal-hz 15
+```
+
+**Handoff: S5 remains active.** Raster and baked-vector clock controls plus
+stipple tour acceleration are delivered. Continuous/stochastic/fusion integration,
+the measured real-content quality/cost frontier, and thickness/intensity budget
+work remain open under the frozen S5 charter. Product channel defaults remain
+`(1, 2)` and the user-accepted S4 software closure remains in force.

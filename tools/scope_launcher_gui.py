@@ -323,8 +323,8 @@ def validate_settings(settings, outputs=(), root=ROOT):
                                    integer=True)
         traversal_hz = _number(settings, "traversal_hz", optional=True)
         if geometry_samples is not None or traversal_hz is not None:
-            if source != "bake" or renderer != "raster":
-                raise ValueError("Geometry/traversal controls require baked raster rendering")
+            if source != "bake" or renderer not in ("vector", "raster"):
+                raise ValueError("Geometry/traversal controls require baked vector or raster rendering")
             if settings.get("yt_timing", "dwell") == "fixed":
                 raise ValueError("Independent geometry controls cannot use fixed Y-T timing")
             if _number(settings, "mix", optional=True) is not None:
