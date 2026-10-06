@@ -1,6 +1,5 @@
 """Undo the blur the receiver's upscaler adds, before the signal is sent."""
-import numpy as np
-from scipy.ndimage import maximum_filter, minimum_filter
+import numpy as np                 # the gain window only, built once per setting
 
 LABEL = 'Upscaler pre-compensation'
 HELP = ('The picture is small and the viewer blows it up; every upscaler '
@@ -57,9 +56,4 @@ def response(nu, upscaler, strength, noise, max_gain):
 def post(grid, ctx, tame):
     if ctx.reference is None or int(tame) < 1 or ctx.plane:
         return grid
-    low = minimum_filter(ctx.reduce(ctx.reference, 'min'), size=3, mode='nearest')
-    high = maximum_filter(ctx.reduce(ctx.reference, 'max'), size=3, mode='nearest')
-    shown = grid
-    for _ in range(int(tame)):
-        shown = np.clip(ctx.project(shown), low - 0.02, high + 0.02)
-    return ctx.project(shown)
+    return ctx.tame(grid, tame)

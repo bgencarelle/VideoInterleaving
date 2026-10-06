@@ -1,6 +1,4 @@
 """Edge clean-up: keep the sent picture inside what the source contained."""
-import numpy as np
-from scipy.ndimage import maximum_filter, minimum_filter
 
 LABEL = 'Anti-ringing refit'
 HELP = ('The wire holds a limited band, so a hard edge overshoots into a '
@@ -26,14 +24,4 @@ def post(grid, ctx, iterations, radius, margin, chroma):
         return grid
     if ctx.plane and not chroma:
         return grid
-    low = ctx.reduce(ctx.reference, 'min')
-    high = ctx.reduce(ctx.reference, 'max')
-    size = 2*int(radius) + 1
-    if size > 1:
-        low = minimum_filter(low, size=size, mode='nearest')
-        high = maximum_filter(high, size=size, mode='nearest')
-    low, high = low - margin, high + margin
-    shown = grid
-    for _ in range(int(iterations)):
-        shown = np.clip(ctx.project(shown), low, high)
-    return ctx.project(shown)
+    return ctx.tame(grid, iterations, radius=radius, margin=margin)

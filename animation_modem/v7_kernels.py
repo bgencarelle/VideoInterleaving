@@ -71,6 +71,8 @@ from pathlib import Path
 import numpy as np
 from scipy.fft import dctn, idctn
 
+from animation_modem import v7_kernel_solve as _solve
+
 REFERENCE = 'reference'
 DEFAULT_DIR = Path(__file__).resolve().parents[1]/'dct_kernels'
 ENV_DIRS = 'V7_KERNEL_DIR'
@@ -154,6 +156,7 @@ class KernelContext:
                        if len(rows_on) and len(cols_on) else self.sent)
         self.reference = reference            # pre-window plane, post only
         self.mask_key = hashlib.blake2b(mask.tobytes(), digest_size=8).digest()
+        self._weights = None
 
     def nu(self):
         """(rows x 1, 1 x cols) frequencies in cycles per sent pixel."""
@@ -169,19 +172,54 @@ class KernelContext:
         v = np.arange(self.grid[1], dtype=np.float64)[None, :]
         return np.hypot(u/rows, v/cols)
 
+    # Per-frame work is compiled (animation_modem/v7_kernel_solve.py); these
+    # hand kernels the arrays those routines take.
+    @property
+    def weights(self):
+        """The mask as 1.0 where a coefficient is sent, 0.0 elsewhere."""
+        if self._weights is None:
+            self._weights = np.ascontiguousarray(self.mask, np.float64)
+        return self._weights
+
+    @property
+    def transforms(self):
+        """(row basis, transpose, column basis, transpose) of the grid."""
+        return _solve.transforms(*self.grid)
+
     def project(self, grid):
         """The picture the receiver can show: only the coefficients sent."""
-        coefficients = dctn(np.asarray(grid, np.float64), norm='ortho')
-        coefficients[~self.mask] = 0.0
-        return idctn(coefficients, norm='ortho')
+        return _solve.project(np.ascontiguousarray(grid, np.float64), self.weights,
+                              *self.transforms)
 
     def reduce(self, array, how='mean'):
         """A pixel-domain array brought down to the grid (mean, min or max
         over the source pixels each grid pixel covers)."""
-        array = np.asarray(array, np.float64)
+        if how not in _REDUCTIONS:
+            raise ValueError("reduce(how) is 'mean', 'min' or 'max'")
+        array = np.ascontiguousarray(array, np.float64)
+        if array.ndim == 2:
+            return _solve.reduce_plane(array, self.grid[0], self.grid[1], _REDUCTIONS[how])
         for axis, count in enumerate(self.grid):
             array = _reduce_axis(array, axis, count, how)
         return array
+
+    def source_range(self, radius=1, margin=0.0):
+        """(low, high): the range the source had within ``radius`` grid
+        pixels of each grid pixel, widened by ``margin``."""
+        return (_solve.neighbourhood_extreme(self.reduce(self.reference, 'min'),
+                                             int(radius), False, -float(margin)),
+                _solve.neighbourhood_extreme(self.reduce(self.reference, 'max'),
+                                             int(radius), True, float(margin)))
+
+    def tame(self, grid, rounds, radius=1, margin=0.02):
+        """Halo clean-up: ``rounds`` times, show what the receiver can and
+        move it back inside the source's local range; then show it."""
+        low, high = self.source_range(radius, margin)
+        return _solve.clip_project(np.ascontiguousarray(grid, np.float64), self.weights,
+                                   low, high, int(rounds), *self.transforms)
+
+
+_REDUCTIONS = {'mean': 0, 'min': 1, 'max': 2}
 
 
 def _reduce_axis(array, axis, count, how):

@@ -96,3 +96,8 @@ code for everything that runs per packet.
 - A rewrite into kernels must be shown to change nothing: compare live
   decodes before and after, on more than one picture and with smoothing
   both on and off.
+- Downscale kernels (`dct_kernels/`): a kernel's per-frame `post` step calls
+  compiled routines in `animation_modem/v7_kernel_solve.py` (or the
+  `KernelContext` helpers `project`, `reduce`, `source_range`, `tame`, which
+  do). Only what is built once per setting (a gain window, a model matrix)
+  may use numpy or scipy.

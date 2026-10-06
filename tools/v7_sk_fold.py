@@ -1295,3 +1295,47 @@ def same_values(a, b):
         if a[i] != b[i]:
             return False
     return True
+
+
+@njit(cache=True)
+def smooth_within_room_fast(luma, room, rows, rows_matrix, rows_transposed, cols_matrix,
+                            cols_transposed, passes, edge, rate):
+    """``smooth_within_room`` with momentum (Nesterov's accelerated projected
+    gradient): the same descent, but each step also carries on in the
+    direction of the last one, so far fewer passes reach the same picture."""
+    cols = len(luma)//rows
+    start = np.ascontiguousarray(luma).reshape(rows, cols)
+    reach = np.ascontiguousarray(room).reshape(rows, cols)
+    current = start.copy()
+    ahead = start.copy()
+    gradient = np.empty((rows, cols))
+    step = rate*edge
+    weight = 1.0
+    for _ in range(passes):
+        image = np.dot(np.dot(rows_transposed, ahead), cols_matrix)
+        _variation_gradient(image, edge, gradient)
+        spectrum = np.dot(np.dot(rows_matrix, gradient), cols_transposed)
+        following = .5*(1.0+math.sqrt(1.0+4.0*weight*weight))
+        push = (weight-1.0)/following
+        weight = following
+        for r in range(rows):
+            for c in range(cols):
+                value = ahead[r, c]-step*spectrum[r, c]
+                low, high = start[r, c]-reach[r, c], start[r, c]+reach[r, c]
+                if value < low:
+                    value = low
+                elif value > high:
+                    value = high
+                ahead[r, c] = value+push*(value-current[r, c])
+                current[r, c] = value
+    return current.ravel()
+
+
+@njit(cache=True)
+def same_values(a, b):
+    if len(a) != len(b):
+        return False
+    for i in range(len(a)):
+        if a[i] != b[i]:
+            return False
+    return True
