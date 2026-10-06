@@ -17,7 +17,7 @@ import json
 from pathlib import Path
 import threading
 
-from numba import njit
+from numba import njit, prange
 import numpy as np
 
 Q = 32767.0
@@ -910,12 +910,12 @@ def _preview_splat_kernel(samples, size, max_split, out):
     return total
 
 
-@njit(cache=True, nogil=True, fastmath=False)
+@njit(cache=True, nogil=True, fastmath=False, parallel=True)
 def _preview_tonemap_kernel(acc, gain, out):
     """Fuse preview tone curve, phosphor tint, clip and uint8 conversion."""
     h, w = acc.shape
     g = np.float32(gain)
-    for y in range(h):
+    for y in prange(h):
         for x in range(w):
             value = np.float32(acc[y, x])
             v = np.float32(1.0 - np.exp(np.float32(-value * g)))
@@ -952,6 +952,10 @@ class PreviewWorkspace:
         self.blur_input = np.empty(shape, dtype=np.float32)
         self.blurred = np.empty(shape, dtype=np.float32)
         self.rgb = np.empty(shape + (3,), dtype=np.uint8)
+        self.filter_size = (self.size + 1) // 2
+        low_shape = (self.filter_size, self.filter_size)
+        self.filter_input = np.empty(low_shape, dtype=np.float32)
+        self.filter_blurred = np.empty(low_shape, dtype=np.float32)
 
 
 def _warm_preview_kernels():
@@ -1032,8 +1036,22 @@ def preview_frame(samples, size=384, spot=None, exposure=1.0, max_split=192,
     _splat_count = _preview_splat_kernel(
         samples, size, int(max_split), workspace.splats)
     np.copyto(workspace.blur_input, workspace.splats, casting="unsafe")
-    cv2.GaussianBlur(workspace.blur_input, (0, 0), spot,
-                     dst=workspace.blurred)
+    if size >= 1024 and spot >= 4.0:
+        # At large image-only sizes the full-resolution Gaussian dominates
+        # preview latency. Filter at half linear resolution and reconstruct;
+        # measured RGB error on decoded content stays sub-code-value on average.
+        filtered = cv2.resize(
+            workspace.blur_input,
+            (workspace.filter_size, workspace.filter_size),
+            dst=workspace.filter_input,
+            interpolation=cv2.INTER_AREA)
+        cv2.GaussianBlur(filtered, (0, 0), spot * 0.5,
+                         dst=workspace.filter_blurred)
+        cv2.resize(workspace.filter_blurred, (size, size),
+                   dst=workspace.blurred, interpolation=cv2.INTER_LINEAR)
+    else:
+        cv2.GaussianBlur(workspace.blur_input, (0, 0), spot,
+                         dst=workspace.blurred)
     acc = workspace.blurred
     lit = acc[acc > 0]
     gain = exposure * 2.5 / max(float(np.percentile(lit, 75)), 1e-6) if lit.size else 1.0

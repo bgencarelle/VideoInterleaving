@@ -4566,3 +4566,39 @@ avoidance, direct headless and software-GL comparison, browser accumulation and
 continuous-tap audit, measured preview age/cadence and output impact, and D0
 comparison. In particular, a 1,600-pixel raster preview still costs about 100 ms
 CPU per render; do not raise its refresh cap based on this partial result.
+
+---
+
+## Appendix A051 — S6 large-preview raster follow-up — 2026-10-06
+
+A050's 100 ms statement referred to aggregate process CPU time, not wall latency.
+Stage profiling showed the dominant work was the broad full-resolution Gaussian
+blur. Added a large-preview-only approximation: at sizes of 1,024 px and above,
+spots at least 4 px wide are filtered at half linear resolution and reconstructed
+to the requested preview size. Fine spots remain full resolution. The 2-Hz
+refresh cap and all scope/output defaults remain unchanged.
+
+On the same decoded frame-150, 96-kHz raster fixture at 1,600 px, post-change
+median/p95 wall render time was **29.28/32.45 ms** and aggregate process CPU was
+**60.67/65.82 ms**, versus A050's first-pass **99.61 ms aggregate CPU p50** and
+the pre-S6 baseline **116.35 ms aggregate CPU p50**. Python-tracked peak was
+64.9 MB. The optimized four-mode sweep reports these two clocks separately;
+vector-contour, stochastic and stipple wall/aggregate-CPU p50s were 21.02/47.59,
+22.27/62.31, and 18.73/50.80 ms respectively.
+
+The broad-spot approximation's decoded fixture RGB delta was mean **0.22** and
+95th percentile **1** code value (0–255). A synthetic broad-spot comparison had
+mean **0.34**, p95 **2**, max **10** code values; fine-spot filtering differed
+from the full-resolution reference by at most one code value in under 0.001% of
+channels. These checks support this preview-only approximation; they do not claim
+physical phosphor equivalence. Scope suite passed **304 tests, 30 subtests**.
+
+Updated measurement artifact `tmp/scope-s6-preview-optimized.json`, SHA256
+`6d95d68ac10b27391da1ab496a83b9f23ad0f2e9da6aba7bf6627454acf377c2`; measurement
+harness SHA256 remains
+`c5bf2a030e110f52b8066781c1ff6414257176f7940139e3a51934421d0f8fff`.
+
+**S6 remains active.** Native dirty redraw/selective upload, CPU-headless versus
+software-GL/browser measurements, continuous-tap behavior, preview age/cadence,
+and output-scheduling impact still need evidence. This follow-up addresses the
+largest identified renderer bottleneck; it does not complete the S6 exit.

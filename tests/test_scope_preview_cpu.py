@@ -59,6 +59,27 @@ class ScopePreviewCpuTests(unittest.TestCase):
         self.assertIs(brighter, workspace.rgb)
         self.assertGreater(float(brighter.mean()), float(base.mean()))
 
+    def test_large_preview_uses_bounded_half_scale_filter_with_small_rgb_delta(self):
+        size = 1024
+        # Wide raster-like spots benefit from lower-resolution filtering; fine
+        # spots stay full-resolution to avoid losing thin vector features.
+        spot = 12.0
+        expected = _legacy_preview(self.points, size, spot)
+        actual = preview_frame(self.points, size=size, spot=spot)
+        delta = np.abs(expected.astype(np.int16) - actual.astype(np.int16))
+        self.assertLess(float(delta.mean()), 0.5)
+        self.assertLessEqual(float(np.percentile(delta, 95)), 2.0)
+
+    def test_large_preview_keeps_fine_spots_full_resolution(self):
+        size = 1024
+        spot = 2.3
+        expected = _legacy_preview(self.points, size, spot)
+        actual = preview_frame(self.points, size=size, spot=spot)
+        delta = np.abs(expected.astype(np.int16) - actual.astype(np.int16))
+        self.assertLessEqual(int(delta.max()), 1)
+        self.assertLessEqual(float(np.count_nonzero(delta)) / delta.size,
+                             1e-5)
+
     def test_empty_and_invalid_workspace_inputs(self):
         self.assertEqual(preview_frame(np.empty((0, 2)), size=12).shape,
                          (12, 12, 3))
