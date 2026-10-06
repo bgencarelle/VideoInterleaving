@@ -4407,6 +4407,82 @@ check.
 
 ---
 
+## Appendix A049 — S5 cadence, default deltas, and fusion policy — 2026-10-06
+
+### End-to-end complete-picture cadence
+
+Adapted the S4 current video/Scope callback harness for an 8 s triggered
+progressive raster run at 31 capture/output targets, with timed traversal set to
+31 cycles/s. One complete canonical traversal is one complete raster picture;
+source-frame transitions and distinct identities are counted separately. Both
+runs used the same checked-in 10 s 30-fps motion fixture, test output channels
+24/25, and the null callback (software only).
+
+| DAC clock | Picture samples + marker | Traversal | Output picture rate | Fresh source transitions | Distinct adopted IDs |
+|---:|---:|---:|---:|---:|---:|
+| 48 kHz | 1,548 + 12 | 31.0078 cycles/s | 30.7721/s | 30.0000/s | 225 |
+| 96 kHz | 3,097 + 24 | 31.0107 cycles/s | 30.7719/s | 29.6897/s | 223 |
+
+Each run completed 237 output traces over 7.6693 s. There were 231 source
+adoptions, 224 fresh transitions at 48 kHz and 222 at 96 kHz, with 6 and 8
+repeated adoptions respectively. Media progress ratios were 1.0028 for both.
+The traversal speed is set to `samplerate / picture_samples`, yielding exactly
+one complete canonical path per progressive output trace. Thus the null output
+completed more than 30 full raster
+path pictures/s at both sample rates; source transitions are reported separately
+and remain effectively 30/s. This validates the software callback path only, not
+PortAudio, physical scan, brightness, or perception. Reproduction:
+
+```bash
+.venv/bin/python tmp/scope_s5_complete_cadence.py 48000
+.venv/bin/python tmp/scope_s5_complete_cadence.py 96000
+```
+
+Harness SHA256 `2fe4a19e770d03f85ab332f549e67a72f1e66d45da5eb6ae2f833785fbc94cd2`.
+Raw reports: `tmp/scope-s4-video-s5-cadence-48000-current.json` (SHA256
+`03271f9272e1779a0ac9ab026ac7eaed4eb70e493202a7822649a1bb75718ee7`) and
+`tmp/scope-s4-video-s5-cadence-96000-current.json` (SHA256
+`a5b103d121dab347b9b0f72d7e71886fccc9ab715963f7e6a31cd5db72d35c67`).
+
+### D0-compatible renderer comparison
+
+A matched 48/96 kHz decoded-content comparison ran the legacy default path and
+the S5 timed path at the same 30-picture/s sample budgets, with physical dwell
+off in both arms. Normalized XY-occupancy total-variation distance versus source
+luminance averaged **0.50518 D0 / 0.50584 S5** for raster and **0.59267 / 0.59267**
+for 768-point stipple. Median p50/p95 renderer cost was **5.495/5.604 ms D0 vs
+5.595/5.740 ms S5** for raster, and **11.334/11.617 ms D0 vs 11.105/11.249 ms
+S5** for stipple. These are D0-compatible unchanged-default versus opt-in
+software deltas, not a physical or end-to-end comparison; occupancy is not
+perceptual quality. Harness `tmp/scope_s5_d0_comparison.py`, SHA256
+`c1e8c485d891fcc5a3f51f0d62b3f304b6a8e781e1d01969c5c765a91f20bf67`; JSON
+`tmp/scope-s5-d0-comparison.json`, SHA256
+`a83bfc532c66f8b0d1662282cfa0b15ad6d6ff80a2dcc26f90c18c89d065761d`.
+
+### Fusion restriction and software S5 exit
+
+Independent trajectory controls now fail explicitly in fusion. Its luminance-
+weighted position selector relies on per-sample alignment between vector, raster,
+and stochastic arrays; advancing their clocks independently would make weights
+refer to unrelated positions. Default fusion remains unchanged, with mux parity
+and rejection/rollback coverage. This is an explicit unsupported opt-in
+combination rather than silent mis-rendering.
+
+Focused scope-only verification after fusion-policy tests passed **297 tests and
+30 subtests**. Together with A046–A048, this check-in closes the frozen S5
+**software** exit evidence: real decoded-content occupancy/cost frontier, geometry
+across DAC rates, independent traversal speed, >30 complete progressive pictures/s
+on the null callback at both supported rates, preview/physical-dwell controls and
+their measured budget impact, and D0-compatible software deltas.
+
+**S5 software implementation is complete.** Physical scope appearance and
+PortAudio/device behavior remain for the user's offline validation and the
+hardware-validation stage; no physical-quality result is claimed here. Fusion's
+independent clock combination remains explicitly unsupported. Product defaults,
+including channels `(1, 2)`, are unchanged.
+
+---
+
 ## Appendix A048 — S5 decoded-content XY occupancy frontier — 2026-10-06
 
 To replace the earlier source-luma-at-sample proxy and its pre-integration

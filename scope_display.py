@@ -676,11 +676,8 @@ def run_scope(clock_source=None):
             "raster", "stochastic", "stipple"):
         raise ValueError("live scope images support raster, stochastic, "
                          "or stipple; vector/fusion need an XY bake")
-    if geometry_samples is not None or traversal_hz is not None:
-        if scope_source != "bake" or render_mode not in ("vector", "raster", "stipple"):
-            raise ValueError("scope geometry/traversal controls require baked vector, raster, or stipple rendering")
-        if traversal_hz is not None and not trigger_on:
-            raise ValueError("SCOPE_TRAVERSAL_HZ requires the scope trigger")
+    _validate_independent_trajectory(
+        scope_source, render_mode, geometry_samples, traversal_hz, trigger_on)
     use_raster = render_mode == "raster"
     use_stochastic = render_mode == "stochastic"
     use_stipple = render_mode == "stipple"
@@ -2594,6 +2591,31 @@ def _configure_field_groups(field_group, mix_field_group, fields):
     """Reset both accepted-output field latches for a new output lifecycle."""
     field_group.configure(fields)
     mix_field_group.configure(fields)
+
+
+def _validate_independent_trajectory(scope_source, render_mode,
+                                     geometry_samples, traversal_hz,
+                                     trigger_on):
+    """Validate clock modes whose renderer state commits transactionally.
+
+    Fusion's luminance selector assumes V/R/S positions correspond at each
+    sample. Independent component clocks would make those weights refer to
+    unrelated locations, so fusion remains on its strict legacy path.
+    """
+    if geometry_samples is None and traversal_hz is None:
+        return
+    if scope_source != "bake" or render_mode not in (
+            "vector", "raster", "stipple"):
+        if render_mode == "fusion":
+            raise ValueError(
+                "independent geometry/traversal controls are not supported "
+                "in fusion: component clocks must remain aligned for the "
+                "luminance-weighted position selector")
+        raise ValueError(
+            "scope geometry/traversal controls require baked vector, "
+            "raster, or stipple rendering")
+    if traversal_hz is not None and not trigger_on:
+        raise ValueError("SCOPE_TRAVERSAL_HZ requires the scope trigger")
 
 
 def _execute_frame_transaction(scope, render, checkpoint, restore, commit):
