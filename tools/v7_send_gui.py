@@ -310,11 +310,18 @@ DEFAULT_KERNEL_BENCHMARK_WINNERS = {
 PROFILE_DEFAULT_KERNELS = {
     'aspect-mono-500': 'viewer_solve',
     'aspect-fold-500': 'viewer_solve',
+    # Scored through the live nested sender and receiver at a bilinear
+    # display (docs/V7_NESTED_FOLD_ISSUES.md): the mono fold does best with
+    # its base wire's kernel, the stereo fold with this one.  The stock
+    # stereo-slices wire gains nothing from either and stays on the reference.
+    'stereo-nested': 'upscale_precomp',
 }
 
 
 def default_kernel_for_profile(profile):
     """Kernel enabled by default for the selected sender wire profile."""
+    if profile in PROFILE_DEFAULT_KERNELS:
+        return PROFILE_DEFAULT_KERNELS[profile]
     return PROFILE_DEFAULT_KERNELS.get(NESTED_BASE_PROFILES.get(profile, profile),
                                        ENCODE_DEFAULTS['dct_kernel'])
 

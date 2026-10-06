@@ -229,7 +229,7 @@ a stair of what was decoded, a plain host within its noise, a guest is taken
 as read, and a coefficient that was not sent is unknown. The receiver used
 to show the middle of every bound and zero for everything unsent. It now
 shows the picture of least total variation that fits the bounds (projected
-gradient descent, 40 passes, about 5 ms). Flat areas come out flat and the
+gradient descent with momentum, 16 passes, about 2 ms). Flat areas come out flat and the
 ringing of the cut-off spectrum goes, because the unsent coefficients are
 free to fill in.
 
@@ -258,6 +258,38 @@ Seen in the same pictures and not addressed: false colour in every mode,
 stock included (green and purple on the black-and-white checkerboard, pink
 on white bars, colour bars smearing upward). That is the chroma of the base
 wires (issue 7), not the fold.
+
+### Cost per packet and the downscale kernel
+
+Per packet through the live receiver on the sandbox's two cores, clean
+link: mono nested 9.7 ms to 5.0 ms, stereo nested 14.5 ms to 6.3 ms.
+
+- The stair decoder skips terms more than seven noise deviations away
+  (2.7 ms to 0.2 ms clean, about 2 ms at heavy noise; results change by
+  under 1e-7).
+- The stereo decode reuses the stair decode for the averaged picture.
+- The smoothing carries momentum: 16 passes reach what 40 plain ones did
+  (5.3 ms to 2.2 ms).
+- Sender: a held picture's level is chosen once (0.5 to 0.8 ms a packet).
+  `dct_kernels/viewer_solve.py` now solves on the coefficient grid with a
+  compiled conjugate gradient (`animation_modem/v7_kernel_solve.py`);
+  output unchanged to 1e-15, about 4.8 ms to 1.5 ms a frame.
+
+Downscale kernels were scored through the live nested sender and receiver
+at a bilinear display (SSIMULACRA2, higher is better; mean of astronaut,
+chelsea, coffee, rocket and the reference face):
+
+| Kernel | Mono nested | Stereo nested | Stock stereo-slices |
+|---|---|---|---|
+| none (reference) | -52.09 | -45.25 | -43.00 |
+| viewer_solve | **-50.40** | -42.84 | -43.71 |
+| upscale_precomp | -50.79 | **-41.91** | -42.55 |
+| csf_peak | -50.44 | -44.71 | |
+
+`aspect-mono-nested` keeps `viewer_solve`. `stereo-nested` used to inherit
+"no kernel" from `stereo-slices`; its default is now `upscale_precomp`, in
+the GUI and the CLI. Kernel parameters were left at their defaults; none
+was tuned for the folds.
 
 ## 10. Body level since `b147922` (open)
 

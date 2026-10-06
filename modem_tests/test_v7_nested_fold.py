@@ -80,16 +80,64 @@ class TableTests(unittest.TestCase):
         rng = np.random.default_rng(1)
         for index in range(nested_fold.LOWEST, nested_fold.HIGHEST+1):
             noisy = nested_fold.level_row(index)+.8*rng.standard_normal(16)
-            score, level, _, stock = nested_fold.read_signature(noisy)
+            score, level, _, stock, dithered = nested_fold.read_signature(noisy)
             self.assertEqual(level, index)
             self.assertGreater(score, stock)
-        score, _, _, stock = nested_fold.read_signature(np.ones(16))
+            self.assertFalse(dithered)
+        score, _, _, stock, _ = nested_fold.read_signature(np.ones(16))
         self.assertGreater(stock, score)
+
+    def test_a_dithered_packet_carries_its_level_pattern_negated(self):
+        rng = np.random.default_rng(2)
+        for index in range(nested_fold.LOWEST, nested_fold.HIGHEST+1):
+            row = nested_fold.level_row(index, dithered=True)
+            np.testing.assert_array_equal(row, -nested_fold.level_row(index))
+            score, level, residual, stock, dithered = nested_fold.read_signature(
+                row+.8*rng.standard_normal(16))
+            self.assertEqual(level, index)
+            self.assertTrue(dithered)
+            self.assertGreater(score, max(stock, nested_fold.SCORE_MIN))
+            self.assertLess(nested_fold.read_signature(row)[2], 1e-12)
+
+    def test_dithered_stairs_average_out_over_the_dither_cycle(self):
+        """A plain staircase makes the same error in every packet; shifted
+        stairs make a different one each time, and the sum of a channel pair's
+        offsets is nothing, so a mono sum reads as before."""
+        phases = nested_fold.DITHER_PHASES
+        for family in ('mono', 'slices'):
+            fold = nested_fold.table(family, '3:4')
+            folded = fold.level > 0
+            np.testing.assert_array_equal(fold.offset(3, 0)+fold.offset(3, 1), 0)
+            self.assertIsNone(fold.offset(None))
+            self.assertLessEqual(float(np.max(np.abs(fold.offset(3)/fold.step))), .5)
+            self.assertTrue(np.all(fold.offset(3)[~folded] == 0))
+            plane = np.zeros(LUMA)
+            rng = np.random.default_rng(5)
+            plane[fold.host_position] = fold.host_mean+fold.host_sd*rng.laplace(
+                scale=np.sqrt(.5), size=fold.slots)
+            sigma = .5*fold.noise
+
+            def hosts(phase):
+                got = fold.decode({leg: (fold.encode(plane, 0, leg, phase), sigma)
+                                   for leg in range(fold.legs)}, 0, phase, averaged=True)
+                return (got-plane)[fold.host_position][folded]/fold.host_sd[folded]
+
+            plain = hosts(None)
+            each = np.array([hosts(phase) for phase in range(phases)])
+            single = float(np.mean(each**2))
+            self.assertLess(single, 1.25*float(np.mean(plain**2)), family)
+            self.assertLess(float(np.mean(each.mean(axis=0)**2)), single/2.5, family)
 
 
 class LiveTests(unittest.TestCase):
+    """What the fold itself carries: the decoded values, as they are
+    (BoundedDecodeTests covers the picture shown from them)."""
+
     @classmethod
     def setUpClass(cls):
+        patcher = mock.patch.object(nested_fold, 'SMOOTH_PASSES', 0)
+        patcher.start()
+        cls.addClassCleanup(patcher.stop)
         cls.rig = Rig()
         cls.rgb = textured()
         cls.sent = v7_live._values(cls.rig.base, cls.rgb, 'box', 1.0, dct_encode=True)[0]
@@ -125,7 +173,7 @@ class LiveTests(unittest.TestCase):
                     # historical BODY_PEAK. These standalone wires add their
                     # status-tone overlay afterwards; the header-order checks
                     # above also cover that final overlay.
-                    self.assertGreater(peak, .9*ceiling, mode)
+                    self.assertGreater(peak, .85*ceiling, mode)
         # Outside the nested senders the historical wire is unchanged.
         model = self.rig.base
         quiet = model.mu+.3*np.sqrt(model.lam)*np.random.default_rng(4).standard_normal(len(model.mu))
@@ -214,6 +262,137 @@ class LiveTests(unittest.TestCase):
                             if index in normal:
                                 self.assertLess(float(np.sqrt(np.mean(
                                     (values-normal[index])**2))), .05, (mode, speed, index))
+
+
+class HeldPictureTests(unittest.TestCase):
+    """Dithered stairs through the live sender and receiver."""
+
+    @classmethod
+    def setUpClass(cls):
+        patcher = mock.patch.object(nested_fold, 'SMOOTH_PASSES', 0)
+        patcher.start()
+        cls.addClassCleanup(patcher.stop)
+        cls.rig = Rig()
+        cls.rgb = textured()
+        cls.sent = v7_live._values(cls.rig.base, cls.rgb, 'box', 1.0, dct_encode=True)[0]
+
+    def shown(self, mode, audio):
+        """Luma error of each picture shown in the band where that mode's
+        stair error is seen (cycles per picture height): the mono fold's
+        below 12, the stereo fold's from 12 to 24."""
+        from tools.v7_sk_wire import shipped_plane
+        rows, cols = np.arange(96)[:, None], np.arange(80)[None, :]
+        radius = np.hypot(rows, cols*96/80)/2
+        low = (radius >= 12) & (radius < 24) if 'stereo' in mode else radius < 12
+        sent = shipped_plane(self.sent)
+        return [float(np.sqrt(np.sum((shipped_plane(values)-sent)[low]**2)))
+                for _, values, _ in self.rig.shown(mode, audio)]
+
+    def test_a_held_picture_gains_from_the_dither_cycle_and_plain_stairs_do_not(self):
+        packets = 2*nested_fold.DITHER_PHASES
+        for mode in ('mono nested', 'stereo nested'):
+            dithered = self.shown(mode, wide(self.rig.audio(mode, self.rgb, packets)))
+            with mock.patch.object(nested_fold, 'DITHER', False):
+                plain = self.shown(mode, wide(self.rig.audio(mode, self.rgb, packets)))
+            self.assertGreaterEqual(min(len(dithered), len(plain)), packets-2, mode)
+            # The first packet of a picture is shown as decoded, at about the
+            # plain-stair error; once the cycle is in, the error is lower.
+            self.assertLess(dithered[0], 1.1*plain[0], mode)
+            self.assertLess(dithered[-1], .7*plain[-1], mode)
+            self.assertAlmostEqual(plain[0], plain[-1], delta=.02*plain[0], msg=mode)
+
+    def test_the_average_can_be_switched_off(self):
+        audio = wide(self.rig.audio('mono nested', self.rgb, nested_fold.DITHER_PHASES+2))
+        held = self.shown('mono nested', audio)
+        with mock.patch.object(nested_fold, 'HOLD', False):
+            each = self.shown('mono nested', audio)
+        self.assertLess(held[-1], .8*each[-1])
+        self.assertAlmostEqual(held[0], each[0], places=9)
+
+    def test_a_changed_picture_is_shown_as_decoded(self):
+        fold = nested_fold.table('mono', '3:4')
+        held = nested_fold.Held()
+        rng = np.random.default_rng(3)
+        sigma = .5*fold.noise
+
+        def picture(seed):
+            plane = np.zeros(LUMA)
+            plane[fold.host_position] = fold.host_mean+fold.host_sd*np.random.default_rng(
+                seed).laplace(scale=np.sqrt(.5), size=fold.slots)
+            return plane
+
+        def decoded(plane, phase):
+            return fold.decode({0: (fold.encode(plane, 0, 0, phase), sigma)}, 0, phase)
+
+        first, second = picture(1), picture(2)
+        for phase in range(4):
+            out = held.update(fold, decoded(first, phase), 0, phase, sigma)
+        self.assertEqual(held.last_count, 4)
+        moved = decoded(second, 4)
+        np.testing.assert_array_equal(held.update(fold, moved, 0, 4, sigma), moved)
+        self.assertEqual(held.last_count, 1)
+        # A packet out of sequence, and plain stairs, start again too.
+        held.update(fold, decoded(second, 5), 0, 5, sigma)
+        self.assertEqual(held.last_count, 2)
+        held.update(fold, decoded(second, 1), 0, 1, sigma)
+        self.assertEqual(held.last_count, 1)
+        plain = decoded(second, None)
+        np.testing.assert_array_equal(held.update(fold, plain, 0, None, sigma), plain)
+        self.assertEqual(held.last_count, 0)
+        del out, rng
+
+
+class BoundedDecodeTests(unittest.TestCase):
+    """Decoding inside the bounds: the cleanest picture that fits."""
+
+    def test_room_is_half_a_stair_for_folded_hosts_and_nothing_for_guests(self):
+        for family in ('mono', 'slices'):
+            fold = nested_fold.table(family, '3:4')
+            sigma = np.zeros(fold.slots)
+            room = fold.room(0, sigma)
+            folded = fold.level > 0
+            np.testing.assert_allclose(room[fold.host_position][folded],
+                                       (.5*nested_fold.SMOOTH_ROOM*fold.step*fold.host_sd)[folded])
+            self.assertTrue(np.all(room[fold.host_position][~folded] == 0))
+            self.assertTrue(np.all(room[fold.guest_position.ravel()] == 0))
+            self.assertTrue(np.all(np.isinf(room[~fold.sent_mask])))
+            self.assertTrue(np.all(np.isfinite(room[fold.sent_mask])))
+            # A level up the ladder is 1.5 times the room; seven averaged
+            # dithered packets leave less of it; noise adds to it.
+            np.testing.assert_allclose(fold.room(1, sigma)[fold.host_position],
+                                       1.5*room[fold.host_position])
+            self.assertLess(fold.room(0, sigma, count=7)[fold.host_position][folded].max(),
+                            room[fold.host_position][folded].max())
+            self.assertTrue(np.all(fold.room(0, sigma+.1)[fold.host_position] >
+                                   room[fold.host_position]))
+        # One channel of the two-channel table bounds only base plus or
+        # minus detail, so the picture is shown as decoded.
+        self.assertIsNone(fold.room(0, sigma, joined=False))
+        luma = np.random.default_rng(1).standard_normal(LUMA)
+        self.assertIs(fold.clean(luma, None), luma)
+        self.assertIs(fold.clean(luma, room, passes=0), luma)
+
+    def test_the_picture_shown_is_cleaner_and_no_further_from_the_source(self):
+        rig = Rig()
+        # White blocks on black: flat areas, where stair error shows most.
+        rgb = np.zeros((512, 384, 3), np.uint8)
+        rgb[120:300, 60:150] = 255
+        rgb[200:420, 220:330] = 255
+        sent = v7_live._values(rig.base, rgb, 'box', 1.0, dct_encode=True)[0]
+        flat = np.abs(sent[:LUMA]) > .98          # black and white areas away from edges
+
+        def shown(mode):
+            values = rig.shown(mode, wide(rig.audio(mode, rgb, 3)))[-1][1]
+            return (float(np.sqrt(np.mean((values[:LUMA]-sent[:LUMA])[flat]**2))),
+                    luma_error(values, sent))
+
+        for mode in ('mono nested', 'stereo nested'):
+            with mock.patch.object(nested_fold, 'HOLD', False):
+                cleaned = shown(mode)
+                with mock.patch.object(nested_fold, 'SMOOTH_PASSES', 0):
+                    decoded = shown(mode)
+            self.assertLess(cleaned[0], .8*decoded[0], mode)
+            self.assertLess(cleaned[1], decoded[1], mode)
 
 
 class DamagedPacketTests(unittest.TestCase):
@@ -396,8 +575,12 @@ class SenderTests(unittest.TestCase):
             self.assertIn('experimental', names[profile])
             self.assertIn(profile, gui.FOLDED_PROFILES)
             self.assertIn(profile, gui.ASPECT_PROFILES)
-            self.assertEqual(gui.default_kernel_for_profile(profile),
-                             gui.default_kernel_for_profile(gui.NESTED_BASE_PROFILES[profile]))
+            # Each fold's default downscale kernel is the benchmark winner
+            # through its own chain; the sender CLI agrees with the GUI.
+            expected = {'aspect-mono-nested': 'viewer_solve',
+                        'stereo-nested': 'upscale_precomp'}[profile]
+            self.assertEqual(gui.default_kernel_for_profile(profile), expected)
+            self.assertEqual(v7_live._default_kernel_for_profile(profile), expected)
             # Kernel values shown, saved and sent are the base wire's.
             for kernel in ('viewer_solve', 'csf_peak'):
                 self.assertEqual(

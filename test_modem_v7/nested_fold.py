@@ -207,7 +207,7 @@ class FrozenFold:
         passes = SMOOTH_PASSES if passes is None else int(passes)
         if passes <= 0 or room is None:
             return luma
-        return sk.smooth_within_room(_f8(luma), room, 96, *self._transforms, passes,
+        return sk.smooth_within_room_fast(_f8(luma), room, 96, *self._transforms, passes,
                                      SMOOTH_EDGE, SMOOTH_RATE)
 
     # --------------------------------------------------------------- sender
@@ -253,7 +253,23 @@ class FrozenFold:
                         self._guest_scale(self._activity(hosts), leg),
                         self.guest_sd[leg], factor)
 
-    def decode(self, readings, index, phase=None, averaged=False):
+    def soften(self, readings, phase=None):
+        """Two-channel tables: every channel's hosts and guests off its own
+        stairs, {key: (hosts, guests, noise)}.  This is the costly part of
+        ``decode``; pass it as ``soft`` to decode the same readings again
+        (shown and ``averaged``) without repeating it."""
+        got = {}
+        for key, reading in readings.items():
+            sigma = _f8(reading[1])
+            if key == 'sum':
+                hosts, guests = self._soft(reading[0], sigma, self.density_sum)
+            else:
+                hosts, guests = self._soft(reading[0], sigma, self.density,
+                                           self.offset(phase, key))
+            got[key] = (hosts, guests, sigma)
+        return got
+
+    def decode(self, readings, index, phase=None, averaged=False, soft=None):
         """Luma coefficients (flat 7,680) from what arrived.  ``phase``: the
         dither phase of a dithered packet, or None for plain stairs.
         ``averaged``: the result is for averaging over the dither cycle
@@ -266,7 +282,8 @@ class FrozenFold:
         """
         factor = RATIO**index
         if self.paired:
-            return self._decode_paired(readings, factor, phase, averaged)
+            return self._decode_paired(
+                self.soften(readings, phase) if soft is None else soft, factor, averaged)
         out = np.zeros(LUMA)
         if 'sum' in readings:
             # Opposite offsets on the two channels cancel in their sum.
@@ -290,20 +307,12 @@ class FrozenFold:
             self._place_guests(out, leg, hosts, got, factor)
         return out
 
-    def _decode_paired(self, readings, factor, phase=None, averaged=False):
-        """Two-channel tables: each channel is decoded on its own stairs,
-        then base and detail are separated as the stock slices profile does,
-        weighted by what each channel's noise left of them."""
+    def _decode_paired(self, got, factor, averaged=False):
+        """Two-channel tables: each channel has been decoded on its own
+        stairs (``soften``); base and detail are separated as the stock
+        slices profile does, weighted by what each channel's noise left of
+        them."""
         out = np.zeros(LUMA)
-        got = {}
-        for key, reading in readings.items():
-            sigma = _f8(reading[1])
-            if key == 'sum':
-                hosts, guests = self._soft(reading[0], sigma, self.density_sum)
-            else:
-                hosts, guests = self._soft(reading[0], sigma, self.density,
-                                           self.offset(phase, key))
-            got[key] = (hosts, guests, sigma)
         shared = (self.host_position, self.host_mean, self.host_sd, self.common, self.differ,
                   self.ride, self.detail_position, factor)
         if 'sum' in got:
@@ -405,8 +414,10 @@ class Held:
 # On dense texture with no flat areas this costs a little (about 5% more
 # luma error on 1/f noise); on the fixtures it lowers the error.
 # SMOOTH_PASSES is the strength (0: show the decoded values as they are);
+# the descent carries momentum, and 16 passes of it reach what 40 plain
+# passes do;
 # NESTED_FOLD_SMOOTH or the receiver's --nested-smooth sets it.
-SMOOTH_PASSES = int(os.environ.get('NESTED_FOLD_SMOOTH', 40))
+SMOOTH_PASSES = int(os.environ.get('NESTED_FOLD_SMOOTH', 16))
 # Share of the half stair a folded host may move.  All of it gives the
 # flattest picture; half of it gave the lowest error on the fixtures and
 # costs dense texture less.
@@ -569,6 +580,7 @@ class NestedMonoCodec:
         self.recognition = Recognition()
         self.held = Held()
         self.tail_slice = None          # receiver: tail slice of the packet in hand
+        self._level_plane, self._level = _NONE, 0   # sender: last picture and its level
 
     def _unit(self, xhat, conf):
         seen, confidence = sk.unshrink(_f8(xhat), _f8(conf), 1e-3)
@@ -599,7 +611,10 @@ class NestedMonoCodec:
         if not self.send:
             return coefficients
         plane = _f8(full)[:LUMA]
-        level = self.fold.choose_level(plane)
+        # A held picture is sent packet after packet: its level is chosen once.
+        if not sk.same_values(plane, self._level_plane):
+            self._level_plane, self._level = plane.copy(), self.fold.choose_level(plane)
+        level = self._level
         # Dithered only inside a packet whose counter is known (see
         # enable_mono); a bare call sends plain stairs.
         counter = getattr(_SENDING, 'counter', None) if DITHER else None
@@ -845,11 +860,12 @@ def _slice_wire_class():
             named = [half.counter for half in chosen if half.counter is not None]
             phase = (self.recognition.phase(named[0] if named else None)
                      if self.recognition.dithered else None)
+            soft = fold.soften(readings, phase)
             luma = self.held.update(
-                fold, fold.decode(readings, level, phase), level, phase,
+                fold, fold.decode(readings, level, phase, soft=soft), level, phase,
                 next(iter(readings.values()))[1],
                 key=(chosen[0].layout, tuple(sorted(map(str, readings)))),
-                averaged=lambda: fold.decode(readings, level, phase, averaged=True))
+                averaged=lambda: fold.decode(readings, level, phase, averaged=True, soft=soft))
             worst = None
             for _, sigma in readings.values():
                 worst = sigma if worst is None else sk.larger(worst, sigma)

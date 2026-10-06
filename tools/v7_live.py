@@ -1153,8 +1153,12 @@ def _kernel_defaults_profile(args):
 
 def _default_kernel_for_profile(profile):
     """The quality-tuned active kernel default for Aspect profiles."""
-    if profile in ('aspect-fold-500', 'aspect-mono-500'):
+    if profile in ('aspect-fold-500', 'aspect-mono-500', 'aspect-mono-nested'):
         return 'viewer_solve'
+    if profile == 'stereo-nested':
+        # Benchmark winner through the live nested chain (see the sender GUI's
+        # PROFILE_DEFAULT_KERNELS, which this mirrors).
+        return 'upscale_precomp'
     return K.REFERENCE
 
 
@@ -1301,7 +1305,10 @@ def _run_send_session(args):
     try:
         kernel_name = getattr(args, 'dct_kernel', None)
         if kernel_name is None:
-            kernel_name = _default_kernel_for_profile(kernel_profile)
+            # The default follows the profile as named (a nested fold has its
+            # own); kernel parameter defaults follow the wire it rides on.
+            kernel_name = _default_kernel_for_profile(
+                getattr(args, 'profile', None) or kernel_profile)
         kernel_controls = LiveKernelControls(
             kernel_registry, kernel_name,
             _kernel_cli_values(getattr(args, 'dct_kernel_param', None)),
@@ -4698,7 +4705,7 @@ def parser():
     recv.add_argument('--nested-smooth', type=int, default=None, metavar='PASSES',
                       help='nested-fold pictures: strength of decoding inside '
                            'the bounds, which shows the cleanest picture that '
-                           'fits what was received (default 40; 0 shows the '
+                           'fits what was received (default 16; 0 shows the '
                            'decoded values as they are)')
     recv.add_argument('--temporal-fusion', choices=('off', 'held'),
                       default='off',

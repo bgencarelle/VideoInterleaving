@@ -485,6 +485,23 @@ def residual_density(guests, table):
     return out
 
 
+SOFT_CUTOFF = 7.0              # noise deviations beyond which a weight is nothing
+
+
+@njit(cache=True)
+def _soft_span(base, inner, reach):
+    """First and last soft-grid index whose guest position ``inner*grid[j]``
+    lies within ``reach`` of ``base`` (first > last: none)."""
+    scale = .5*(SOFT_POINTS-1)
+    low = ((base-reach)/inner+1.0)*scale
+    high = ((base+reach)/inner+1.0)*scale
+    if high < 0.0 or low > SOFT_POINTS-1:
+        return 1, 0
+    first = int(math.ceil(low)) if low > 0.0 else 0
+    last = int(math.floor(high)) if high < SOFT_POINTS-1 else SOFT_POINTS-1
+    return first, last
+
+
 @njit(cache=True)
 def soft_decode_frame(received, level, step, scale, alpha, sigma, density, inverse):
     """Posterior-mean host and guest of every slot at its own noise.
@@ -514,16 +531,22 @@ def soft_decode_frame(received, level, step, scale, alpha, sigma, density, inver
         # The grid cannot resolve noise finer than its own spacing.
         spread = math.sqrt(noise*noise+(inner*2.0/(SOFT_POINTS-1))**2/3.0)
         total = host = guest = 0.0
+        reach = SOFT_CUTOFF*spread
         for d in range(-SOFT_REACH, SOFT_REACH+1):
             k = nearest+d
+            base = value-k*step[i]
+            # Grid points within ``reach`` of what arrived; the rest weigh
+            # under exp(-SOFT_CUTOFF**2/2) and are not visited.
+            first, last = _soft_span(base, inner, reach)
+            if first > last:
+                continue
             lo = (abs(k)-.5)*step[i]
             if k == 0:
                 prior = 1.0-math.exp(-.5*step[i]/beta)
             else:
                 prior = .5*(math.exp(-lo/beta)-math.exp(-(lo+step[i])/beta))
             centroid = laplace_centroid(int(k), step[i])
-            base = value-k*step[i]
-            for j in range(SOFT_POINTS):
+            for j in range(first, last+1):
                 miss = (base-inner*grid[j])/spread
                 weight = prior*density[j]*math.exp(-.5*miss*miss)
                 total += weight
@@ -741,12 +764,16 @@ def soft_decode_frame_dithered(received, level, step, scale, alpha, sigma, densi
         nearest = np.round(shifted/step[i])
         spread = math.sqrt(noise*noise+(inner*2.0/(SOFT_POINTS-1))**2/3.0)
         total = host = guest = 0.0
+        reach = SOFT_CUTOFF*spread
         for d in range(-SOFT_REACH, SOFT_REACH+1):
             k = nearest+d
+            base = shifted-k*step[i]
+            first, last = _soft_span(base, inner, reach)
+            if first > last:
+                continue
             centre = k*step[i]+offset[i]
             prior, centroid = laplace_cell(centre-.5*step[i], centre+.5*step[i])
-            base = shifted-k*step[i]
-            for j in range(SOFT_POINTS):
+            for j in range(first, last+1):
                 miss = (base-inner*grid[j])/spread
                 weight = prior*density[j]*math.exp(-.5*miss*miss)
                 total += weight
@@ -1226,103 +1253,45 @@ def inverse_plane(spectrum, out, start, rows_transposed, cols_matrix):
     return start+rows*cols
 
 
-# ------------------------------------------------------- subtractive dither
-# A plain staircase rounds a host the same way in every packet: small hosts
-# fall in a dead zone, a smooth gradient is cut into contours, and on a held
-# picture the error never changes, so it shows as static grain.  With an
-# offset both ends know (``offset[i]``, within half a step) the staircase of
-# slot i is shifted before rounding and the shift is undone after decoding.
-# The error then has the same power but no dead zone, and a different offset
-# in the next packet gives a different error, which the eye averages.
-
 @njit(cache=True)
-def _laplace_tail_cell(lo, hi):
-    """(mass, mean) of a unit-variance Laplacian over [lo, hi], 0 <= lo."""
-    beta = math.sqrt(.5)
-    near, far = math.exp(-lo/beta), math.exp(-hi/beta)
-    mass = .5*(near-far)
-    if mass <= 1e-300:
-        return 0.0, lo+beta
-    return mass, .5*((lo+beta)*near-(hi+beta)*far)/mass
-
-
-@njit(cache=True)
-def laplace_cell(lo, hi):
-    """(mass, mean) of a unit-variance Laplacian over [lo, hi]."""
-    if lo >= 0.0:
-        return _laplace_tail_cell(lo, hi)
-    if hi <= 0.0:
-        mass, mean = _laplace_tail_cell(-hi, -lo)
-        return mass, -mean
-    left_mass, left_mean = _laplace_tail_cell(0.0, -lo)
-    right_mass, right_mean = _laplace_tail_cell(0.0, hi)
-    mass = left_mass+right_mass
-    if mass <= 0.0:
-        return 0.0, .5*(lo+hi)
-    return mass, (right_mass*right_mean-left_mass*left_mean)/mass
+def smooth_within_room_fast(luma, room, rows, rows_matrix, rows_transposed, cols_matrix,
+                            cols_transposed, passes, edge, rate):
+    """``smooth_within_room`` with momentum (Nesterov's accelerated projected
+    gradient): the same descent, but each step also carries on in the
+    direction of the last one, so far fewer passes reach the same picture."""
+    cols = len(luma)//rows
+    start = np.ascontiguousarray(luma).reshape(rows, cols)
+    reach = np.ascontiguousarray(room).reshape(rows, cols)
+    current = start.copy()
+    ahead = start.copy()
+    gradient = np.empty((rows, cols))
+    step = rate*edge
+    weight = 1.0
+    for _ in range(passes):
+        image = np.dot(np.dot(rows_transposed, ahead), cols_matrix)
+        _variation_gradient(image, edge, gradient)
+        spectrum = np.dot(np.dot(rows_matrix, gradient), cols_transposed)
+        following = .5*(1.0+math.sqrt(1.0+4.0*weight*weight))
+        push = (weight-1.0)/following
+        weight = following
+        for r in range(rows):
+            for c in range(cols):
+                value = ahead[r, c]-step*spectrum[r, c]
+                low, high = start[r, c]-reach[r, c], start[r, c]+reach[r, c]
+                if value < low:
+                    value = low
+                elif value > high:
+                    value = high
+                ahead[r, c] = value+push*(value-current[r, c])
+                current[r, c] = value
+    return current.ravel()
 
 
 @njit(cache=True)
-def stair_values_dithered(hosts, level, step, offset):
-    """Each host as a slip-free receiver decodes it on the shifted stairs."""
-    out = hosts.copy()
-    for i in range(len(hosts)):
-        if level[i] > 0:
-            k = np.round((hosts[i]-offset[i])/step[i])
-            centre = k*step[i]+offset[i]
-            out[i] = laplace_cell(centre-.5*step[i], centre+.5*step[i])[1]
-    return out
-
-
-@njit(cache=True)
-def encode_frame_dithered(a, b1, level, step, scale, alpha, table, offset):
-    """``encode_frame`` for one guest per slot on shifted stairs."""
-    out = np.empty(len(a))
+def same_values(a, b):
+    if len(a) != len(b):
+        return False
     for i in range(len(a)):
-        if level[i] == 0:
-            out[i] = scale[i]*a[i]
-            continue
-        stair = step[i]*np.round((a[i]-offset[i])/step[i])+offset[i]
-        out[i] = scale[i]*(stair+alpha[1]*step[i]*compress(table, b1[i]))
-    return out
-
-
-@njit(cache=True)
-def soft_decode_frame_dithered(received, level, step, scale, alpha, sigma, density,
-                               inverse, offset):
-    """``soft_decode_frame`` on shifted stairs."""
-    n = len(received)
-    a, b = np.zeros(n), np.zeros(n)
-    grid = np.empty(SOFT_POINTS)
-    value_of = np.empty(SOFT_POINTS)
-    for j in range(SOFT_POINTS):
-        grid[j] = -1.0+2.0*j/(SOFT_POINTS-1)
-        value_of[j] = expand(inverse, grid[j])
-    for i in range(n):
-        value = received[i]/scale[i]
-        noise = max(sigma[i]/scale[i], 1e-9)
-        if level[i] == 0:
-            a[i] = value/(1.0+noise*noise)
-            continue
-        inner = alpha[1]*step[i]
-        shifted = value-offset[i]
-        nearest = np.round(shifted/step[i])
-        spread = math.sqrt(noise*noise+(inner*2.0/(SOFT_POINTS-1))**2/3.0)
-        total = host = guest = 0.0
-        for d in range(-SOFT_REACH, SOFT_REACH+1):
-            k = nearest+d
-            centre = k*step[i]+offset[i]
-            prior, centroid = laplace_cell(centre-.5*step[i], centre+.5*step[i])
-            base = shifted-k*step[i]
-            for j in range(SOFT_POINTS):
-                miss = (base-inner*grid[j])/spread
-                weight = prior*density[j]*math.exp(-.5*miss*miss)
-                total += weight
-                host += weight*centroid
-                guest += weight*value_of[j]
-        if total > 1e-300:
-            a[i] = host/total
-            b[i] = guest/total
-        else:
-            a[i] = value/(1.0+noise*noise)
-    return a, b
+        if a[i] != b[i]:
+            return False
+    return True
