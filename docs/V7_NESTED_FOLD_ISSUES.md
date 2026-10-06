@@ -16,12 +16,14 @@ of this is tape validation.
 | 1 | Reverse loses resolution (stereo) | **Fixed** |
 | 2 | Reverse / forward colour loss | Not reproduced against the base wire; two real causes found (3, 7) |
 | 3 | Band-limited nested packets pass the pilot gate and are shown damaged | **Partly fixed**; gate policy still open |
-| 4 | Grain | Open. Cause known; needs the filter below |
-| 5 | Banding | Open. Same cause; needs dither |
+| 4 | Grain | **Reduced on held pictures** by dither (part C, done). Single-packet error unchanged; parts A and B still open |
+| 5 | Banding | **Fixed** by dither (no dead zone, no fixed contours) |
 | 6 | Stereo nested behind stock slices under a 4 kHz low-pass | Open |
 | 7 | Mono and slices wires carry less chroma than `aspect-fold-500` | Open, by design of the base wires |
 | 8 | Cold start when the signature is unreadable | Open, minor |
 | 9 | GUI kernel defaults ignored for nested profiles | **Fixed** |
+| 10 | Body sent 1.5 dB lower since `b147922` (all profiles) | Open, a level-budget decision |
+| 11 | Sender GUI could start the sender on the wrong output device | **Fixed** |
 
 ## 1. Reverse resolution (fixed)
 
@@ -175,6 +177,69 @@ A and B change tables, so they require a retune (`tools/v7_nested_build.py`)
 and re-running `tools/v7_nested_eval.py` torture and playback. C changes
 sender and receiver together and is not readable by a receiver without it,
 so it needs its own level-pattern rows or a new signature.
+
+### Part C as built (subtractive dither)
+
+Code: `test_modem_v7/nested_fold.py` (`DITHER`, `FrozenFold.offset`,
+`Held`), kernels `*_dithered` in `tools/v7_sk_fold.py`. No table change.
+
+- Every folded slot's staircase is shifted by a known offset within half a
+  step. There are seven offset sets; the packet's tail slice (the sender's
+  counter modulo 7, which the metadata already carries, forwards and in
+  reverse) picks one. The second stereo channel uses the first's offsets
+  negated, so a mono sum is read exactly as before.
+- A dithered packet carries its level pattern negated. The receiver reads
+  the sign per packet, so plain-stair packets still decode. A receiver from
+  before this change does not read dithered packets (it sees no nested
+  signature); `NESTED_FOLD_DITHER=0` on the sender sends plain stairs.
+- `Held`: the receiver shows the mean of the last seven decoded pictures
+  while the picture is not moving. Motion is read on the packet-to-packet
+  change of the hosts, against what noise and stair error explain; a moved
+  picture, a level change, a packet out of sequence or plain stairs start
+  again from the packet in hand, shown as decoded. `NESTED_FOLD_HOLD=0`
+  turns the average off.
+- Dithered packets are not passed through `--temporal-fusion held`, which
+  averages slot values before the fold is undone.
+
+Measured through the live sender and receiver, clean, on the repo's 3:4
+motion fixture frame and the reference face (luma error energy by band,
+cycles per picture height; "held" is the picture shown after one cycle):
+
+| | Band | Stock, same wire | Plain stairs | Dithered, first packet | Dithered, held |
+|---|---|---|---|---|---|
+| Mono | 0–12 | 0.10 | 13.8 | 12.7 | 2.0 |
+| Mono | 12–24 | 112 | 44.0 | 47.2 | 34.6 |
+| Stereo | 12–24 | 0.55 | 43.8 | 45.5 | 9.6 |
+| Stereo, hiss −45 | 12–24 | | 84.1 | 87.6 | 18.1 |
+
+On a moving picture (the fixture movie, a new frame every packet) the
+average never engages and the error is that of a single packet: mono about
+1% above plain stairs, stereo equal. So dither fixes the fixed pattern
+(banding, static grain on stills and slow scenes); it does not lower the
+error of one packet. That needs parts A and B, which need a table rebuild.
+
+## 10. Body level since `b147922` (open)
+
+`encode_pulse_frame_coeffs` now fits the body 1.5 dB under the lower of the
+header and end-marker peaks, measured after the timing tones are mixed. The
+end marker sits about 1.5 dB under the header, so every EOF packet's body,
+stock profiles included, goes out about 1.5 dB lower than at `d658975`
+(body RMS 0.147 to 0.124 on `aspect-fold-500`, 0.112 to 0.094 on mono
+nested). Clean scores are identical. At hiss −45 the effective luma
+coefficients fall 3 to 6% (mono nested 1,324 to 1,247, stereo nested 2,146
+to 2,078); under soft saturation they rise 3 to 12%. Whether the marker
+needs that margin is a tape question.
+
+## 11. Sender GUI output device (fixed)
+
+`tools/v7_send_gui.py` passed the sender a bare PortAudio index. The GUI
+reads its device list once, in its own process; the sender is a new process
+with a fresh list. If a device was plugged in or removed after the GUI
+started, the same index named a different device and the sender opened it.
+The GUI now also passes `--device-name` and `--device-hostapi`, and the
+sender (`_resolve_named_send_device` in `tools/v7_live.py`) checks the index
+against the name, corrects it, and refuses to start if the device is gone.
+The GUI's own list is still only as fresh as its PortAudio session.
 
 ## 6. Stereo nested under a 4 kHz low-pass (open)
 

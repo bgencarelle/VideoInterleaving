@@ -327,6 +327,11 @@ class MonoFreshFoldWire:
         codec = self._codec(model)
         coeffs, xhat, conf = result.coeffs, eq[0], eq[1]
         fusion = result.diag.get('temporal_fusion')
+        # A nested-fold codec is told the packet's tail slice; it answers
+        # whether the packet's slot values may be averaged over packets.
+        begin = getattr(codec, 'begin_packet', None)
+        if begin is not None and begin(result.diag.get('tail_slice'), xhat, conf):
+            fusion = None
         if fusion is not None:
             # Held pictures: average the equaliser output over packets
             # before the fold is undone (animation_modem/v7_temporal.py).

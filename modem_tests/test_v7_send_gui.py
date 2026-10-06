@@ -1969,7 +1969,8 @@ class SenderGuiButtonLayoutTests(unittest.TestCase):
             '--luma-adjust', '--luma-adjust-linear', '--clip-aware-encode',
             '--capture-fps', '30.0', '--screen-backend', 'mss',
             '--region=0,0,1920,1080', '--capture-width', '160',
-            '--gui-control', '--image-preview-port', '5005'])
+            '--gui-control', '--image-preview-port', '5005',
+            '--device-name', 'Test output'])
 
     def test_old_preferences_with_an_advanced_flag_still_load(self):
         with tempfile.TemporaryDirectory() as temporary:

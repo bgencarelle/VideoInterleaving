@@ -1161,10 +1161,40 @@ def _default_kernel_for_profile(profile):
 HOST_PARAM_NAMES = ('luma_mix', 'chroma_mix')
 
 
+def _resolve_named_send_device(sd, args):
+    """Make a numeric ``--device`` name the device ``--device-name`` says.
+
+    A device index is only valid inside one PortAudio device list.  The
+    sender GUI reads its list in another process, possibly before a device
+    was plugged in or removed, so the index it passes can name a different
+    device here.  With the name given, the index is checked against it and
+    corrected; a device that is gone or ambiguous is an error, never a
+    silent substitute.
+    """
+    from tools.v7_device_recovery import resolve_device_index
+
+    expected_name = getattr(args, 'device_name', None)
+    if not expected_name or not isinstance(args.device, int):
+        return
+    expected = {'name': str(expected_name),
+                'hostapi': str(getattr(args, 'device_hostapi', None) or '')}
+    try:
+        resolved = resolve_device_index(sd, args.device, expected, 'output')
+    except ValueError as exc:
+        raise RuntimeError(f'Audio output device: {exc}') from exc
+    if resolved != args.device:
+        print(json.dumps({
+            'status': 'sender_device_index_corrected',
+            'device': expected['name'], 'requested_index': args.device,
+            'index': resolved}), flush=True)
+        args.device = resolved
+
+
 def run_send(args):
     import sounddevice as sd
     from tools.v7_device_recovery import device_identity
 
+    _resolve_named_send_device(sd, args)
     try:
         identity = device_identity(sd, args.device, 'output')
         if not identity.get('name'):
@@ -4429,6 +4459,12 @@ def parser():
                       help='capture source; omitted interactively prompts for one')
     send.add_argument('--device', type=_device_arg, required=True,
                       help='explicit sounddevice output, e.g. BlackHole 2ch')
+    send.add_argument('--device-name', default=None,
+                      help='expected name of a numeric --device; when the '
+                           'index names another device, the device with this '
+                           'name is used instead')
+    send.add_argument('--device-hostapi', default=None,
+                      help='audio backend of --device-name, e.g. Core Audio')
     send.add_argument('--fixture', type=Path, default=DEFAULT_FIXTURE,
                       help=argparse.SUPPRESS)
     send.add_argument('--encode-filter', choices=('nearest', 'box'),

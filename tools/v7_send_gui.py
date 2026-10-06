@@ -1547,6 +1547,13 @@ def build_command(settings, devices, sd_module=None, python=None,
     if (image_preview_port is not None and
             settings.get('preview', 'window') in ('window', 'popout')):
         command.extend(('--image-preview-port', str(int(image_preview_port)),))
+    # A numeric index is only valid inside one PortAudio enumeration. The
+    # sender is a new process with its own enumeration, so it also gets the
+    # device's name and backend and resolves the index itself.
+    if checked['device'].name:
+        command.extend(('--device-name', checked['device'].name))
+        if checked['device'].hostapi:
+            command.extend(('--device-hostapi', checked['device'].hostapi))
     return command
 
 

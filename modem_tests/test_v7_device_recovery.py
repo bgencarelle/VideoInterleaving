@@ -44,6 +44,39 @@ def _device(name, rate, inputs=2, outputs=2, hostapi=0):
     }
 
 
+class SenderNamedDeviceTests(unittest.TestCase):
+    """The sender GUI's index comes from another process's device list."""
+
+    def _args(self, device, name='loopback', hostapi='Test API'):
+        return SimpleNamespace(device=device, device_name=name,
+                               device_hostapi=hostapi)
+
+    def test_an_index_that_names_another_device_is_corrected_by_name(self):
+        # The GUI saw loopback at 0; a device plugged in since moved it to 1.
+        sd = FakeSoundDevice([_device('headphones', 48000),
+                              _device('loopback', 48000)])
+        args = self._args(0)
+        v7_live._resolve_named_send_device(sd, args)
+        self.assertEqual(args.device, 1)
+
+    def test_a_matching_index_and_a_plain_cli_device_are_left_alone(self):
+        sd = FakeSoundDevice([_device('headphones', 48000),
+                              _device('loopback', 48000)])
+        args = self._args(1)
+        v7_live._resolve_named_send_device(sd, args)
+        self.assertEqual(args.device, 1)
+        for args in (self._args(0, name=None), self._args('memory')):
+            before = args.device
+            v7_live._resolve_named_send_device(sd, args)
+            self.assertEqual(args.device, before)
+
+    def test_a_missing_or_input_only_device_is_refused_not_substituted(self):
+        sd = FakeSoundDevice([_device('headphones', 48000),
+                              _device('loopback', 48000, outputs=0)])
+        with self.assertRaisesRegex(RuntimeError, 'loopback'):
+            v7_live._resolve_named_send_device(sd, self._args(0))
+
+
 class DeviceIdentityTests(unittest.TestCase):
     def test_resolves_same_device_after_portaudio_index_changes(self):
         original = FakeSoundDevice([_device('loopback', 48000)])
