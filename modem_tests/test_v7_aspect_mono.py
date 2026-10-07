@@ -26,8 +26,7 @@ PACKETS = 5
 def _decode(wire, model, audio):
     with wire.receiving():
         results, info = v7.decode_pulse_stream(
-            model, audio, sample_rate=v7.RATE, pilot_timing='tone-seeded',
-            frame_boundary='eof', state=v7.PulseState(tail_memory=False))
+            model, audio, sample_rate=v7.RATE, pilot_timing='tone-seeded', state=v7.PulseState(tail_memory=False))
     return [result for result in results if result.status != 'lost'], info
 
 
@@ -138,8 +137,7 @@ class AspectMonoTests(unittest.TestCase):
                 results, _ = v7.decode_pulse_stream(
                     self.base, audio, latest_only=True,
                     state=v7.PulseState(tail_memory=False),
-                    sample_rate=v7.RATE, pilot_timing='tone-seeded',
-                    frame_boundary='eof')
+                    sample_rate=v7.RATE, pilot_timing='tone-seeded')
         finally:
             profile.uninstall()
         result = results[-1]

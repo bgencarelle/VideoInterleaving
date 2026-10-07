@@ -46,7 +46,7 @@ class WireProfileTests(unittest.TestCase):
         aspect_code = v7.aspect_wire_code((80, 96))
         wire = profile.encode(self.box, [self.box_values]*PACKETS, 5,
                               [aspect_code]*PACKETS, [10, 11, 12], loop=loop,
-                              directions=[1]*PACKETS, eof_marker=True)
+                              directions=[1]*PACKETS)
         fold = Fold500(self.box)
         import modem_v7_display
 
@@ -61,8 +61,7 @@ class WireProfileTests(unittest.TestCase):
             sent = np.concatenate([
                 modem_v7_display.packet(
                     Library(), self.box, 5+i, 10+i, (0, 0, 0),
-                    encode_filter='box', loop=loop, direction=1,
-                    eof_marker=True, fold=fold)[0]
+                    encode_filter='box', loop=loop, direction=1, fold=fold)[0]
                 for i in range(PACKETS)])
         np.testing.assert_array_equal(wire, sent)
 
@@ -78,11 +77,9 @@ class WireProfileTests(unittest.TestCase):
         aspect_code = v7.aspect_wire_code(image.size)
 
         expected = modem_v7_display.encode_values_packet(
-            self.box, values, 5, 10, aspect_code, loop=loop, direction=1,
-            eof_marker=True, fold=fold)
+            self.box, values, 5, 10, aspect_code, loop=loop, direction=1, fold=fold)
         actual = modem_v7_display.encode_image_dct_packet(
-            self.box, image, 5, 10, aspect_code, loop=loop, direction=1,
-            eof_marker=True, fold=fold)
+            self.box, image, 5, 10, aspect_code, loop=loop, direction=1, fold=fold)
 
         np.testing.assert_array_equal(actual, expected)
 
@@ -126,7 +123,7 @@ class WireProfileTests(unittest.TestCase):
         np.testing.assert_array_equal(
             wire, v7.encode_pulse_stream(self.nearest, [self.nearest_values]*PACKETS))
         results, _ = profile.decode(self.nearest, wire, sample_rate=v7.RATE)
-        self.assertEqual(len(results), PACKETS-1)        # no following header
+        self.assertEqual(len(results), PACKETS)          # each ends at its EOF
 
 
 if __name__ == '__main__':

@@ -78,8 +78,7 @@ def _source_dct_coefficients(model, image, encode_filter='box'):
 
 
 def encode_values_packet(model, values, absolute, source_index, aspect_code, *,
-                         loop=None, direction=1, pilot_tones=True,
-                         eof_marker=True, fold=None):
+                         loop=None, direction=1, pilot_tones=True, fold=None):
     """Encode prepared values with the application's production V7 packet path.
 
     Kept separate from compositing so offline image-quality tests can feed
@@ -93,15 +92,15 @@ def encode_values_packet(model, values, absolute, source_index, aspect_code, *,
         return _v7.encode_pulse_frame(
             model, values, absolute, aspect_code=aspect_code,
             source_index=source_index, loop=loop, direction=direction,
-            pilot_tones=pilot_tones, eof_marker=eof_marker)
+            pilot_tones=pilot_tones)
     coefficients = fold.encode_coefficients(values)
     return encode_folded_coefficients_packet(
         model, coefficients, absolute, source_index, aspect_code,
-        loop=loop, direction=direction, eof_marker=eof_marker)
+        loop=loop, direction=direction)
 
 
 def encode_image_dct_packet(model, image, absolute, source_index, aspect_code, *,
-                            loop=None, direction=1, eof_marker=True,
+                            loop=None, direction=1,
                             fold=None, encode_filter='box'):
     """Opt-in Box image path that sends coder-grid DCTs through Fold 500."""
     if fold is None:
@@ -112,12 +111,11 @@ def encode_image_dct_packet(model, image, absolute, source_index, aspect_code, *
         _source_dct_coefficients(model, image, encode_filter))
     return encode_folded_coefficients_packet(
         model, coefficients, absolute, source_index, aspect_code,
-        loop=loop, direction=direction, eof_marker=eof_marker)
+        loop=loop, direction=direction)
 
 
 def encode_folded_source_packet(model, rgb, absolute, source_index, aspect_code, *,
-                                fold, loop=None, direction=1,
-                                eof_marker=True):
+                                fold, loop=None, direction=1):
     """Opt-in native RGB projection into the exact Fold-500 source slots."""
     if fold is None:
         raise ValueError('native source projection requires Fold 500')
@@ -130,12 +128,12 @@ def encode_folded_source_packet(model, rgb, absolute, source_index, aspect_code,
     coefficients = fold.encode_dct_coefficients(full)
     return encode_folded_coefficients_packet(
         model, coefficients, absolute, source_index, aspect_code,
-        loop=loop, direction=direction, eof_marker=eof_marker)
+        loop=loop, direction=direction)
 
 
 def encode_folded_coefficients_packet(
         model, coefficients, absolute, source_index, aspect_code, *,
-        loop=None, direction=1, eof_marker=True):
+        loop=None, direction=1):
     """Transmit coefficients already mapped through the production Fold 500.
 
     This is the same pulse/coded-pilot path used by ``encode_values_packet``;
@@ -146,7 +144,6 @@ def encode_folded_coefficients_packet(
         model, coefficients, absolute,
         aspect_code=aspect_code, source_index=source_index,
         loop=loop, direction=direction, pilot_tones=False,
-        eof_marker=eof_marker,
         extra_tone_mixer=lambda packet: add_fold500_coded_pilot(
             packet, absolute))
     return audio
@@ -155,7 +152,7 @@ def encode_folded_coefficients_packet(
 def packet(library, model, absolute, source_index, selection, *,
            background=(4, 4, 4), rotation=0, mirror=False,
            encode_filter='nearest', loop=None, direction=1,
-           pilot_tones=True, eof_marker=True, fold=None):
+           pilot_tones=True, fold=None):
     if fold is not None and encode_filter != 'box':
         raise ValueError('stereo Fold 500 requires the Box encode filter')
     index, main_folder, float_folder = selection
@@ -173,8 +170,7 @@ def packet(library, model, absolute, source_index, selection, *,
         image.info.get('source_dimensions', image.size))
     audio = encode_values_packet(
         model, values, absolute, source_index, aspect_code,
-        loop=loop, direction=direction, pilot_tones=pilot_tones,
-        eof_marker=eof_marker, fold=fold)
+        loop=loop, direction=direction, pilot_tones=pilot_tones, fold=fold)
     return audio, {
         'frame': absolute,
         'source_index': source_index,
@@ -255,11 +251,8 @@ def run_modem(args):
     if encode_filter != 'box':
         raise ValueError('stereo Fold 500 requires --modem-encode-filter box')
     pilot_tones = bool(getattr(args, 'modem_pilot_tones', True))
-    eof_marker = bool(getattr(args, 'modem_eof_marker', True))
     if not pilot_tones:
         raise ValueError('stereo Fold 500 requires coded pilot tones')
-    if not eof_marker:
-        raise ValueError('stereo Fold 500 requires EOF markers')
 
     # The V7 statistics are a wire profile, not a property of whichever frame
     # happens to be sent first.  The canonical profile ships as frozen,
@@ -306,7 +299,6 @@ def run_modem(args):
           f'loop N={loop.frames} p='
           f'{"none (MIDI clock)" if not loop.clocked else loop.phase} in CRC metadata; '
           f'profile=stereo Fold 500; '
-          f'EOF marker={"on" if eof_marker else "off"}; '
           f'pilot tones=coded')
 
     def make_packet(absolute, index, folders, at_time_ns=None):
@@ -320,7 +312,7 @@ def run_modem(args):
             library, model, absolute, index, (index, *folders),
             background=background, rotation=rotation, mirror=mirror,
             encode_filter=encode_filter, loop=loop, direction=direction,
-            pilot_tones=pilot_tones, eof_marker=eof_marker, fold=fold)
+            pilot_tones=pilot_tones, fold=fold)
         report['direction'] = direction
         report['encode_ms'] = (time.perf_counter() - started) * 1000
         if runtime_library is not None:

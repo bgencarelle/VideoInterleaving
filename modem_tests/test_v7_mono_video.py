@@ -77,7 +77,7 @@ class MonoVideoWireTests(unittest.TestCase):
         with self.wire.receiving():
             return v7.decode_pulse_stream(
                 self.mono_model, audio, sample_rate=v7.RATE,
-                pilot_timing='tone-seeded', frame_boundary='eof',
+                pilot_timing='tone-seeded',
                 state=v7.PulseState(tail_memory=False))
 
     def test_mono_fold_500_packets_match_eof_level_budget_wire(self):
@@ -125,7 +125,7 @@ class MonoVideoWireTests(unittest.TestCase):
         with wire.receiving():
             results, info = v7.decode_pulse_stream(
                 mono_model, audio, sample_rate=v7.RATE,
-                pilot_timing='tone-seeded', frame_boundary='eof',
+                pilot_timing='tone-seeded',
                 state=v7.PulseState(tail_memory=False))
 
         self.assertEqual(len(results), 3, info)
@@ -153,7 +153,7 @@ class MonoVideoWireTests(unittest.TestCase):
             results, info = v7.decode_pulse_stream(
                 mono_model, window, latest_only=True, pulse_starts=pulse_starts,
                 input_gain=live_input.gain, sample_rate=v7.RATE,
-                pilot_timing='tone-seeded', frame_boundary='eof',
+                pilot_timing='tone-seeded',
                 state=v7.PulseState(tail_memory=False))
 
         self.assertTrue(results, info)
@@ -186,7 +186,7 @@ class MonoVideoWireTests(unittest.TestCase):
             with receiver.receiving():
                 results, _info = v7.decode_pulse_stream(
                     mono_model, audio, sample_rate=v7.RATE,
-                    pilot_timing='tone-seeded', frame_boundary='eof',
+                    pilot_timing='tone-seeded',
                     state=v7.PulseState(tail_memory=False))
 
             self.assertEqual(len(results), 3)
@@ -210,7 +210,7 @@ class MonoVideoWireTests(unittest.TestCase):
             with wire.receiving():
                 results, info = v7.decode_pulse_stream(
                     mono_model, audio, sample_rate=v7.RATE,
-                    pilot_timing='tone-seeded', frame_boundary='eof',
+                    pilot_timing='tone-seeded',
                     state=v7.PulseState(tail_memory=False))
             self.assertEqual(len(results), 3, info)
             shown = values_image(
@@ -305,10 +305,6 @@ class MonoVideoWireTests(unittest.TestCase):
         self.assertTrue(all(result.diag.get('mono_profile_rejected') ==
                             'unknown_or_non_mono_status'
                             for result in results))
-
-    def test_video_profile_refuses_missing_eof(self):
-        with self.assertRaisesRegex(ValueError, 'requires EOF markers'):
-            self.wire.encode(self.model, [self.values], eof_marker=False)
 
     def test_source_audio_is_delayed_one_packet_on_left_of_right_video(self):
         class AudioSource:
@@ -566,8 +562,7 @@ class MonoVideoWireTests(unittest.TestCase):
         for counter, kind in enumerate(kinds, 1):
             if kind == 'stereo':
                 packet = encode_packet(
-                    self.model, self.values, counter, mode=FOLD_500,
-                    eof_marker=True)
+                    self.model, self.values, counter, mode=FOLD_500)
             elif kind == 'fresh':
                 packet = fresh.encode_packet(self.model, self.values, counter)
             else:
@@ -614,7 +609,7 @@ class MonoVideoWireTests(unittest.TestCase):
         cases = (
             (FOLD_500, np.concatenate([
                 encode_packet(self.model, self.values, counter,
-                              mode=FOLD_500, eof_marker=True)
+                              mode=FOLD_500)
                 for counter in range(1, 5)])),
             (MONO_500, fresh.encode(self.model, [self.values]*4)[:, 1:2]),
             (MONO_1000, colour.encode(self.model, [self.values]*4)[:, 1:2]),
@@ -630,8 +625,7 @@ class MonoVideoWireTests(unittest.TestCase):
                         results, _ = v7.decode_pulse_stream(
                             self.model, audio, latest_only=True,
                             state=v7.PulseState(tail_memory=False),
-                            sample_rate=v7.RATE, pilot_timing='tone-seeded',
-                            frame_boundary='eof')
+                            sample_rate=v7.RATE, pilot_timing='tone-seeded')
                         self.assertTrue(results)
                         result = results[-1]
                         self.assertIn(result.status, ('received', 'verified'))
@@ -893,7 +887,7 @@ class MonoVideoWireTests(unittest.TestCase):
                 with receiver.receiving():
                     results, info = v7.decode_pulse_stream(
                         mono_model, audio[:, index], sample_rate=v7.RATE,
-                        pilot_timing='tone-seeded', frame_boundary='eof',
+                        pilot_timing='tone-seeded',
                         state=v7.PulseState(tail_memory=False))
                 self.assertEqual(len(results), 3, info)
                 self.assertTrue(all(result.status != 'lost'

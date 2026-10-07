@@ -62,7 +62,7 @@ def run(repeats):
     wire = np.concatenate([
         v7.encode_pulse_frame(
             model, values, counter=index+1, aspect_code=6,
-            source_index=index, pilot_tones=True, eof_marker=True)
+            source_index=index, pilot_tones=True)
         for index in range(3)]).astype(np.float32)
     reverse = wire[::-1].copy()
     window_start = v7.PULSE_FRAME-64
@@ -77,7 +77,7 @@ def run(repeats):
         state.set_playback_direction(1)
         results, _ = v7.decode_pulse_stream(
             model, forward_window, latest_only=True, sample_rate=v7.RATE,
-            pilot_timing='tone-seeded', frame_boundary='eof',
+            pilot_timing='tone-seeded',
             pulse_starts=(hit,), state=state)
         return len(results)
 

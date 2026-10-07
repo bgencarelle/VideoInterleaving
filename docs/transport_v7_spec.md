@@ -1,5 +1,11 @@
 # V7 Transport Specification
 
+> **This spec is dirty. Do not rely on it.**
+> Live testing has found places where the code and this document disagree,
+> and places where both are wrong. Until each section has been checked
+> against a live sender-to-receiver run, treat every statement here as
+> unverified. The working list of known faults is `docs/V7_FIXES.md`.
+
 This document describes the V7 audio modem wire as the code implements it
 today. The code is the reference:
 

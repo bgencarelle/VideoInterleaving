@@ -89,7 +89,7 @@ class Rig:
             tone_code.add_tone_code(
                 v7.encode_pulse_frame_coeffs(
                     model, coefficients, counter, aspect_code=code,
-                    source_index=counter-1, pilot_tones=False, eof_marker=True,
+                    source_index=counter-1, pilot_tones=False,
                     pulse_profile_code=wire.pulse_profile_code),
                 counter, tone_code.encode_status(wire.status_mode))
             for counter in range(1, packets+1)]).astype(np.float64)
@@ -113,7 +113,7 @@ class Rig:
                         pilot_timing='tone-seeded')[0]
             return results
         return v7.decode_pulse_stream(self.base, audio, state=state, sample_rate=rate,
-                                      pilot_timing='tone-seeded', frame_boundary='eof')[0]
+                                      pilot_timing='tone-seeded')[0]
 
     def shown(self, mode, capture, rate=96000, reverse=False, legs=None):
         """[(source index, grid values, note)] for every picture shown.

@@ -59,7 +59,7 @@ def _fixed_series(path):
               for image in images]
     packets = [v7.encode_pulse_frame(
         model, values[index % 2], counter=counter, aspect_code=6,
-        source_index=index, pilot_tones=True, eof_marker=True)
+        source_index=index, pilot_tones=True)
         for index, counter in enumerate(COUNTERS)]
     wire = np.concatenate(packets).astype(np.float32)
     source_indices = np.arange(len(COUNTERS), dtype=np.int32)

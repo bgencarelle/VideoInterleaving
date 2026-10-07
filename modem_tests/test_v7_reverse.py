@@ -38,7 +38,7 @@ class V7ReverseTests(unittest.TestCase):
         return np.concatenate([
             v7.encode_pulse_frame(
                 self.model, values, counter=index+1, aspect_code=6,
-                source_index=index, eof_marker=True)
+                source_index=index)
             for index, values in enumerate(images)])
 
     def test_bidirectional_matcher_matches_reference_and_separates_words(self):
@@ -104,11 +104,10 @@ class V7ReverseTests(unittest.TestCase):
 
     def test_profile_preamble_changes_keep_decoded_picture_equivalent(self):
         encode = lambda code: v7.encode_pulse_frame(
-            self.model, self.values[0], 1, aspect_code=6, source_index=0,
-            eof_marker=True, pulse_profile_code=code)
+            self.model, self.values[0], 1, aspect_code=6, source_index=0, pulse_profile_code=code)
         reference_packet = encode(1)
         reference_results, reference_info = v7.decode_pulse_stream(
-            self.model, reference_packet, frame_boundary='eof',
+            self.model, reference_packet,
             state=v7.PulseState(tail_memory=False))
         self.assertEqual(len(reference_results), 1, reference_info)
         reference_coeffs = reference_results[0].coeffs.copy()
@@ -119,7 +118,7 @@ class V7ReverseTests(unittest.TestCase):
         for profile_code in transport3.PROFILE_PREAMBLE_BITS:
             candidate = encode(profile_code)
             results, info = v7.decode_pulse_stream(
-                self.model, candidate, frame_boundary='eof',
+                self.model, candidate,
                 state=v7.PulseState(tail_memory=False))
             with self.subTest(profile=profile_code):
                 self.assertEqual(len(results), 1, info)
@@ -152,7 +151,7 @@ class V7ReverseTests(unittest.TestCase):
     def test_auto_acquisition_tracks_packet_by_packet_turnarounds(self):
         packets = [v7.encode_pulse_frame(
             self.model, self.values[index % 2], counter=index+1,
-            aspect_code=6, source_index=index, eof_marker=True)
+            aspect_code=6, source_index=index)
             for index in range(6)]
         directions = (1, 1, -1, -1, 1, 1)
         mixed = np.concatenate([
@@ -200,7 +199,7 @@ class V7ReverseTests(unittest.TestCase):
     def test_reverse_packets_decode_in_capture_order_with_frame_identity(self):
         wire = self.stream(4)
         forward, _ = v7.decode_pulse_stream(
-            self.model, wire, frame_boundary='eof',
+            self.model, wire,
             state=v7.PulseState(tail_memory=False))
         reverse = wire[::-1].copy()
         hits = v7.pulse_frame_hits(reverse)
@@ -228,7 +227,7 @@ class V7ReverseTests(unittest.TestCase):
         original = packet.copy()
         forward_hit = v7.pulse_frame_hits(packet)[0]
         forward, _ = v7.decode_pulse_stream(
-            self.model, packet, latest_only=True, frame_boundary='eof',
+            self.model, packet, latest_only=True,
             pulse_starts=[forward_hit[:3]])
         self.assertEqual(len(forward), 1)
         np.testing.assert_array_equal(packet, original)
@@ -246,7 +245,7 @@ class V7ReverseTests(unittest.TestCase):
         for counter in (5, 6):
             packet = v7.encode_pulse_frame(
                 self.model, self.values[0], counter, aspect_code=6,
-                source_index=4, eof_marker=True)
+                source_index=4)
             reverse = packet[::-1].copy()
             hit = v7.pulse_frame_hits(reverse)[0]
             results, info = v7.decode_reverse_packet(
@@ -278,7 +277,7 @@ class V7ReverseTests(unittest.TestCase):
         for counter, source_index in ((1, 0), (5, 1)):
             packet = v7.encode_pulse_frame(
                 self.model, self.values[0], counter, aspect_code=6,
-                source_index=source_index, eof_marker=True)
+                source_index=source_index)
             reverse = packet[::-1].copy()
             hit = v7.pulse_frame_hits(reverse)[0]
             results, _ = v7.decode_reverse_packet(
@@ -502,13 +501,13 @@ class V7ReverseTests(unittest.TestCase):
                 if results and (results[-1].status in ('received', 'verified')
                                 or results[-1].diag.get('displayable')):
                     shown.append((results[-1].diag['source_index'], way))
-        # The forward packet before the turn (source 6) is not decoded: the
-        # receiver next wakes on the reversed preamble, one packet later, and
-        # shows that newer packet. The last packet has no following header.
+        # Every packet is decoded when its own end marker is in: the forward
+        # packet before the turn (source 6) and the last packet (source 8)
+        # need nothing after them.
         self.assertEqual(shown, [
-            (0, 1), (1, 1), (2, 1), (3, 1), (4, 1), (5, 1),
+            (0, 1), (1, 1), (2, 1), (3, 1), (4, 1), (5, 1), (6, 1),
             (6, -1), (5, -1), (4, -1), (3, -1),
-            (3, 1), (4, 1), (5, 1), (6, 1), (7, 1)])
+            (3, 1), (4, 1), (5, 1), (6, 1), (7, 1), (8, 1)])
 
     def test_direction_switch_resets_tail_but_not_loop_lock(self):
         state = v7.PulseState()

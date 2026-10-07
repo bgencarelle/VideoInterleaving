@@ -407,8 +407,7 @@ def _decode_picture_leg(wire, mono_model, video_leg, frame_count):
     with wire.receiving():
         results, info = v7.decode_pulse_stream(
             mono_model, np.asarray(video_leg, dtype=np.float32)[:, None],
-            sample_rate=v7.RATE, pilot_timing='tone-seeded',
-            frame_boundary='eof', state=v7.PulseState(tail_memory=False))
+            sample_rate=v7.RATE, pilot_timing='tone-seeded', state=v7.PulseState(tail_memory=False))
     images = [None]*frame_count
     for result in results:
         if not result.diag.get('displayable'):
@@ -518,7 +517,7 @@ def run(out, fixture=DEFAULT_FIXTURE, frames=None,
     wire = MonoFreshFoldWire(model, side='right')
     mono_model = wire.model_for(model)
     encoded_stereo = wire.encode(
-        model, values, source_indices=list(range(frame_count)), eof_marker=True)
+        model, values, source_indices=list(range(frame_count)))
     video_leg = np.asarray(encoded_stereo[:, 1], dtype=np.float32)
     base_images, video_info = _decode_picture_leg(
         wire, mono_model, video_leg, frame_count)

@@ -58,15 +58,15 @@ class V7MonoTortureTests(unittest.TestCase):
             self.assertGreater(psnr('mono-80x96'), psnr('mono-20x24'))
 
     def test_baseline_profile_keeps_the_historical_wire(self):
-        # Nearest, no tones, no EOF marker: the last packet has no following
-        # header, so three packets give two pictures.
+        # Nearest, no tones: every packet ends with its EOF marker, so three
+        # packets give three pictures.
         SCRATCH.mkdir(exist_ok=True)
         with tempfile.TemporaryDirectory(dir=SCRATCH) as directory:
             _, rows = self.run_clean(directory, '--profile', 'baseline')
             for variant, row in rows.items():
                 self.assertIn('baseline', row['profile'])
-                self.assertEqual(row['displayable'], 2, variant)
-                self.assertEqual(row['metadata_valid'], 2, variant)
+                self.assertEqual(row['displayable'], 3, variant)
+                self.assertEqual(row['metadata_valid'], 3, variant)
 
 
 if __name__ == '__main__':

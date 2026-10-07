@@ -1243,7 +1243,7 @@ class SenderGuiTests(unittest.TestCase):
         self.assertNotIn('--no-pilot-tones', option_strings)
         self.assertNotIn('--eof-marker', option_strings)
         self.assertTrue(send.get_default('pilot_tones'))
-        self.assertTrue(send.get_default('eof_marker'))
+        self.assertIsNone(send.get_default('eof_marker'))
         self.assertFalse(send.get_default('mono_sum'))
         send_help = send.format_help()
         self.assertIn('--profile', send_help)

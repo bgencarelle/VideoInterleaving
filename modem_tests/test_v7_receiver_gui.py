@@ -357,7 +357,7 @@ class ReceiverGuiOptionTests(unittest.TestCase):
         self.assertFalse(args.experimental_mono_fold)
         self.assertFalse(args.experimental_mono_colour)
         self.assertIsNone(args.experimental_fold)
-        self.assertEqual(args.frame_boundary, 'eof')
+        self.assertFalse(hasattr(args, 'frame_boundary'))
         self.assertEqual(args.pilot_timing, 'tone-seeded')
         receiver_help = self.receive_parser.format_help()
         for hidden in ('--pilot-timing', '--frame-boundary',

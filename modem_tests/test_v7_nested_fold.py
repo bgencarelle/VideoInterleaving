@@ -174,14 +174,18 @@ class LiveTests(unittest.TestCase):
                     # status-tone overlay afterwards; the header-order checks
                     # above also cover that final overlay.
                     self.assertGreater(peak, .85*ceiling, mode)
-        # Outside the nested senders the historical wire is unchanged.
+        # Outside the nested senders a quiet body goes out as coded; with
+        # auto-level it is raised to the ceiling its framing sets.
         model = self.rig.base
         quiet = model.mu+.3*np.sqrt(model.lam)*np.random.default_rng(4).standard_normal(len(model.mu))
         plain = v7.encode_pulse_frame_coeffs(model, quiet, 1)
-        self.assertLess(float(np.max(np.abs(plain[body]))), .8*v7.BODY_PEAK)
         with v7.body_auto_level():
             raised = v7.encode_pulse_frame_coeffs(model, quiet, 1)
-        self.assertAlmostEqual(float(np.max(np.abs(raised[body]))), v7.BODY_PEAK, delta=.01)
+        framing = min(float(np.max(np.abs(raised[:v7.PULSE.SYNC_LEN]))),
+                      float(np.max(np.abs(raised[v7.EOF_MARKER_OFFSET:]))))
+        ceiling = framing*10**(-v7.BODY_BELOW_EOF_DB/20)
+        self.assertLess(float(np.max(np.abs(plain[body]))), .8*ceiling)
+        self.assertAlmostEqual(float(np.max(np.abs(raised[body]))), ceiling, delta=.01)
 
     def test_stock_packets_are_still_decoded_by_the_stock_decoders(self):
         self.error('aspect-mono-500', self.audio['aspect-mono-500'])

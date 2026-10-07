@@ -200,7 +200,7 @@ class TemporalFusionTests(unittest.TestCase):
         audio = np.concatenate([tone_code.add_tone_code(
             v7.encode_pulse_frame_coeffs(
                 model, coeffs, counter, aspect_code=3,
-                source_index=counter-1, pilot_tones=False, eof_marker=True,
+                source_index=counter-1, pilot_tones=False,
                 pulse_profile_code=wire.pulse_profile_code),
             counter, tone_code.encode_status(wire.status_mode))
             for counter in range(1, 18)])
@@ -215,7 +215,7 @@ class TemporalFusionTests(unittest.TestCase):
                 results = v7.decode_pulse_stream(
                     self.model, audio.astype(np.float32),
                     state=v7.PulseState(), sample_rate=v7.RATE,
-                    pilot_timing='tone-seeded', frame_boundary='eof')[0]
+                    pilot_timing='tone-seeded')[0]
         finally:
             profile.uninstall()
         plain, fused = self._held_stream_error(
@@ -235,7 +235,7 @@ class TemporalFusionTests(unittest.TestCase):
         with wire.receiving():
             results = v7.decode_pulse_stream(
                 model, audio, sample_rate=v7.RATE,
-                pilot_timing='tone-seeded', frame_boundary='eof',
+                pilot_timing='tone-seeded',
                 state=v7.PulseState(tail_memory=False))[0]
         plain, fused = self._held_stream_error(
             results, lambda result: wire.values(model, result), values)

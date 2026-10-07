@@ -74,22 +74,21 @@ def run(sources=None, out=DEFAULT_OUT, block_size=8, rounds=200, warmups=10,
         def resize_first(index):
             values = _source_values(model, image, encode_filter='box')
             return encode_values_packet(
-                model, values, 1, index, aspect, loop=loop, direction=1,
-                eof_marker=True, fold=fold)
+                model, values, 1, index, aspect, loop=loop, direction=1, fold=fold)
 
         def direct_grid_dct(index):
             full = _source_dct_coefficients(model, image, 'box')
             coefficients = fold.encode_dct_coefficients(full)
             return encode_folded_coefficients_packet(
                 model, coefficients, 1, index, aspect, loop=loop,
-                direction=1, eof_marker=True)
+                direction=1)
 
         def fold_block(index):
             full = projector.project(rgb)
             coefficients = fold.encode_dct_coefficients(full)
             return encode_folded_coefficients_packet(
                 model, coefficients, 1, index, aspect, loop=loop,
-                direction=1, eof_marker=True)
+                direction=1)
 
         paths = {
             'resize_first': resize_first,
@@ -121,21 +120,21 @@ def run(sources=None, out=DEFAULT_OUT, block_size=8, rounds=200, warmups=10,
                     prepared = time.perf_counter_ns()
                     audio = encode_values_packet(
                         model, values, 1, index % 12, aspect, loop=loop,
-                        direction=1, eof_marker=True, fold=fold)
+                        direction=1, fold=fold)
                 elif name == 'direct_grid_dct':
                     full = _source_dct_coefficients(model, image, 'box')
                     prepared = time.perf_counter_ns()
                     coefficients = fold.encode_dct_coefficients(full)
                     audio = encode_folded_coefficients_packet(
                         model, coefficients, 1, index % 12, aspect, loop=loop,
-                        direction=1, eof_marker=True)
+                        direction=1)
                 else:
                     full = projector.project(rgb)
                     prepared = time.perf_counter_ns()
                     coefficients = fold.encode_dct_coefficients(full)
                     audio = encode_folded_coefficients_packet(
                         model, coefficients, 1, index % 12, aspect, loop=loop,
-                        direction=1, eof_marker=True)
+                        direction=1)
                 ended = time.perf_counter_ns()
                 if len(audio) != v7.PULSE_FRAME or not np.isfinite(audio).all():
                     raise RuntimeError(f'{name} packet encode returned invalid audio')

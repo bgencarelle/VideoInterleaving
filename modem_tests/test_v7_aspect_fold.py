@@ -72,7 +72,7 @@ def _round_trip(base, values, aspect, profile, packets=9):
     audio = np.concatenate([
         tone_code.add_tone_code(v7.encode_pulse_frame_coeffs(
             model, coeffs, counter, aspect_code=aspect, source_index=0,
-            pilot_tones=False, eof_marker=True, pulse_profile_code=code),
+            pilot_tones=False, pulse_profile_code=code),
             counter, tone_code.encode_status(mode))
         for counter in range(1, packets+1)])
     v7._equalize_numba, v7._equalize_numpy = numba, numpy
@@ -80,8 +80,7 @@ def _round_trip(base, values, aspect, profile, packets=9):
         with tone_code.coded_pilot_timing():
             results, _ = v7.decode_pulse_stream(
                 model, audio, models={model.encoding_type: model},
-                state=v7.PulseState(), pilot_timing='tone-seeded',
-                frame_boundary='eof')
+                state=v7.PulseState(), pilot_timing='tone-seeded')
     finally:
         v7._equalize_numba, v7._equalize_numpy = real_numba, real_numpy
     good = [result for result in results if result.status != 'lost']
@@ -188,7 +187,7 @@ class AspectLayoutTests(unittest.TestCase):
             audio = np.concatenate([tone_code.add_tone_code(
                 v7.encode_pulse_frame_coeffs(
                     model, coeffs, counter, aspect_code=3,
-                    source_index=counter-1, pilot_tones=False, eof_marker=True,
+                    source_index=counter-1, pilot_tones=False,
                     pulse_profile_code=wire.pulse_profile_code),
                 counter, tone_code.encode_status(wire.status_mode))
                 for counter in range(1, 6)]).astype(np.float32)
@@ -202,8 +201,7 @@ class AspectLayoutTests(unittest.TestCase):
                     # The receiver's own state: shared tail memory on.
                     results = v7.decode_pulse_stream(
                         base, audio, state=v7.PulseState(),
-                        sample_rate=v7.RATE, pilot_timing='tone-seeded',
-                        frame_boundary='eof')[0]
+                        sample_rate=v7.RATE, pilot_timing='tone-seeded')[0]
             finally:
                 profile.uninstall()
             good = [result for result in results if result.status != 'lost']

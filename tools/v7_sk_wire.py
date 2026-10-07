@@ -82,7 +82,7 @@ class Link:
             coefficients[self.index] = self.mu+self.sd*np.asarray(symbols, float)
         packet = v7_live._encode_pulse_frame_coeffs(
             model, coefficients, counter, aspect_code=wire.aspect,
-            source_index=source_index, eof_marker=True,
+            source_index=source_index,
             pulse_profile_code=wire.wire.pulse_profile_code)
         packet = v7_live._add_coded_pilots(packet, counter, 500, mode=wire.wire.status_mode)
         return adapt_packet_for_output(packet, 96000)

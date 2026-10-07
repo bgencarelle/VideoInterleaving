@@ -63,8 +63,7 @@ class ReverseTortureTests(unittest.TestCase):
             tone_code.add_tone_code(
                 v7.encode_pulse_frame_coeffs(
                     model, coefficients, counter, aspect_code=code,
-                    source_index=counter-1, pilot_tones=False,
-                    eof_marker=True, pulse_profile_code=profile_code),
+                    source_index=counter-1, pilot_tones=False, pulse_profile_code=profile_code),
                 counter, tone_code.encode_status(mode))
             for counter in range(1, PACKETS+1)]).astype(np.float64)
 
@@ -135,7 +134,7 @@ class ReverseTortureTests(unittest.TestCase):
                 else:
                     results, _ = v7.decode_pulse_stream(
                         self.base, audio, state=state, sample_rate=rate,
-                        pilot_timing='tone-seeded', frame_boundary='eof')
+                        pilot_timing='tone-seeded')
             for result in results:
                 index = result.diag.get('source_index')
                 if index is None or (result.status == 'lost' and

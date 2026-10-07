@@ -534,11 +534,9 @@ class SliceWire:
         return out
 
     def encode_packet(self, base_model, values, counter, aspect_code=0,
-                      source_index=None, eof_marker=True, sides=SIDES):
+                      source_index=None, sides=SIDES):
         """One stereo packet: ``sides`` names what each output channel
         carries ('left', 'right', or None for silence)."""
-        if not eof_marker:
-            raise ValueError('the stereo slices profile requires EOF markers')
         layout = self.layout_for(aspect_code)
         if layout is None:
             raise ValueError(f'no aspect layout for aspect code {aspect_code!r}')
@@ -554,7 +552,7 @@ class SliceWire:
         # One packet build: with two channels each is its own mono wire.
         packet = v7.encode_pulse_frame_coeffs(
             model, coefficients[0], counter, aspect_code=aspect_code,
-            source_index=source_index, pilot_tones=False, eof_marker=True,
+            source_index=source_index, pilot_tones=False,
             pilot_values=MONO_PILOT_VALUES,
             pulse_profile_code=self.pulse_profile_code,
             right_coeffs=coefficients[1] if len(carried) == 2 else None)
@@ -566,7 +564,7 @@ class SliceWire:
         return packet
 
     def encode(self, base_model, values, start_counter=1, aspect_codes=None,
-               source_indices=None, eof_marker=True, sides=SIDES):
+               source_indices=None, sides=SIDES):
         values = list(values)
         codes = (list(aspect_codes) if aspect_codes is not None else
                  [0]*len(values))
@@ -577,8 +575,7 @@ class SliceWire:
         return np.concatenate([
             self.encode_packet(base_model, value, start_counter+offset,
                                aspect_code=codes[offset],
-                               source_index=indexes[offset],
-                               eof_marker=eof_marker, sides=sides)
+                               source_index=indexes[offset], sides=sides)
             for offset, value in enumerate(values)])
 
     # -------------------------------------------------------------- receiver

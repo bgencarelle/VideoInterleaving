@@ -56,7 +56,7 @@ def _stream(base, grid, layout, code, scale=10, packets=6, start=1):
     audio = np.concatenate([tone_code.add_tone_code(
         v7.encode_pulse_frame_coeffs(
             model, coeffs, counter, aspect_code=code, source_index=counter-1,
-            pilot_tones=False, eof_marker=True,
+            pilot_tones=False,
             pulse_profile_code=wire.pulse_profile_code),
         counter, tone_code.encode_status(wire.status_mode))
         for counter in range(start, start+packets)]).astype(np.float32)
@@ -70,7 +70,7 @@ def _decode(profile, base, audio):
             profile.active_mode = profile.dispatch_mode = profile.aspect_mode
             results = v7.decode_pulse_stream(
                 base, audio, state=v7.PulseState(), sample_rate=v7.RATE,
-                pilot_timing='tone-seeded', frame_boundary='eof')[0]
+                pilot_timing='tone-seeded')[0]
     finally:
         profile.uninstall()
     return [result for result in results if result.status != 'lost']
@@ -190,7 +190,7 @@ class PixelGridTests(unittest.TestCase):
         audio = np.concatenate([tone_code.add_tone_code(
             v7.encode_pulse_frame_coeffs(
                 model, coeffs, counter, aspect_code=3, source_index=counter-1,
-                pilot_tones=False, eof_marker=True,
+                pilot_tones=False,
                 pulse_profile_code=wire.pulse_profile_code),
             counter, tone_code.encode_status(wire.status_mode))
             for counter in range(1, 6)]).astype(np.float32)

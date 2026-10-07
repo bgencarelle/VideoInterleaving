@@ -210,12 +210,12 @@ def add_tone_code(packet, counter, status_bits, pilot_code=PILOT_CODE):
 
 def encode_packet(model, values, counter, mode=FOLD_OFF,
                   source_index=None, aspect_code=0,
-                  pilot_code=PILOT_CODE, eof_marker=False):
+                  pilot_code=PILOT_CODE):
     """Encode a normal V7 pulse packet and overlay time-coded pilots."""
     bits = encode_status(mode)
     packet = v7.encode_pulse_frame(
         model, values, counter, aspect_code=aspect_code,
-        source_index=source_index, pilot_tones=False, eof_marker=eof_marker,
+        source_index=source_index, pilot_tones=False,
         pulse_profile_code=mode)
     return add_tone_code(packet, counter, bits, pilot_code=pilot_code)
 
@@ -713,14 +713,13 @@ def _selftest(args):
         values = v7.image_values(v7.prepare_image(image.convert('RGB'), 'box'),
                                  v7.V7_GRIDS, 'box')
     plain_packets = [v7.encode_pulse_frame(
-        model, values, index+1, source_index=index, eof_marker=True)
+        model, values, index+1, source_index=index)
         for index in range(args.packets)]
     coded_packets = [add_tone_code(packet, index+1,
                                    encode_status(FOLD_500))
                      for index, packet in enumerate(plain_packets)]
     steady_packets = [v7.encode_pulse_frame(
-        model, values, index+1, source_index=index, pilot_tones=True,
-        eof_marker=True) for index in range(args.packets)]
+        model, values, index+1, source_index=index, pilot_tones=True) for index in range(args.packets)]
     streams = {
         'coded': np.concatenate(coded_packets),
         'steady': np.concatenate(steady_packets),

@@ -64,7 +64,7 @@ class ApplicationFoldTests(unittest.TestCase):
         coefficients = fold.encode_coefficients(self.values)
         packet = v7.encode_pulse_frame_coeffs(
             self.model, coefficients, 5, aspect_code=3, source_index=2,
-            pilot_tones=False, eof_marker=True)
+            pilot_tones=False)
         actual = add_fold500_coded_pilot(packet, 5)
         expected = tone_code.add_tone_code(
             packet, 5, tone_code.encode_status(tone_code.FOLD_500))
@@ -76,7 +76,7 @@ class ApplicationFoldTests(unittest.TestCase):
             self.model, coefficients, 5, 2, 3)
         expected = v7.encode_pulse_frame_coeffs(
             self.model, coefficients, 5, aspect_code=3, source_index=2,
-            pilot_tones=False, eof_marker=True,
+            pilot_tones=False,
             extra_tone_mixer=lambda packet: add_fold500_coded_pilot(packet, 5))
         np.testing.assert_array_equal(actual, expected)
 

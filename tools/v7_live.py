@@ -1033,7 +1033,7 @@ def _validate_tone_controls(brightness, gamma):
 
 
 def _encode_pulse_frame_coeffs(model, coeffs, counter, aspect_code=0,
-                               source_index=None, eof_marker=True,
+                               source_index=None,
                                pilot_values=None, pulse_profile_code=1):
     """Build one folded pulse packet without an inverse/forward DCT round trip."""
     if source_index is None:
@@ -1041,7 +1041,7 @@ def _encode_pulse_frame_coeffs(model, coeffs, counter, aspect_code=0,
     return P.encode_pulse_frame_coeffs(
         model, np.asarray(coeffs), counter, aspect_code=aspect_code,
         source_index=source_index, pilot_tones=False,
-        eof_marker=eof_marker, pilot_values=pilot_values,
+        pilot_values=pilot_values,
         pulse_profile_code=pulse_profile_code)
 
 
@@ -1281,8 +1281,6 @@ def _run_send_session(args):
     if mono_fold_profile:
         if not getattr(args, 'pilot_tones', True):
             raise ValueError('experimental mono profiles require coded pilot tones')
-        if not getattr(args, 'eof_marker', True):
-            raise ValueError('experimental mono profiles require the EOF marker')
     if mono_fold_profile and getattr(args, 'mono_sum', False):
         raise ValueError('the mono-video side selector requires two output '
                          'channels; do not combine it with --mono-sum')
@@ -1305,8 +1303,6 @@ def _run_send_session(args):
     if aspect_profile:
         if not getattr(args, 'pilot_tones', True):
             raise ValueError('aspect-fold-500 requires coded pilot tones')
-        if not getattr(args, 'eof_marker', True):
-            raise ValueError('aspect-fold-500 requires the EOF marker')
     profile_slots = 500 if (mono_fold_profile or aspect_profile or
                             getattr(args, 'slices', None)) else slots
     clip_aware = bool(getattr(args, 'clip_aware_encode', False))
@@ -1410,8 +1406,6 @@ def _run_send_session(args):
     if slices_profile:
         if not getattr(args, 'pilot_tones', True):
             raise ValueError('the slices profiles require coded pilot tones')
-        if not getattr(args, 'eof_marker', True):
-            raise ValueError('the slices profiles require the EOF marker')
         if getattr(args, 'mono_sum', False):
             raise ValueError('stereo-slices needs two output channels; use a '
                              'mono video profile for one')
@@ -1604,14 +1598,12 @@ def _run_send_session(args):
                 model, values, start_counter=counter,
                 aspect_codes=aspects,
                 source_indices=[_wire_index(counter+i)
-                                for i in range(len(values))],
-                eof_marker=True)
+                                for i in range(len(values))])
         elif slice_wire is not None:
             audio = slice_wire.encode(
                 model, values, start_counter=counter, aspect_codes=aspects,
                 source_indices=[_wire_index(counter+i)
-                                for i in range(len(values))],
-                eof_marker=True)
+                                for i in range(len(values))])
         elif aspect_wire is not None:
             packets = []
             for index, value in enumerate(values):
@@ -1621,7 +1613,6 @@ def _run_send_session(args):
                     packet_model, coeffs, counter+index,
                     aspect_code=aspects[index],
                     source_index=_wire_index(counter+index),
-                    eof_marker=getattr(args, 'eof_marker', True),
                     pulse_profile_code=aspect_wire.pulse_profile_code))
             audio = _add_coded_pilots(np.concatenate(packets), counter,
                                       aspect_wire.fold_slots,
@@ -1638,7 +1629,6 @@ def _run_send_session(args):
                             if deferred_gains is not None else None)),
                     counter+index, aspect_code=aspects[index],
                     source_index=_wire_index(counter+index),
-                    eof_marker=getattr(args, 'eof_marker', True),
                     pulse_profile_code=pulse_profile_code)
                 for index, value in enumerate(values)])
             audio = _add_coded_pilots(audio, counter, fold.slots)
@@ -1647,8 +1637,7 @@ def _run_send_session(args):
                 model, values, start_counter=counter, aspect_codes=aspects,
                 source_indices=[_wire_index(counter+i)
                                 for i in range(len(values))],
-                pilot_tones=getattr(args, 'pilot_tones', True),
-                eof_marker=getattr(args, 'eof_marker', True))
+                pilot_tones=getattr(args, 'pilot_tones', True))
         report_stats = args.log and not args.no_log
         if report_stats:
             encoded_peak = float(np.max(np.abs(audio))) if audio.size else 0.0
@@ -3063,8 +3052,6 @@ def run_receive(args):
     if not profile_is_explicit:
         if getattr(args, 'pilot_timing', 'tone-seeded') == 'baseline':
             raise ValueError('automatic profile selection requires tone-assisted timing')
-        if getattr(args, 'frame_boundary', 'eof') != 'eof':
-            raise ValueError('automatic profile selection requires EOF packet boundaries')
         fold = _experimental_fold(500)
         profile_decoder = _make_auto_profile_decoder(args, fold)
         _ensure_test_modem_path()
@@ -3083,8 +3070,6 @@ def run_receive(args):
     if mono_fold_profile:
         if getattr(args, 'pilot_timing', 'tone-seeded') == 'baseline':
             raise ValueError('experimental mono profiles require tone-assisted timing')
-        if getattr(args, 'frame_boundary', 'eof') != 'eof':
-            raise ValueError('experimental mono profiles require EOF packet boundaries')
         _ensure_test_modem_path()
         from tone_code import coded_pilot_timing
         from mono_video import MonoColourFoldWire, MonoFreshFoldWire
@@ -3190,7 +3175,7 @@ def _run_receive_session(args, fold, mono_wire=None, adaptive_profile=None,
         warmup_coded_decoder(model)
         warmup_wire = mono_wire.encode(
             base_model, [np.zeros(base_model.coder.source_count)]*3,
-            start_counter=1, eof_marker=True)
+            start_counter=1)
         warmup_audio = warmup_wire
         carrier_index = getattr(mono_wire, 'carrier_index', None)
         if carrier_index is not None:
@@ -3198,7 +3183,7 @@ def _run_receive_session(args, fold, mono_wire=None, adaptive_profile=None,
         P.decode_pulse_stream(
             model, warmup_audio, sample_rate=capture_rate_for(
                 sd.query_devices(args.device, 'input')),
-            pilot_timing=args.pilot_timing, frame_boundary='eof')
+            pilot_timing=args.pilot_timing)
     if adaptive_profile is not None:
         _ensure_test_modem_path()
         from tone_code import warmup_status_templates
@@ -3983,9 +3968,9 @@ def _run_receive_session(args, fold, mono_wire=None, adaptive_profile=None,
         # take() judges polarity, scans only new audio for frame headers and
         # trims to the minimal buffer (two frames at the current speed plus a
         # guard; see animation_modem/v7_live_input.py).  It returns audio
-        # only when a new header has arrived, i.e. a new frame is complete, so
-        # decode cycles follow the wire, not the capture block size, and an
-        # idle or signal-free input never reaches the demodulator.
+        # only when a packet is complete (its end marker is in), so decode
+        # cycles follow the wire, not the capture block size, and an idle or
+        # signal-free input never reaches the demodulator.
         now = time.monotonic()
         if opposite_probe is not None:
             opposite_probe.scan(now)
@@ -4086,8 +4071,7 @@ def _run_receive_session(args, fold, mono_wire=None, adaptive_profile=None,
             else:
                 results, info = P.decode_pulse_stream(
                     model, decode_audio, latest_only=True,
-                    pulse_starts=pulse_starts,
-                    frame_boundary=args.frame_boundary, **options)
+                    pulse_starts=pulse_starts, **options)
                 for result in results:
                     result.diag['playback_direction'] = 1
                 info['playback_direction'] = 1
@@ -4143,7 +4127,6 @@ def _run_receive_session(args, fold, mono_wire=None, adaptive_profile=None,
                             model, other_audio, latest_only=True,
                             pulse_starts=other_probe.input.pulse_starts(
                                 other_audio),
-                            frame_boundary=args.frame_boundary,
                             **other_options)
                 except Exception:
                     other_results = []
@@ -4182,7 +4165,7 @@ def _run_receive_session(args, fold, mono_wire=None, adaptive_profile=None,
             independently_validated = bool(
                 result.diag.get('metadata_valid') and
                 not result.diag.get('metadata_provisional') and
-                (packet_direction < 0 or args.frame_boundary != 'eof' or
+                (packet_direction < 0 or
                  result.diag.get('eof_marker') is not None))
             result_mode = _mono_packet_status_mode(result)
             packet_valid = bool(
@@ -4611,7 +4594,7 @@ def parser():
                       help='additional audio delay beyond one emitted video packet')
     # These wire essentials remain explicit internal defaults, not user-facing
     # toggles. The GUI and CLI always emit the current reference/pilot/EOF wire.
-    send.set_defaults(mono_sum=False, pilot_tones=True, eof_marker=True)
+    send.set_defaults(mono_sum=False, pilot_tones=True)
     _add_aspect_arguments(send)
     send_profile = send.add_mutually_exclusive_group()
     send_profile.add_argument(
@@ -4738,9 +4721,6 @@ def parser():
                                 'tone-replaced'),
                        default='tone-seeded',
                        help='pilot timing fit (default: tone-seeded)')
-    recv.add_argument('--frame-boundary', choices=('baseline', 'eof'),
-                      default='eof',
-                      help='packet boundary mode (default: EOF marker)')
     recv.add_argument('--pilot-speed-diagnostics', action='store_true',
                       help='compare raw pilot-tone speed with pulse-measured speed')
     recv.add_argument('--pulse-timing', choices=('baseline', 'pulse-warp'),
@@ -4761,7 +4741,7 @@ def parser():
     receiver_tuners = {
         'direction', 'fixture', 'profile_ui', 'mono_compatible',
         'mono_video_side', 'decode_batch', 'decode_history',
-        'no_tail_memory', 'force_float32', 'pilot_timing', 'frame_boundary',
+        'no_tail_memory', 'force_float32', 'pilot_timing',
         'pilot_speed_diagnostics', 'pulse_timing', 'tone_equalization',
         'experimental_mono_fold',
         'experimental_mono_colour',

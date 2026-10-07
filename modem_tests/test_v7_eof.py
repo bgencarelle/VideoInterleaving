@@ -20,12 +20,9 @@ class V7EOFTests(unittest.TestCase):
             cls.values = v7.image_values(
                 v7.prepare_image(source, 'nearest'), cls.model.coder.grids,
                 'nearest')
-        cls.baseline_wire = v7.encode_pulse_stream(
-            cls.model, [cls.values]*FRAME_COUNT,
-            pilot_tones=False, eof_marker=False)
         cls.eof_wire = v7.encode_pulse_stream(
             cls.model, [cls.values]*FRAME_COUNT,
-            pilot_tones=False, eof_marker=True)
+            pilot_tones=False)
 
     def _packet_starts(self, stream):
         return v7.pulse_frame_starts(stream)
@@ -83,16 +80,14 @@ class V7EOFTests(unittest.TestCase):
         try:
             window = self.eof_wire[:int(2.3*v7.PULSE_FRAME)].astype(np.float32)
             results, _ = v7.decode_pulse_stream(
-                self.model, window, latest_only=True, frame_boundary='eof')
+                self.model, window, latest_only=True)
         finally:
             v7._measure_eof_marker = original
         self.assertEqual(len(results), 1)
         self.assertEqual(sum(calls), 1)          # one successful validation
 
-    def test_marker_reuses_the_guard_and_is_opt_in(self):
-        self.assertEqual(len(self.eof_wire), len(self.baseline_wire))
-        guard = self.baseline_wire[-v7.EOF_MARKER_LENGTH:]
-        self.assertEqual(float(np.max(np.abs(guard))), 0.0)
+    def test_marker_sits_in_the_guard_of_every_packet(self):
+        self.assertEqual(len(self.eof_wire), FRAME_COUNT*v7.PULSE_FRAME)
         expected = np.concatenate([
             np.full(run, level, np.float32)
             for run, level in zip(v7.EOF_MARKER_RUNS, v7.EOF_MARKER_LEVELS)
@@ -105,13 +100,9 @@ class V7EOFTests(unittest.TestCase):
             self.eof_wire[-32:-v7.EOF_MARKER_LENGTH]))), 0.0)
 
     def test_eof_receiver_commits_final_packet_without_next_header(self):
-        baseline, _ = v7.decode_pulse_stream(
-            self.model, self.baseline_wire, pilot_timing='baseline',
-            frame_boundary='baseline')
         eof, info = v7.decode_pulse_stream(
-            self.model, self.eof_wire, frame_boundary='eof')
+            self.model, self.eof_wire)
 
-        self.assertEqual(len(baseline), FRAME_COUNT-1)
         self.assertEqual(len(eof), FRAME_COUNT)
         self.assertEqual(info['eof_markers_validated'], FRAME_COUNT)
         self.assertEqual([result.counter for result in eof],
@@ -123,15 +114,15 @@ class V7EOFTests(unittest.TestCase):
                 np.square(decoded-self.values)))), .10)
 
     def test_eof_receiver_rejects_missing_or_damaged_final_marker(self):
-        no_marker, _ = v7.decode_pulse_stream(
-            self.model, self.baseline_wire[:v7.PULSE_FRAME],
-            frame_boundary='eof')
+        one = self.eof_wire[:v7.PULSE_FRAME].copy()
+        one[-32:] = 0                         # the guard with no marker in it
+        no_marker, _ = v7.decode_pulse_stream(self.model, one)
         self.assertEqual(no_marker, [])
 
         damaged = self.eof_wire.copy()
         damaged[-v7.EOF_MARKER_LENGTH:] = 0
         results, info = v7.decode_pulse_stream(
-            self.model, damaged, frame_boundary='eof')
+            self.model, damaged)
         self.assertEqual(len(results), FRAME_COUNT-1)
         self.assertEqual(info['eof_markers_validated'], FRAME_COUNT-1)
 
@@ -140,7 +131,7 @@ class V7EOFTests(unittest.TestCase):
         second_end = 2*v7.PULSE_FRAME
         damaged[second_end-v7.EOF_MARKER_LENGTH:second_end] = 0
         results, info = v7.decode_pulse_stream(
-            self.model, damaged, frame_boundary='eof')
+            self.model, damaged)
 
         # The mark's end is the next packet's origin, so the intact next
         # header witnesses the second packet instead.
@@ -158,7 +149,7 @@ class V7EOFTests(unittest.TestCase):
         # The second packet's mark and the third packet's header are gone.
         damaged[second_end-v7.EOF_MARKER_LENGTH:second_end+300] = 0
         results, _info = v7.decode_pulse_stream(
-            self.model, damaged, frame_boundary='eof')
+            self.model, damaged)
 
         self.assertEqual(results[0].status, 'received')
         # Either no endpoint is found, or the only one is a later packet's,
@@ -170,14 +161,13 @@ class V7EOFTests(unittest.TestCase):
     def test_truncated_marker_does_not_commit_final_packet(self):
         truncated = self.eof_wire[:-16]
         results, info = v7.decode_pulse_stream(
-            self.model, truncated, frame_boundary='eof')
+            self.model, truncated)
         self.assertEqual(len(results), FRAME_COUNT-1)
         self.assertEqual(info['eof_markers_validated'], FRAME_COUNT-1)
 
     def test_latest_only_can_commit_a_single_eof_packet(self):
         results, info = v7.decode_pulse_stream(
-            self.model, self.eof_wire[:v7.PULSE_FRAME], latest_only=True,
-            frame_boundary='eof')
+            self.model, self.eof_wire[:v7.PULSE_FRAME], latest_only=True)
         self.assertEqual(len(results), 1)
         self.assertEqual(info['eof_markers_validated'], 1)
         self.assertTrue(results[0].diag['metadata_valid'])
@@ -191,8 +181,7 @@ class V7EOFTests(unittest.TestCase):
                 capture = v7.speed_pulse_stream(
                     capture, speed, rate=sample_rate)
                 results, info = v7.decode_pulse_stream(
-                    self.model, capture, sample_rate=sample_rate,
-                    frame_boundary='eof')
+                    self.model, capture, sample_rate=sample_rate)
                 self.assertEqual(len(results), FRAME_COUNT)
                 self.assertEqual(info['eof_markers_validated'], FRAME_COUNT)
                 self.assertTrue(all(
@@ -201,9 +190,9 @@ class V7EOFTests(unittest.TestCase):
     def test_eof_tone_reference_equalization_is_wired_through_receiver(self):
         toned_wire = v7.encode_pulse_stream(
             self.model, [self.values]*FRAME_COUNT,
-            pilot_tones=True, eof_marker=True)
+            pilot_tones=True)
         results, info = v7.decode_pulse_stream(
-            self.model, toned_wire, frame_boundary='eof',
+            self.model, toned_wire,
             pilot_timing='tone-seeded', tone_equalization='m-reference')
 
         self.assertEqual(len(results), FRAME_COUNT)

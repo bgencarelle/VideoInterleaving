@@ -120,8 +120,7 @@ class SignalledLayoutTests(unittest.TestCase):
             with tone_code.coded_pilot_timing():
                 results, _ = v7.decode_pulse_stream(
                     decoder.base_model, audio, sample_rate=v7.RATE,
-                    state=v7.PulseState(), pilot_timing='tone-seeded',
-                    frame_boundary='eof')
+                    state=v7.PulseState(), pilot_timing='tone-seeded')
             good = [result for result in results
                     if result.status in ('received', 'verified')]
             self.assertTrue(good)

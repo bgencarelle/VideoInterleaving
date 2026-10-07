@@ -207,9 +207,7 @@ class MonoFreshFoldWire:
         return self.model_for(model)
 
     def encode_packet(self, model, values, counter, aspect_code=0,
-                      source_index=None, eof_marker=True):
-        if not eof_marker:
-            raise ValueError('the mono video profile requires EOF markers')
+                      source_index=None):
         base = model
         mono_model = self._packet_model(base, aspect_code)
         codec = self._codec(mono_model) if self.use_fold else None
@@ -220,7 +218,7 @@ class MonoFreshFoldWire:
         from tools.v7_live import _encode_pulse_frame_coeffs
         packet = _encode_pulse_frame_coeffs(
             mono_model, coeffs, counter, aspect_code=aspect_code,
-            source_index=source_index, eof_marker=True,
+            source_index=source_index,
             pilot_values=MONO_PILOT_VALUES,
             pulse_profile_code=self.status_mode)
         packet = tone_code.add_tone_code(
@@ -234,7 +232,7 @@ class MonoFreshFoldWire:
         return packet
 
     def encode(self, model, values, start_counter=1, aspect_codes=None,
-               source_indices=None, eof_marker=True):
+               source_indices=None):
         values = list(values)
         codes = (list(aspect_codes) if aspect_codes is not None else
                  [0]*len(values))
@@ -242,12 +240,10 @@ class MonoFreshFoldWire:
                    [start_counter+i-1 for i in range(len(values))])
         if not len(codes) == len(indexes) == len(values):
             raise ValueError('aspect_codes and source_indices must match values')
-        if not eof_marker:
-            raise ValueError('the mono video profile requires EOF markers')
         return np.concatenate([
             self.encode_packet(model, value, start_counter+offset,
                                aspect_code=codes[offset],
-                               source_index=indexes[offset], eof_marker=True)
+                               source_index=indexes[offset])
             for offset, value in enumerate(values)])
 
     def install(self):

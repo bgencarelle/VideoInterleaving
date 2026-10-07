@@ -405,7 +405,7 @@ def _encode_fold_projected(production_fold, model, coefficients,
         folded = production_fold.encode_dct_coefficients(coefficients)
         packets.append(encode_folded_coefficients_packet(
             model, folded, index+1, index, aspect_code,
-            loop=loop, direction=1, eof_marker=True))
+            loop=loop, direction=1))
     return np.concatenate(packets), (time.perf_counter()-started)*1000
 
 
@@ -430,11 +430,10 @@ def _encode(wire, profile_name, model, values, aspect_code,
     if profile_name == 'stereo-fold-500':
         audio = wire.encode(
             model, [values]*packet_count, aspect_codes=codes,
-            source_indices=indices, loop=loop, directions=directions,
-            eof_marker=True)
+            source_indices=indices, loop=loop, directions=directions)
     else:
         audio = wire.encode(model, [values]*packet_count, aspect_codes=codes,
-                            source_indices=indices, eof_marker=True)
+                            source_indices=indices)
     elapsed = (time.perf_counter()-started)*1000
     return audio, elapsed
 
@@ -448,10 +447,10 @@ def _encode_sequence(wire, profile_name, model, values, aspect_code):
     if profile_name == 'stereo-fold-500':
         audio = wire.encode(
             model, values, aspect_codes=codes, source_indices=indices,
-            loop=loop, directions=directions, eof_marker=True)
+            loop=loop, directions=directions)
     else:
         audio = wire.encode(model, values, aspect_codes=codes,
-                            source_indices=indices, eof_marker=True)
+                            source_indices=indices)
     return audio, (time.perf_counter()-started)*1000
 
 
@@ -467,7 +466,7 @@ def _decode(wire, profile_name, model, audio96, source_aspect):
         with wire.receiving():
             results, info = v7.decode_pulse_stream(
                 mono_model, audio96[:, 0], sample_rate=RATE,
-                pilot_timing='tone-seeded', frame_boundary='eof',
+                pilot_timing='tone-seeded',
                 state=v7.PulseState(tail_memory=False))
         value_fn = lambda result: wire.values(mono_model, result)
     elapsed = (time.perf_counter()-started)*1000
@@ -505,7 +504,7 @@ def _decode_sequence(wire, profile_name, model, audio96, source_aspect):
         with wire.receiving():
             results, info = v7.decode_pulse_stream(
                 mono_model, audio96[:, 0], sample_rate=RATE,
-                pilot_timing='tone-seeded', frame_boundary='eof',
+                pilot_timing='tone-seeded',
                 state=v7.PulseState(tail_memory=False))
         value_fn = lambda result: wire.values(mono_model, result)
     elapsed = (time.perf_counter()-started)*1000

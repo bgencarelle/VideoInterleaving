@@ -134,9 +134,9 @@ class ToneCodeTests(unittest.TestCase):
     def test_runtime_status_decoder_reuses_v7_fft_bins(self):
         coded = encode_packet(self.model, self.values, 1, FOLD_500)
         steady = v7.encode_pulse_frame(
-            self.model, self.values, 1, pilot_tones=True, eof_marker=True)
+            self.model, self.values, 1, pilot_tones=True)
         absent = v7.encode_pulse_frame(
-            self.model, self.values, 1, pilot_tones=False, eof_marker=True)
+            self.model, self.values, 1, pilot_tones=False)
 
         def body_spectrum(packet):
             body = packet[v7.PULSE.SYNC_LEN:
@@ -162,7 +162,7 @@ class ToneCodeTests(unittest.TestCase):
     def test_runtime_status_survives_mains_buzz_in_existing_fft_path(self):
         packets = [encode_packet(
             self.model, self.values, index+1, FOLD_500,
-            source_index=index, eof_marker=True)
+            source_index=index)
             for index in range(12)]
         capture = resample_poly(np.concatenate(packets), 2, 1,
                                 axis=0).astype(np.float32)
@@ -171,7 +171,7 @@ class ToneCodeTests(unittest.TestCase):
         with coded_pilot_timing():
             received, _ = v7.decode_pulse_stream(
                 self.model, capture, sample_rate=RATE,
-                pilot_timing='tone-seeded', frame_boundary='eof')
+                pilot_timing='tone-seeded')
         modes = [result.diag.get('pilot_timing', {}).get('coded_status_mode')
                  for result in received]
         self.assertEqual(len(received), len(packets))
@@ -180,8 +180,7 @@ class ToneCodeTests(unittest.TestCase):
     def test_steady_and_absent_tones_do_not_decode_as_the_coded_channel(self):
         for pilot_tones in (False, True):
             packet = v7.encode_pulse_frame(
-                self.model, self.values, 1, pilot_tones=pilot_tones,
-                eof_marker=True)
+                self.model, self.values, 1, pilot_tones=pilot_tones)
             capture = resample_poly(packet, 2, 1, axis=0).astype(np.float32)
             starts = acquire_packet_starts(capture, limit=1)
             self.assertEqual(len(starts), 1)
@@ -245,8 +244,7 @@ class ToneCodeTests(unittest.TestCase):
                     for index in range(12):
                         counter = index+1
                         packet = v7.encode_pulse_frame(
-                            self.model, folded, counter, source_index=index,
-                            eof_marker=True)
+                            self.model, folded, counter, source_index=index)
                         if coded:
                             packet = add_tone_code(
                                 packet, counter, encode_status(mode))
@@ -257,7 +255,7 @@ class ToneCodeTests(unittest.TestCase):
                     try:
                         received, _ = v7.decode_pulse_stream(
                             self.model, capture, sample_rate=RATE,
-                            pilot_timing='baseline', frame_boundary='eof')
+                            pilot_timing='baseline')
                     finally:
                         fold.uninstall()
                     scores, noises = [], []

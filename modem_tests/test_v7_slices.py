@@ -61,8 +61,7 @@ class _Receiver:
                 results = v7.decode_pulse_stream(
                     self.base, np.asarray(mono, np.float32).reshape(-1, 1),
                     state=v7.PulseState(tail_memory=False),
-                    sample_rate=v7.RATE, pilot_timing='tone-seeded',
-                    frame_boundary='eof')[0]
+                    sample_rate=v7.RATE, pilot_timing='tone-seeded')[0]
         finally:
             profile.uninstall()
         return [(result, profile.slice_half(self.base, result, channel))

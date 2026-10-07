@@ -119,11 +119,14 @@ class V7PulseWarpTests(unittest.TestCase):
             self.model, capture, sample_rate=96_000,
             pulse_timing='pulse-warp')
 
-        self.assertGreater(len(decoded), 0)
+        # With the packet's end pinned by its end marker the warp is
+        # anchored at both ends, so a static filter no longer forces the
+        # fall-back to the packet average; every packet still decodes.
+        self.assertEqual(len(decoded), 8)
         self.assertTrue(all(
-            result.diag['pulse_timing']['mode_applied'] == 'baseline' and
-            result.diag['pulse_timing']['reason'] ==
-            'local_scale_interval_mismatch'
+            result.status == 'received' and
+            result.diag['pulse_timing']['mode_applied'] in
+            ('pulse-warp', 'baseline')
             for result in decoded))
 
 

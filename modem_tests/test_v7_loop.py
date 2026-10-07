@@ -147,9 +147,9 @@ class V7LoopStreamTests(unittest.TestCase):
 
     def test_every_packet_is_accepted_and_the_loop_is_learned(self):
         results, _ = v7.decode_pulse_stream(self.model, self._stream(16))
-        self.assertEqual([r.diag['source_index'] for r in results], list(range(100, 115)))
+        self.assertEqual([r.diag['source_index'] for r in results], list(range(100, 116)))
         self.assertEqual([r.diag['tail_slice'] for r in results],
-                         [c % v7.TAIL_PHASES for c in range(1, 16)])
+                         [c % v7.TAIL_PHASES for c in range(1, 17)])
         self.assertTrue(all(r.status == 'received' for r in results))
         self.assertEqual(results[-1].diag['loop'], self.loop)
         # After the lock nothing is provisional any more.

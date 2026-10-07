@@ -57,7 +57,7 @@ def _encode(model, values, fold, slots, variant, packets, aspect_code):
         packet = v7.encode_pulse_frame(
             model, transmit_values, counter, aspect_code=aspect_code,
             source_index=index,
-            pilot_tones=(variant in STEADY_VARIANTS), eof_marker=True)
+            pilot_tones=(variant in STEADY_VARIANTS))
         if variant == 'coded':
             packet = add_tone_code(packet, counter, encode_status(mode))
         wire.append(packet)
@@ -68,14 +68,12 @@ def _receive(capture_fold, model, capture, pilot_timing):
     with coded_pilot_timing():
         if capture_fold is None:
             results, info = v7.decode_pulse_stream(
-                model, capture, sample_rate=RATE, pilot_timing=pilot_timing,
-                frame_boundary='eof')
+                model, capture, sample_rate=RATE, pilot_timing=pilot_timing)
         else:
             capture_fold.install()
             try:
                 results, info = v7.decode_pulse_stream(
-                    model, capture, sample_rate=RATE, pilot_timing=pilot_timing,
-                    frame_boundary='eof')
+                    model, capture, sample_rate=RATE, pilot_timing=pilot_timing)
             finally:
                 capture_fold.uninstall()
     return results, info

@@ -87,7 +87,7 @@ def _packet_series():
               for image in sources]
     packets = [v7.encode_pulse_frame(
         model, values[index % 2], counter=counter, aspect_code=6,
-        source_index=index, pilot_tones=True, eof_marker=True)
+        source_index=index, pilot_tones=True)
         for index, counter in enumerate(PACKET_COUNTERS)]
     return model, np.concatenate(packets).astype(np.float32)
 

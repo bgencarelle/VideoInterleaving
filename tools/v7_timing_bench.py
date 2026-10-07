@@ -206,7 +206,7 @@ def encode(packets=PACKETS):
     model, coeffs = wire.encode_coefficients(base, values, 3)
     audio = np.concatenate([tone_code.add_tone_code(v7.encode_pulse_frame_coeffs(
         model, coeffs, counter, aspect_code=3, source_index=counter-1,
-        pilot_tones=False, eof_marker=True,
+        pilot_tones=False,
         pulse_profile_code=wire.pulse_profile_code),
         counter, tone_code.encode_status(wire.status_mode))
         for counter in range(1, packets+1)])
@@ -271,7 +271,7 @@ def decode_stream(wire, model, audio, reference):
         results, _ = v7.decode_pulse_stream(
             model, audio, models={model.encoding_type: model},
             state=v7.PulseState(tail_memory=False), sample_rate=RATE,
-            pilot_timing='tone-seeded', frame_boundary='eof')
+            pilot_timing='tone-seeded')
     return _score(wire, model, results, reference)
 
 
@@ -290,8 +290,7 @@ def decode_live(wire, model, audio, reference):
             results, _ = v7.decode_pulse_stream(
                 model, chunk, latest_only=True,
                 models={model.encoding_type: model}, state=state,
-                sample_rate=RATE, pilot_timing='tone-seeded',
-                frame_boundary='eof')
+                sample_rate=RATE, pilot_timing='tone-seeded')
             for result in results:
                 key = result.diag.get('source_index')
                 if result.status != 'lost' and key is not None:
@@ -306,7 +305,7 @@ def run(use_ffmpeg=False, packets=PACKETS, paths=('stream', 'live')):
         results, _ = v7.decode_pulse_stream(
             model, audio, models={model.encoding_type: model},
             state=v7.PulseState(tail_memory=False), sample_rate=RATE,
-            pilot_timing='tone-seeded', frame_boundary='eof')
+            pilot_timing='tone-seeded')
     reference = wire.values(model, results[-1])
     rows = []
     for label, channel in conditions(use_ffmpeg):

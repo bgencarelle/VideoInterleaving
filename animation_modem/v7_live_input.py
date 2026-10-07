@@ -11,19 +11,21 @@ are multiplied by capture_rate / 48 kHz, preserving the same playback-speed
 range on every device. Frame-sized lengths below use the raw captured-sample
 scale. Only incoming_fps() needs the real rate to convert samples to seconds.
 
-Buffer policy.  A latest-only pulse decode needs one complete frame plus the
-next frame's header (the commit boundary), so two frames of audio at the
-current playback speed plus a small guard always suffice.  Display latency is
-set by that header wait, not by how much history is kept, so keeping more only
-costs CPU.  While unlocked (start-up, after repeated failures) the frame length
-is unknown, so the buffer allows the slowest accepted speed instead.
+Buffer policy.  A packet is decoded when its own end marker is in, so one
+complete packet is all a decode needs; two frames of audio at the current
+playback speed plus a small guard always hold it.  Display latency is set by
+the packet's own length, not by how much history is kept, so keeping more
+only costs CPU.  While unlocked (start-up, after repeated failures) the frame
+length is unknown, so the buffer allows the slowest accepted speed instead.
 """
 from collections import deque
 
 import numpy as np
 
 from animation_modem import transport3 as PULSE
-from animation_modem.v7 import (META_SYMBOL, PULSE_FRAME, RATE, _mono_gain,
+from animation_modem.v7 import (EOF_MARKER_LENGTH, EOF_MARKER_OFFSET,
+                                EOF_SEARCH_FRACTION, META_SYMBOL, PULSE_FRAME,
+                                RATE, _measure_eof_marker, _mono_gain,
                                 leg_polarity, pulse_frame_profile_hits,
                                 pulse_sample_scale_bounds)
 
@@ -34,6 +36,17 @@ RATE_STALE_S = 1.0          # a rate with no event this long reads 0
 # A header is found only if SYNC_LEN + META_SYMBOL + 32 samples follow its
 # scan point; successive incoming scans overlap by a little more than that.
 _HEADER_OVERLAP = PULSE.SYNC_LEN + META_SYMBOL + 64
+# A forward packet is complete when its end marker is in.  The marker starts
+# EOF_MARKER_OFFSET after the header and the decoder looks for it within
+# _EOF_RADIUS either side of that, all in units of the packet's own scale.
+_EOF_RADIUS = max(12.0, EOF_SEARCH_FRACTION*PULSE_FRAME)
+# The audio by which a marker anywhere in that search must have arrived: a
+# packet with no marker found by then is handed over all the same.
+_PACKET_DEADLINE = EOF_MARKER_OFFSET + EOF_MARKER_LENGTH + _EOF_RADIUS + 1.0
+# Samples (at the packet's scale) kept before a decoded packet's end: the
+# next packet starts there, and its header is re-measured from 8 samples
+# ahead of that.
+_FLUSH_LEAD = 16.0
 # Input leveler. The pulse detector's edge hysteresis and the EOF marker floor
 # are absolute levels that assume a preamble near PREAMBLE_AMPLITUDE, so the
 # input must be levelled *before* headers are searched: scanning the raw
@@ -139,9 +152,11 @@ class DirectionStreak:
 
 class LiveInput:
     """Rolling live input.  Feed blocks with add(); take() returns audio to
-    decode exactly when a new frame header has arrived (a new frame is then
-    complete), so decode cycles follow the wire rather than the capture block
-    size; call decoded() after each decode."""
+    decode exactly when a packet is complete: its header and its end marker
+    are both in.  Nothing after the end marker is waited for, so the last
+    packet of an input is decoded like any other and decode cycles follow
+    the wire rather than the capture block size; call decoded() after each
+    decode."""
 
     def __init__(self, decode_history=1, decode_batch=1, rate=RATE,
                  direction='auto'):
@@ -161,7 +176,12 @@ class LiveInput:
         self._blocks = []
         self._judged_to = 0        # absolute sample up to which polarity was judged
         self._scan_from = 0        # absolute sample where the next header scan starts
-        self._pending = 0          # headers arrived since the last take()
+        self._pending = 0          # packets completed since the last take()
+        # Forward headers whose packets are not complete yet: (start, scale).
+        self._awaiting = deque()
+        # Absolute sample where the newest packet handed over ended (its end
+        # marker was found): once it is decoded, nothing before this is kept.
+        self._flush_to = None
         # Absolute frame start, measured scale, pulse confidence and playback
         # direction. The live
         # decoder consumes these anchors so it need not scan this same window
@@ -194,6 +214,8 @@ class LiveInput:
         self._blocks.clear()
         self._judged_to = self._scan_from = self.total
         self._pending = 0
+        self._awaiting.clear()
+        self._flush_to = None
         self.scale = None
         self._headers.clear()
         self._profile_headers.clear()
@@ -207,7 +229,7 @@ class LiveInput:
         self.total += len(block)
 
     def take(self, now):
-        """Audio to decode now, or None until a new header has arrived.
+        """Audio to decode now, or None until a packet is complete.
 
         Every call judges polarity on the newest audio, scans only the audio
         not scanned yet for headers, and trims the buffer to two frames plus
@@ -220,6 +242,7 @@ class LiveInput:
         self._judge_polarity(audio)
         self._update_level(audio)
         self._pending += self._count_headers(audio, now)
+        self._pending += self._count_complete(audio)
         if (self._headers and
                 self.total - self._headers[-1][0] >
                 2*self._scaled(PULSE_FRAME)):
@@ -234,12 +257,22 @@ class LiveInput:
         return audio
 
     def decoded(self):
-        """After a decode keep one frame plus the guard: it holds the header
-        that starts the next frame."""
+        """After a decode drop the packet that was decoded: a packet is its
+        header to its end marker, and nothing of it is needed for the next
+        one.  What is kept starts where that packet ended (less the few
+        samples the next header's first edge is measured from).  When no
+        end marker was found, or the packet was reversed, keep one frame
+        plus the guard as before."""
         if not self._blocks:
             return
-        keep = int(self.span()*(self.decode_history + GUARD_FRAMES))
         audio = self._blocks[-1] if len(self._blocks) == 1 else np.concatenate(self._blocks)
+        if self._flush_to is not None:
+            lead = _FLUSH_LEAD*(self.scale if self.scale else 1.0)
+            cut = int(self._flush_to-lead-(self.total-len(audio)))
+            self._flush_to = None
+            self._blocks = [audio[max(cut, 0):]]
+            return
+        keep = int(self.span()*(self.decode_history + GUARD_FRAMES))
         self._blocks = [audio[-keep:]] if len(audio) > keep else [audio]
 
     def pulse_hits(self, audio):
@@ -345,9 +378,54 @@ class LiveInput:
             self._profile_headers.append((position, profile_code))
             self._header_walls.append(now)
             self.scale = float(scale)
-            found += 1
+            if direction > 0:
+                # A forward header starts a packet: it is decoded when its
+                # end marker has arrived (_count_complete).
+                self._awaiting.append((float(position), float(scale)))
+            else:
+                # A reversed header arrives last: its packet is complete.
+                found += 1
         self._scan_from = max(self._scan_from, int(self.total - overlap))
         return found
+
+    def _count_complete(self, audio):
+        """Forward packets whose end marker has arrived since the last call.
+
+        A packet is complete when its own end marker is found in the audio,
+        looked for where the decoder will look, at the packet's own scale;
+        nothing after the marker is waited for, at any playback speed.  A
+        packet whose marker has not appeared by the far edge of that search
+        (a dropout took it), or whose successor's header has arrived first
+        (a splice cut it short), is handed over all the same: the decoder
+        has its own ways to end such a packet."""
+        ready = 0
+        origin = self.total-len(audio)
+        while self._awaiting:
+            start, scale = self._awaiting[0]
+            found = self._marker_in(audio, start-origin, scale)
+            if (not found and len(self._awaiting) == 1 and
+                    self.total < start+_PACKET_DEADLINE*scale):
+                break
+            self._awaiting.popleft()
+            # Only a packet whose own marker was found has a known end.
+            self._flush_to = start+PULSE_FRAME*scale if found else None
+            ready += 1
+        return ready
+
+    def _marker_in(self, audio, start, scale):
+        """Whether the end marker of the packet at `start` in `audio` is in."""
+        first = start+(EOF_MARKER_OFFSET-_EOF_RADIUS)*scale
+        # Too early to hold a marker, or the packet's own last samples (by
+        # its header's scale) are not all in yet: the marker's final run
+        # is counted from its last edge, a few samples before the packet
+        # ends, and everything that reads the packet wants the whole of it.
+        if (len(audio) < first+EOF_MARKER_LENGTH*scale or
+                len(audio)+1.0 < start+PULSE_FRAME*scale):
+            return False
+        # Only the stretch the search covers is levelled and examined.
+        cut = max(0, int(first)-8)
+        window = _mono_gain(audio[cut:], np.float32(self.gain))
+        return _measure_eof_marker(window, start-cut, scale) is not None
 
     def incoming_fps(self, now):
         """Readable frames per second arriving on the input.

@@ -16,8 +16,7 @@ class LevelIndependenceTests(unittest.TestCase):
         coeffs = cls.model.mu+rng.standard_normal(len(cls.model.mu)) * \
             np.sqrt(cls.model.lam)
         values = v7.values_from(cls.model, coeffs)
-        packets = [v7.encode_pulse_frame(cls.model, values, counter,
-                                         eof_marker=True)
+        packets = [v7.encode_pulse_frame(cls.model, values, counter)
                    for counter in range(1, 7)]
         audio = np.concatenate(packets).astype(np.float64)
         rng = np.random.default_rng(11)
@@ -27,7 +26,7 @@ class LevelIndependenceTests(unittest.TestCase):
     def _decode(self, gain):
         results, _ = v7.decode_pulse_stream(
             self.model, (self.audio*gain).astype(np.float32),
-            state=v7.PulseState(), sample_rate=48000, frame_boundary='eof')
+            state=v7.PulseState(), sample_rate=48000)
         return [(result.status, max(result.diag['noise']))
                 for result in results]
 

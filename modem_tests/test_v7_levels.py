@@ -26,7 +26,7 @@ class EmittedLevelTests(unittest.TestCase):
             v7.encode_pulse_frame_coeffs(
                 cls.model, cls.model.mu+scale*deviation *
                 rng.standard_normal(len(deviation)), counter,
-                pilot_tones=True, eof_marker=True)
+                pilot_tones=True)
             for counter, scale in enumerate((.3, 1.0, 2.0, 4.0), 1)]
 
     def test_header_is_at_one_level_near_full_scale(self):
@@ -50,17 +50,23 @@ class EmittedLevelTests(unittest.TestCase):
             coefficients = self.model.mu+scale*np.sqrt(self.model.lam) * \
                 rng.standard_normal(len(self.model.mu))
             packet = v7.encode_pulse_frame_coeffs(self.model, coefficients, 1)
-            return float(np.max(np.abs(packet[BODY])))
-        # A quiet picture's body goes out as coded, under the ceiling; loud
-        # ones are held at it however loud they are.
-        self.assertLess(body_peak(.3), .8*v7.BODY_PEAK)
-        self.assertAlmostEqual(body_peak(4.0), v7.BODY_PEAK, delta=.01)
-        self.assertAlmostEqual(body_peak(8.0), v7.BODY_PEAK, delta=.01)
+            framing = min(float(np.max(np.abs(packet[:v7.PULSE.SYNC_LEN]))),
+                          float(np.max(np.abs(packet[v7.EOF_MARKER_OFFSET:]))))
+            return (float(np.max(np.abs(packet[BODY]))),
+                    framing*10**(-v7.BODY_BELOW_EOF_DB/20))
+        # A quiet picture's body goes out as coded, under the ceiling the
+        # packet's own header and end marker set; loud ones are held at it
+        # however loud they are.
+        quiet, ceiling = body_peak(.3)
+        self.assertLess(quiet, .8*ceiling)
+        for scale in (4.0, 8.0):
+            peak, ceiling = body_peak(scale)
+            self.assertAlmostEqual(peak, ceiling, delta=.01)
 
     def test_end_marker_is_at_the_header_pulse_level(self):
         level = v7.emitted_pulse_level()
         quiet = v7.encode_pulse_frame_coeffs(
-            self.model, self.model.mu, 1, eof_marker=True)
+            self.model, self.model.mu, 1)
         marker = quiet[-v7.EOF_MARKER_LENGTH:, 0]
         np.testing.assert_allclose(np.abs(marker), level, rtol=.02)
 
@@ -92,7 +98,6 @@ class EmittedLevelTests(unittest.TestCase):
                               rng.standard_normal(len(self.model.mu)))
                     packet = v7.encode_pulse_frame_coeffs(
                         self.model, coeffs, counter, source_index=counter-1,
-                        eof_marker=True,
                         extra_tone_mixer=lambda audio: add_fold500_coded_pilot(
                             audio, counter),
                         pulse_profile_code=profile)

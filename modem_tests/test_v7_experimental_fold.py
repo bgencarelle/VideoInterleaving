@@ -144,7 +144,7 @@ class ExperimentalFoldTests(unittest.TestCase):
     def test_default_sender_overlay_codes_fold_mode_per_packet(self):
         packets = [v7.encode_pulse_frame(
             self.model, self.folded, counter, source_index=counter-1,
-            pilot_tones=False, eof_marker=True)
+            pilot_tones=False)
             for counter in (17, 18)]
         wire = v7_live._add_coded_pilots(
             np.concatenate(packets), start_counter=17, fold_slots=500)
@@ -162,11 +162,10 @@ class ExperimentalFoldTests(unittest.TestCase):
             with self.subTest(counter=counter):
                 direct = v7_live._encode_pulse_frame_coeffs(
                     self.model, coeffs, counter, aspect_code=6,
-                    source_index=counter+10, eof_marker=True)
+                    source_index=counter+10)
                 reference = v7.encode_pulse_frame(
                     self.model, folded_values, counter, aspect_code=6,
-                    source_index=counter+10, pilot_tones=False,
-                    eof_marker=True)
+                    source_index=counter+10, pilot_tones=False)
                 np.testing.assert_array_equal(direct, reference)
                 if counter == 1:
                     coded_direct = v7_live._add_coded_pilots(
@@ -225,7 +224,7 @@ class ExperimentalFoldTests(unittest.TestCase):
             with coded_pilot_timing():
                 results, _ = v7.decode_pulse_stream(
                     self.model, audio, sample_rate=v7.RATE,
-                    pilot_timing='tone-seeded', frame_boundary='eof')
+                    pilot_timing='tone-seeded')
         finally:
             self.fold.uninstall()
 
@@ -256,7 +255,7 @@ class ExperimentalFoldTests(unittest.TestCase):
     def test_default_live_profile_decodes_status_and_unfolds(self):
         packets = [v7.encode_pulse_frame(
             self.model, self.folded, counter, source_index=counter-1,
-            pilot_tones=False, eof_marker=True)
+            pilot_tones=False)
             for counter in range(1, 6)]
         wire = v7_live._add_coded_pilots(
             np.concatenate(packets), start_counter=1, fold_slots=500)
@@ -265,7 +264,7 @@ class ExperimentalFoldTests(unittest.TestCase):
             with coded_pilot_timing():
                 results, _ = v7.decode_pulse_stream(
                     self.model, wire, sample_rate=v7.RATE,
-                    pilot_timing='tone-seeded', frame_boundary='eof')
+                    pilot_timing='tone-seeded')
         finally:
             self.fold.uninstall()
         self.assertTrue(results)

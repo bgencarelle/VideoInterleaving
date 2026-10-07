@@ -494,8 +494,7 @@ def main(argv=None):
     print(f'wire profile: {profile.label}', flush=True)
     audio48 = profile.encode(
         model, [values]*args.frames, 1, [0]*args.frames,
-        source_indices=list(range(args.frames)),
-        eof_marker=args.direction == 'reverse')
+        source_indices=list(range(args.frames)))
     wire96 = _playback_wire(audio48, args.speed, args.direction)
     if args.direction == 'reverse':
         wire96 = wire96[::-1].copy()

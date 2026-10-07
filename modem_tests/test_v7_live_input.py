@@ -26,11 +26,9 @@ class V7LiveInputTests(unittest.TestCase):
                                           source_indices=list(range(FRAMES)))
         cls.eof_wire = v7.encode_pulse_stream(
             cls.model, [values]*FRAMES, 1, [6]*FRAMES,
-            source_indices=list(range(FRAMES)), pilot_tones=True,
-            eof_marker=True)
+            source_indices=list(range(FRAMES)), pilot_tones=True)
 
-    def _run(self, audio, rate=v7.RATE, *, frame_boundary='baseline',
-             pilot_timing='baseline'):
+    def _run(self, audio, rate=v7.RATE, *, pilot_timing='baseline'):
         live = LiveInput(rate=rate)
         state = v7.PulseState()          # as the live receiver keeps it
         taken, indices = [], []
@@ -47,7 +45,6 @@ class V7LiveInputTests(unittest.TestCase):
                                                 state=state,
                                                 pulse_starts=pulse_starts,
                                                 sample_rate=rate,
-                                                frame_boundary=frame_boundary,
                                                 pilot_timing=pilot_timing)
             live.decoded()
             indices += [r.diag.get('source_index') for r in results]
@@ -55,9 +52,9 @@ class V7LiveInputTests(unittest.TestCase):
 
     def test_one_decode_per_frame_and_every_frame_decoded(self):
         live, taken, indices, _ = self._run(self.wire)
-        # Every frame but the last (no following header) is decoded once.
-        self.assertEqual(sorted(i for i in indices if i is not None),
-                         list(range(FRAMES-1)))
+        # Every frame is decoded once, in order, the last included.
+        self.assertEqual([i for i in indices if i is not None],
+                         list(range(FRAMES)))
         self.assertLessEqual(len(taken), FRAMES)
         self.assertLessEqual(max(len(t) for t in taken), live.cap())
         self.assertLessEqual(live.cap(), 2.3*v7.PULSE_FRAME)   # locked at 1x
@@ -68,12 +65,12 @@ class V7LiveInputTests(unittest.TestCase):
         # the raw capture found nothing here at all.
         quiet = (self.eof_wire*10**(-30/20)).astype(np.float32)
         live, _, indices, _ = self._run(
-            quiet, frame_boundary='eof', pilot_timing='tone-seeded')
+            quiet, pilot_timing='tone-seeded')
         decoded = sorted(i for i in indices if i is not None)
         self.assertGreater(live.gain, 10)
         # A few frames go to the slow-rise ramp; every later one decodes.
         self.assertGreaterEqual(len(decoded), FRAMES-6)
-        self.assertEqual(decoded, list(range(decoded[0], FRAMES-1)))
+        self.assertEqual(decoded, list(range(decoded[0], FRAMES)))
 
     def test_leveler_rises_slowly_and_falls_at_once(self):
         live = LiveInput()
@@ -91,10 +88,11 @@ class V7LiveInputTests(unittest.TestCase):
         self.assertLess(live.gain, 1.0)                  # a gap keeps the level
 
     def test_live_latest_only_commits_completed_eof_packets_at_normal_speed(self):
+        # Every packet, the last included: none waits for a following header.
         _, _, indices, _ = self._run(
-            self.eof_wire, frame_boundary='eof', pilot_timing='tone-seeded')
-        self.assertEqual(sorted(i for i in indices if i is not None),
-                         list(range(FRAMES-1)))
+            self.eof_wire, pilot_timing='tone-seeded')
+        self.assertEqual([i for i in indices if i is not None],
+                         list(range(FRAMES)))
 
     def test_latest_only_still_scans_without_upstream_anchors(self):
         results, _ = v7.decode_pulse_stream(
@@ -152,8 +150,8 @@ class V7LiveInputTests(unittest.TestCase):
                 for i in range(0, len(self.wire), v7.PULSE_FRAME)])
             live, _, indices, seconds = self._run(device, rate=96000)
             with self.subTest(speed=speed):
-                self.assertEqual(sorted(i for i in indices if i is not None),
-                                 list(range(FRAMES-1)))
+                self.assertEqual([i for i in indices if i is not None],
+                                 list(range(FRAMES)))
                 self.assertAlmostEqual(live.incoming_fps(seconds), v7.PULSE_FPS*speed,
                                        delta=.03)
 
@@ -167,8 +165,8 @@ class V7LiveInputTests(unittest.TestCase):
                     self.model, audio, latest_only=True, sample_rate=rate)
                 with self.subTest(rate=rate, speed=speed):
                     self.assertEqual(
-                        sorted(i for i in indices if i is not None),
-                        list(range(4)))
+                        [i for i in indices if i is not None],
+                        list(range(5)))
                     self.assertAlmostEqual(
                         live.incoming_fps(seconds), v7.PULSE_FPS*speed,
                         delta=.03)
@@ -185,8 +183,8 @@ class V7LiveInputTests(unittest.TestCase):
                 for i in range(0, len(self.wire), v7.PULSE_FRAME)])
             _, _, indices, _ = self._run(device, rate=96000)
             with self.subTest(speed=speed):
-                self.assertEqual(sorted(i for i in indices if i is not None),
-                                 list(range(FRAMES-1)))
+                self.assertEqual([i for i in indices if i is not None],
+                                 list(range(FRAMES)))
 
     def test_inverted_leg_is_corrected_in_the_stored_audio(self):
         live, taken, indices, _ = self._run(self.wire*np.float32([1, -1]))

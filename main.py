@@ -413,9 +413,6 @@ def configure_runtime():
     parser.add_argument("--modem-pilot-tones",
                         action=argparse.BooleanOptionalAction, default=True,
                         help="V7 bin-1/bin-3 timing references (required for Fold 500)")
-    parser.add_argument("--modem-eof-marker",
-                        action=argparse.BooleanOptionalAction, default=True,
-                        help="V7 packet EOF marker (required for Fold 500)")
     parser.add_argument("--modem-encode-filter",
                         choices=("nearest", "box"),
                         default=None,
@@ -462,8 +459,6 @@ def configure_runtime():
             parser.error("stereo Fold 500 requires --modem-encode-filter box")
         if not args.modem_pilot_tones:
             parser.error("stereo Fold 500 requires coded pilot tones")
-        if not args.modem_eof_marker:
-            parser.error("stereo Fold 500 requires EOF markers")
         if args.modem_frames < 0:
             parser.error("Modem frame count must be nonnegative")
         if args.modem_cycles is not None and args.modem_cycles <= 0:

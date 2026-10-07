@@ -58,13 +58,11 @@ def run(source, out, rounds=120, warmups=10, seed=20260929):
     def resize_first():
         values = _source_values(model, image, 'box')
         return encode_values_packet(
-            model, values, 1, 0, aspect, loop=loop,
-            eof_marker=True, fold=fold)
+            model, values, 1, 0, aspect, loop=loop, fold=fold)
 
     def direct_grid_dct():
         return encode_image_dct_packet(
-            model, image, 1, 0, aspect, loop=loop,
-            eof_marker=True, fold=fold, encode_filter='box')
+            model, image, 1, 0, aspect, loop=loop, fold=fold, encode_filter='box')
 
     expected = resize_first()
     actual = direct_grid_dct()

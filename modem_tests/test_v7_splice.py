@@ -40,7 +40,7 @@ class SpliceTimingTests(unittest.TestCase):
                 cls.model, audio, latest_only=latest_only,
                 models={cls.model.encoding_type: cls.model},
                 state=v7.PulseState(tail_memory=False), sample_rate=v7.RATE,
-                pilot_timing='tone-seeded', frame_boundary='eof')
+                pilot_timing='tone-seeded')
         return results
 
     def _quality(self, result):
@@ -180,30 +180,32 @@ class TimingBenchTests(unittest.TestCase):
 
 
 class SpliceRecoveryTests(unittest.TestCase):
-    """Cut headers and live metadata, built on the same six-packet stream."""
+    """Cut headers and live metadata, built on the same six-packet stream.
+
+    A packet is its header to its end marker: one whose header is gone is
+    not a packet, and nothing after the previous end marker is taken for
+    one."""
 
     setUpClass = classmethod(SpliceTimingTests.setUpClass.__func__)
     _decode = classmethod(SpliceTimingTests._decode.__func__)
     _quality = SpliceTimingTests._quality
 
-    def test_a_cut_header_is_recovered_from_the_previous_packet_end(self):
+    def test_a_packet_with_a_cut_header_is_not_shown_and_the_rest_are(self):
         damaged = self.audio.copy()
         damaged[2*P+16:2*P+250] = 0          # the third packet's header
         results = self._decode(damaged)
-        self.assertEqual([result.status for result in results],
-                         ['received']*6)
-        self.assertTrue(results[2].diag.get('header_recovered'))
-        self.assertGreater(self._quality(results[2]), 50.0)
+        self.assertEqual([(result.status, result.diag['source_index'])
+                          for result in results],
+                         [('received', index) for index in (0, 1, 3, 4, 5)])
 
-    def test_live_window_recovers_a_cut_header(self):
+    def test_live_window_does_not_take_a_cut_header_for_a_packet(self):
         damaged = self.audio.copy()
         damaged[2*P+16:2*P+250] = 0
         window = damaged[int(.9*P):int(3.98*P)]
         results = self._decode(window, latest_only=True)
         self.assertEqual(len(results), 1)
         self.assertEqual(results[0].status, 'received')
-        self.assertTrue(results[0].diag.get('header_recovered'))
-        self.assertEqual(results[0].diag['source_index'], 2)
+        self.assertEqual(results[0].diag['source_index'], 1)
 
     def test_live_window_predicts_metadata_from_the_previous_packet(self):
         damaged = _repeat(self.audio, 2*P+BODY+v7.FRAME+60, 300)

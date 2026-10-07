@@ -154,7 +154,7 @@ def _decode_rows(profile, audio, model, source_frames, case_name):
         with wire.receiving():
             results, info = v7.decode_pulse_stream(
                 mono_model, audio[:, 0], sample_rate=RATE,
-                pilot_timing='tone-seeded', frame_boundary='eof',
+                pilot_timing='tone-seeded',
                 state=v7.PulseState(tail_memory=False))
         value_fn = lambda result: wire.values(mono_model, result)
     else:
@@ -164,7 +164,7 @@ def _decode_rows(profile, audio, model, source_frames, case_name):
         with wire.receiving():
             results, info = v7.decode_pulse_stream(
                 mono_model, audio[:, 0], sample_rate=RATE,
-                pilot_timing='tone-seeded', frame_boundary='eof',
+                pilot_timing='tone-seeded',
                 state=v7.PulseState(tail_memory=False))
         value_fn = lambda result: wire.values(mono_model, result)
 

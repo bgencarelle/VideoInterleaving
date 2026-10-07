@@ -297,7 +297,7 @@ class ColorWire:
         model, coefficients = self.wire.encode_coefficients(self.base, values, self.aspect)
         packet = v7_live._encode_pulse_frame_coeffs(
             model, coefficients, counter, aspect_code=self.aspect,
-            source_index=source_index, eof_marker=True,
+            source_index=source_index,
             pulse_profile_code=self.wire.pulse_profile_code)
         return v7_live._add_coded_pilots(packet, counter, 500, mode=self.wire.status_mode)
 
@@ -328,7 +328,7 @@ class ColorWire:
             results, info = v7.decode_pulse_stream(
                 self.base, audio, models={self.base.encoding_type: self.base},
                 state=receiver.state, sample_rate=rate,
-                pilot_timing='tone-seeded', frame_boundary='eof')
+                pilot_timing='tone-seeded')
             pictures = []
             for result in results:
                 if result.status != 'lost' and result.diag.get('displayable', True):

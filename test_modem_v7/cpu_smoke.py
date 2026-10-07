@@ -89,7 +89,7 @@ def run(args):
             base_model, image, 'nearest', 1.05, 1.0)
         packet = v7.encode_pulse_frame(
             base_model, values, counter+1, aspect_code=aspect,
-            source_index=counter, pilot_tones=True, eof_marker=True)
+            source_index=counter, pilot_tones=True)
         return v7.speed_pulse_stream(packet, 1.0, rate=v7.RATE)
 
     def encode_feature(counter):
@@ -98,7 +98,7 @@ def run(args):
         coeffs = fold.encode_coefficients(feature_model, values)
         packet = v7_live._encode_pulse_frame_coeffs(
             feature_model, coeffs, counter+1, aspect_code=aspect,
-            source_index=counter, eof_marker=True)
+            source_index=counter)
         packet = v7_live._add_coded_pilots(packet, counter+1, fold.slots)
         return v7.speed_pulse_stream(packet, 1.0, rate=v7.RATE)
 
@@ -112,7 +112,7 @@ def run(args):
         def decode(_iteration):
             results, _ = v7.decode_pulse_stream(
                 base_model, base_wire, sample_rate=v7.RATE,
-                pilot_timing='tone-seeded', frame_boundary='eof')
+                pilot_timing='tone-seeded')
             if reconstruct:
                 for result in results:
                     if (result.status in ('received', 'verified') or
@@ -128,7 +128,7 @@ def run(args):
                 with coded_pilot_timing():
                     results, _ = v7.decode_pulse_stream(
                         feature_model, feature_wire, sample_rate=v7.RATE,
-                        pilot_timing='tone-seeded', frame_boundary='eof')
+                        pilot_timing='tone-seeded')
                 if reconstruct:
                     for result in results:
                         if (result.status in ('received', 'verified') or

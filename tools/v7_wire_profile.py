@@ -29,7 +29,7 @@ from tools import v7_live
 PROFILES = ('default', 'baseline')
 FOLD_SLOTS = 500
 # What tools/v7_live.py's receiver uses for the default profile.
-DEFAULT_DECODE = {'pilot_timing': 'tone-seeded', 'frame_boundary': 'eof'}
+DEFAULT_DECODE = {'pilot_timing': 'tone-seeded'}
 
 
 class WireProfile:
@@ -66,19 +66,17 @@ class WireProfile:
 
     # ------------------------------------------------------------ encode
     def encode(self, model, values, start_counter=1, aspect_codes=None,
-               source_indices=None, eof_marker=False, loop=None,
+               source_indices=None, loop=None,
                directions=None):
         """48 kHz stereo packets for ``values`` (one vector per packet).
 
-        The default profile always carries the EOF marker. ``eof_marker``
-        only adds it to the baseline wire (reverse playback needs it).
+        Every packet ends with the EOF marker.
         """
         values = list(values)
         if self.name == 'baseline':
             return v7.encode_pulse_stream(model, values, start_counter,
                                           aspect_codes, source_indices, loop,
-                                          directions,
-                                          eof_marker=bool(eof_marker))
+                                          directions)
         self.check(model)
         codes = list(aspect_codes) if aspect_codes is not None else [0]*len(values)
         indexes = (list(source_indices) if source_indices is not None else
@@ -95,8 +93,7 @@ class WireProfile:
             return np.concatenate([
                 encode_values_packet(
                     model, value, start_counter+offset, indexes[offset],
-                    codes[offset], loop=loop, direction=ways[offset],
-                    eof_marker=True, fold=self._production_fold)
+                    codes[offset], loop=loop, direction=ways[offset], fold=self._production_fold)
                 for offset, value in enumerate(values)])
 
         packets = []
@@ -105,7 +102,7 @@ class WireProfile:
             counter = start_counter+offset
             packet = v7.encode_pulse_frame(
                 model, value, counter, aspect_code=code, source_index=index,
-                loop=loop, direction=way, pilot_tones=False, eof_marker=True,
+                loop=loop, direction=way, pilot_tones=False,
                 pulse_profile_code=self._status_mode)
             packets.append(self._tone.add_tone_code(
                 packet, counter, self._status))

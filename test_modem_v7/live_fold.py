@@ -254,7 +254,7 @@ def selftest(args):
         values = [fold.encode(sender, v) if fold else v for v in base_values]
         audio = v7.encode_pulse_stream(sender, [values[i] for i in order], 1,
                                        [0]*packets, source_indices=order,
-                                       pilot_tones=True, eof_marker=True)
+                                       pilot_tones=True)
         audio = impairments[case](resample_poly(audio, 2, 1, axis=0).astype(np.float32))
         live = LiveInput(rate=RATE)
         state = v7.PulseState()
@@ -267,7 +267,7 @@ def selftest(args):
             results, _ = v7.decode_pulse_stream(
                 bootstrap, chunk, latest_only=True, input_gain=live.gain, models=models,
                 model_factory=factory, state=state, pulse_starts=live.pulse_starts(chunk),
-                sample_rate=RATE, pilot_timing='tone-seeded', frame_boundary='eof')
+                sample_rate=RATE, pilot_timing='tone-seeded')
             live.decoded()
             for r in results[-1:]:
                 decoded += 1

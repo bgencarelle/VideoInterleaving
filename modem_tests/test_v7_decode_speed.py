@@ -410,8 +410,7 @@ class V7DecodeSpeedTests(unittest.TestCase):
         from animation_modem import transport3
         model = v7.load_model(TARGET, 'nearest')
         values = np.zeros(model.coder.source_count)
-        wire = v7.encode_pulse_stream(model, [values]*3, pilot_tones=True,
-                                      eof_marker=True)
+        wire = v7.encode_pulse_stream(model, [values]*3, pilot_tones=True)
         rng = np.random.default_rng(4)
         signals = {
             'wire': v7._mono(wire),

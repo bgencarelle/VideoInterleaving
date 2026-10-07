@@ -1038,7 +1038,7 @@ def max_wire_speed(rate):
 
 def encode_pulse_frame(model, values, counter, aspect_code=0, source_index=None,
                        loop=None, direction=1, pilot_tones=False,
-                       pilot_tone_gate_preamble=False, eof_marker=False,
+                       pilot_tone_gate_preamble=False,
                        pulse_profile_code=1, extra_tone_mixer=None):
     """One edge-counted pulse-framed V7 body for low-latency live transport.
 
@@ -1053,7 +1053,7 @@ def encode_pulse_frame(model, values, counter, aspect_code=0, source_index=None,
         source_index=source_index, loop=loop, direction=direction,
         pilot_tones=pilot_tones,
         pilot_tone_gate_preamble=pilot_tone_gate_preamble,
-        eof_marker=eof_marker, pulse_profile_code=pulse_profile_code,
+        pulse_profile_code=pulse_profile_code,
         extra_tone_mixer=extra_tone_mixer)
 
 
@@ -1114,7 +1114,7 @@ def encode_pulse_frame_coeffs(model, coeffs, counter, aspect_code=0,
                               source_index=None, loop=None, direction=1,
                               pilot_tones=False,
                               pilot_tone_gate_preamble=False,
-                              eof_marker=False, pilot_values=None,
+                              pilot_values=None,
                               pulse_profile_code=1, right_coeffs=None,
                               extra_tone_mixer=None):
     """Pulse-frame transformed source coefficients without another DCT pass.
@@ -1141,9 +1141,8 @@ def encode_pulse_frame_coeffs(model, coeffs, counter, aspect_code=0,
     # Shape the ordinary pulse/body packet first. The metadata symbol has its
     # own cyclic prefix and is inserted afterward so the long packet shaper
     # cannot smear the preceding image symbol across its pilots/data. The
-    # header level is fixed per profile. EOF packets get a final-mix limiter
-    # below, after marker and timing-tone contributions are present; the
-    # no-EOF path retains the historical body/header pre-limit.
+    # header level is fixed per profile. The packet gets a final-mix limiter
+    # below, after marker and timing-tone contributions are present.
     shaped = shape_emission(out, EMISSION_EDGE_HZ, RATE)
     peak = float(np.max(np.abs(shaped)))
     if peak > BODY_PEAK:
@@ -1152,18 +1151,6 @@ def encode_pulse_frame_coeffs(model, coeffs, counter, aspect_code=0,
         # Per-packet auto-level (see body_auto_level).
         shaped *= np.float32(min(BODY_PEAK/peak, 10**(BODY_AUTO_LEVEL_MAX_DB/20)))
     header, pulse_level = _shaped_preamble(int(pulse_profile_code))
-    if not eof_marker:
-        # Preserve the historical no-EOF wire. Production live packets carry
-        # EOF and use the final-mix level budget below.
-        shaped += header
-        shaped[meta_start:meta_start+META_SYMBOL, :] += meta_pcm[:, None]
-        if pilot_tones:
-            shaped = _add_pilot_tones(shaped, counter,
-                                      gate_preamble=pilot_tone_gate_preamble)
-        if extra_tone_mixer is not None:
-            shaped = np.asarray(extra_tone_mixer(shaped), dtype=np.float32)
-        return shaped
-
     marker = np.concatenate([
         np.full(run, level, np.float32)
         for run, level in zip(EOF_MARKER_RUNS, EOF_MARKER_LEVELS)
@@ -1247,7 +1234,7 @@ def encode_pulse_frame_coeffs(model, coeffs, counter, aspect_code=0,
 def encode_pulse_stream(model, values, start_counter=1, aspect_codes=None,
                         source_indices=None, loop=None, directions=None,
                         pilot_tones=False, pilot_tone_gate_preamble=False,
-                        eof_marker=False, pulse_profile_code=1):
+                        pulse_profile_code=1):
     values = list(values) if np.asarray(values).ndim != 1 else [values]
     codes = aspect_codes or [0]*len(values)
     indexes = (list(source_indices) if source_indices is not None else
@@ -1258,7 +1245,7 @@ def encode_pulse_stream(model, values, start_counter=1, aspect_codes=None,
     return np.concatenate([
         encode_pulse_frame(model, value, start_counter+i, code, source_index,
                             loop, way, pilot_tones,
-                            pilot_tone_gate_preamble, eof_marker,
+                            pilot_tone_gate_preamble,
                             pulse_profile_code)
         for i, (value, code, source_index, way) in
         enumerate(zip(values, codes, indexes, ways))])
@@ -3235,16 +3222,16 @@ def warmup_equalizer(model):
     # 1x and slowed (the slow path refines pulse edges with 16-tap reads).
     values = np.zeros(model.coder.source_count)
     wire = encode_pulse_stream(model, [values]*3, pilot_tones=True,
-                               eof_marker=True).astype(np.float32)
+                               ).astype(np.float32)
     # Reverse packets stay as negative-stride views at unity gain. Compile
     # that sample-reader layout here so first live reverse playback cannot
     # stall the capture callback for JIT work.
     _sample_at(wire[::-1], np.asarray([PULSE.SYNC_LEN+16.5]), taps=4)
     for stream in (wire, speed_pulse_stream(wire, .8).astype(np.float32)):
-        decode_pulse_stream(model, stream, frame_boundary='eof',
+        decode_pulse_stream(model, stream, 
                             pilot_timing='tone-seeded')
         decode_pulse_stream(model, stream, latest_only=True,
-                            frame_boundary='eof', pilot_timing='tone-seeded')
+                            pilot_timing='tone-seeded')
 
 
 warmup_decoder = warmup_equalizer
@@ -3630,7 +3617,7 @@ def decode_pulse_stream(model, x, diagnostics=None, latest_only=False,
                         force_float32=False, state=None, pulse_starts=None,
                         sample_rate=RATE, pilot_timing='baseline',
                         pilot_speed_diagnostics=False,
-                        pulse_timing='baseline', frame_boundary='baseline',
+                        pulse_timing='baseline',
                         tone_equalization='off'):
     """Decode V7 bodies located by the existing pulse-counted acquisition.
 
@@ -3653,12 +3640,9 @@ def decode_pulse_stream(model, x, diagnostics=None, latest_only=False,
     against it while sample positions remain in the input's native coordinates.
     ``pilot_timing`` selects the optional low-bin timing reference:
     ``baseline`` (default), ``tone-seeded``, ``tone-joint``, or
-    ``tone-replaced``. ``frame_boundary='eof'`` selects EOF packet boundaries;
-    the default waits for the next header for legacy streams.
+    ``tone-replaced``. A packet runs from its header to its EOF marker.
     ``pulse_timing='pulse-warp'`` optionally uses the neighboring pulse fits
     as local-slope anchors for a monotone, within-packet Hermite sample map.
-    ``frame_boundary='eof'`` requires and uses the packet's final 32-sample
-    marker instead of waiting for the next header.
     ``tone_equalization='m-reference'`` uses the known low-bin tone magnitudes
     as a packet-relative M-path gain reference in addition to the ordinary
     data-pilot channel fit. Static response, S-path response, and spectral
@@ -3669,8 +3653,6 @@ def decode_pulse_stream(model, x, diagnostics=None, latest_only=False,
         raise ValueError(f'unknown pilot timing mode {pilot_timing!r}')
     if pulse_timing not in ('baseline', 'pulse-warp'):
         raise ValueError(f'unknown pulse timing mode {pulse_timing!r}')
-    if frame_boundary not in ('baseline', 'eof'):
-        raise ValueError(f'unknown frame boundary mode {frame_boundary!r}')
     if tone_equalization not in ('off', 'm-reference'):
         raise ValueError(f'unknown tone equalization mode {tone_equalization!r}')
     # Live capture is float32 and _sample_at returns float32.  Promoting the
@@ -3694,7 +3676,7 @@ def decode_pulse_stream(model, x, diagnostics=None, latest_only=False,
                                           force_float32, state, pulse_starts,
                                           sample_rate, pilot_timing,
                                           pilot_speed_diagnostics,
-                                          pulse_timing, frame_boundary,
+                                          pulse_timing,
                                           tone_equalization)
     if results or samples.shape[1] != 2:
         return results, info
@@ -3706,7 +3688,7 @@ def decode_pulse_stream(model, x, diagnostics=None, latest_only=False,
     flipped, flipped_info = _decode_pulse_samples(
         model, samples*np.float32([1, -1]), diagnostics, latest_only, models,
         model_factory, force_float32, state, pulse_starts, sample_rate,
-        pilot_timing, pilot_speed_diagnostics, pulse_timing, frame_boundary,
+        pilot_timing, pilot_speed_diagnostics, pulse_timing,
         tone_equalization)
     if not flipped:
         return results, info
@@ -3868,13 +3850,12 @@ def decode_reverse_packet(model, samples, packet_start, scale, **kwargs):
         options['state'] = state
     state.set_playback_direction(-1)
     options.pop('latest_only', None)
-    options.pop('frame_boundary', None)
     options.pop('pulse_starts', None)
     previous_tail_gate = state._require_independent_tail_metadata
     state._require_independent_tail_metadata = True
     try:
         results, info = decode_pulse_stream(
-            model, candidate, latest_only=True, frame_boundary='eof',
+            model, candidate, latest_only=True,
             pulse_starts=((normalized_start, float(scale), 1.0),), **options)
     finally:
         state._require_independent_tail_metadata = previous_tail_gate
@@ -4678,29 +4659,25 @@ def _decode_pulse_samples(model, samples, diagnostics, latest_only, models,
                            pulse_starts=None, sample_rate=RATE,
                            pilot_timing='baseline',
                            pilot_speed_diagnostics=False,
-                           pulse_timing='baseline', frame_boundary='baseline',
+                           pulse_timing='baseline',
                            tone_equalization='off'):
     sample_rate = float(sample_rate)
     cursor = 0
     counter = 1
     results = []
     measured = None
-    preloaded_following = None
     pending_aspect = 0
     aspect_screen = False           # the last metadata's screen bit
     eof_markers_validated = 0
     selected_marker = None
     last_metadata = None
     next_header_witnesses = 0
-    recovered_starts = set()
     previous_candidate = None
-    header_recovered = False
-    headers_recovered = 0
     min_scale, max_scale = pulse_sample_scale_bounds(sample_rate)
     # EOF-mode acquisition revisits one packet at a time. Cache this mono
     # view so marker checks and local pulse reacquisition do not repeatedly
     # average the entire capture for every frame.
-    mono_samples = _mono(samples) if frame_boundary == 'eof' else None
+    mono_samples = _mono(samples)
     if latest_only:
         # The live rolling buffer can contain the previous frame plus the new
         # one. Reuse the input layer's incremental header hits when available;
@@ -4709,73 +4686,43 @@ def _decode_pulse_samples(model, samples, diagnostics, latest_only, models,
         cached = (_remeasure_pulse_starts(samples, pulse_starts, sample_rate,
                                           mono=mono_samples)
                   if pulse_starts is not None else [])
-        required_starts = 1 if frame_boundary == 'eof' else 2
-        cache_valid = len(cached) >= required_starts
-        if cache_valid and frame_boundary == 'baseline':
-            prior, current = cached[-2], cached[-1]
-            interval = (current[0]-prior[0])/prior[1]
-            cache_valid = (
-                abs(interval-PULSE_FRAME) <= max(12, .03*PULSE_FRAME) and
-                abs(current[1]/prior[1]-1) <= .03)
-        starts = (cached if cache_valid else
-                  pulse_frame_starts(samples, sample_rate))
+        starts = cached if cached else pulse_frame_starts(samples, sample_rate)
         candidates = [(fs, sc, conf, 0) for fs, sc, conf in starts]
-        if len(candidates) < required_starts:
+        if not candidates:
             return [], {'frames': 0, 'pulse_frames': 0, 'recovered': False}
-        if frame_boundary == 'eof':
-            # LiveInput wakes on a newly arrived header. At that point the
-            # newest packet may not have reached its EOF yet, while the prior
-            # packet's marker is complete. Choose the newest candidate whose
-            # marker validates; a finite one-packet capture still works.
-            selected = None
-            frame_min, frame_max = pulse_sample_scale_bounds(sample_rate)
-            # A packet whose header was cut (a splice, a dropout) is not a
-            # candidate, but the packet before it ends where it starts. Only
-            # gaps of more than one packet between headers are examined.
-            augmented = []
-            for index, candidate in enumerate(candidates):
-                augmented.append(candidate)
-                following_start = (candidates[index+1][0]
-                                   if index+1 < len(candidates)
-                                   else len(mono_samples))
-                if following_start-candidate[0] > 1.6*PULSE_FRAME*candidate[1]:
-                    gap_marker = _measure_eof_marker(
-                        mono_samples, candidate[0], candidate[1])
-                    if (gap_marker is not None and following_start -
-                            gap_marker['end'] > .6*PULSE_FRAME*candidate[1]):
-                        recovered = (gap_marker['end'], candidate[1],
-                                     candidate[2], candidate[3])
-                        recovered_starts.add(gap_marker['end'])
-                        augmented.append(recovered)
-            candidates = augmented
-            for position, candidate in reversed(list(enumerate(candidates))):
-                candidate_start, candidate_scale, _, _ = candidate
-                marker = _measure_eof_marker(
-                    mono_samples, candidate_start, candidate_scale)
-                if marker is None:
-                    marker = _spliced_eof_marker(
-                        mono_samples, candidate_start, candidate_scale,
-                        frame_min, frame_max)
-                if (marker is not None and
-                        frame_min*.98 <= marker['packet_scale'] <= frame_max*1.02):
-                    selected = candidate
-                    if position > 0:
-                        previous_candidate = candidates[position-1]
-                    # Keep the validated marker: the walk below commits this
-                    # same packet and must not count its EOF a second time.
-                    selected_marker = marker
-                    break
-            if selected is None:
-                return [], {'frames': 0, 'pulse_frames': 0, 'recovered': False}
-            fs, sc, conf, pending_aspect = selected
-            header_recovered = fs in recovered_starts
-        else:
-            # The second pulse is the first edge of the next header. It is
-            # enough to validate duration; the next body need not exist.
-            fs, sc, conf, pending_aspect = candidates[-2]
-            preloaded_following = candidates[-1][:3]
+        # LiveInput wakes when a packet's end marker is in, so the
+        # newest candidate is normally the complete one. Choose the
+        # newest candidate whose marker validates: if a later header has
+        # already arrived, its packet is not complete yet and the one
+        # before it is.
+        selected = None
+        frame_min, frame_max = pulse_sample_scale_bounds(sample_rate)
+        for position, candidate in reversed(list(enumerate(candidates))):
+            candidate_start, candidate_scale, _, _ = candidate
+            marker = _measure_eof_marker(
+                mono_samples, candidate_start, candidate_scale)
+            if marker is None:
+                marker = _spliced_eof_marker(
+                    mono_samples, candidate_start, candidate_scale,
+                    frame_min, frame_max)
+            if (marker is not None and
+                    frame_min*.98 <= marker['packet_scale'] <= frame_max*1.02):
+                selected = candidate
+                if position > 0:
+                    previous_candidate = candidates[position-1]
+                # Keep the validated marker: the walk below commits this
+                # same packet and must not count its EOF a second time.
+                selected_marker = marker
+                break
+        if selected is None:
+            return [], {'frames': 0, 'pulse_frames': 0, 'recovered': False}
+        fs, sc, conf, pending_aspect = selected
+        # The walk below restarts from a whole sample (an array index), so
+        # the measured start's fraction rides in the position: the packet is
+        # timed from where its header was measured, not from the sample
+        # before it.
         cursor = int(fs)
-        measured = (16*sc, sc, conf)
+        measured = (fs-cursor+16*sc, sc, conf)
     while cursor + PULSE.SYNC_LEN + META_SYMBOL + 32 < len(samples):
         if measured is None:
             pulse_samples = (mono_samples[cursor:] if mono_samples is not None
@@ -4791,7 +4738,6 @@ def _decode_pulse_samples(model, samples, diagnostics, latest_only, models,
         # starts 16 samples earlier), matching Receiver.pending's at-16*scale
         # correction.
         frame_start = position - 16*scale
-        following = None
         next_start = None
         aspect_code = pending_aspect
         following_valid = False
@@ -4800,66 +4746,39 @@ def _decode_pulse_samples(model, samples, diagnostics, latest_only, models,
         following_scale = None
         following_confidence = None
         boundary_diag = None
-        if frame_boundary == 'eof':
-            if selected_marker is not None:
-                marker = dict(selected_marker)
-                marker['packet_scale'] = ((marker['end']-frame_start) /
-                                          PULSE_FRAME)
-                selected_marker = None
-            else:
-                marker = _measure_eof_marker(
-                    mono_samples, frame_start, scale)
-                if marker is None:
-                    marker = _spliced_eof_marker(
-                        mono_samples, frame_start, scale, min_scale, max_scale)
-            if marker is not None:
-                frame_min, frame_max = pulse_sample_scale_bounds(sample_rate)
-                candidate_scale = marker['packet_scale']
-                if (frame_min*.98 <= candidate_scale <= frame_max*1.02 and
-                        marker['end']-frame_start >
-                        .9*SPLICE_MIN_LENGTH*PULSE_FRAME*scale):
-                    following_valid = True
-                    next_start = marker['end']
-                    frame_scale = candidate_scale
-                    following_scale = marker['scale']
-                    following_confidence = marker['confidence']
-                    if marker.get('witness') == 'next_header':
-                        next_header_witnesses += 1
-                    else:
-                        eof_markers_validated += 1
-                    boundary_diag = marker
+        if selected_marker is not None:
+            marker = dict(selected_marker)
+            marker['packet_scale'] = ((marker['end']-frame_start) /
+                                      PULSE_FRAME)
+            selected_marker = None
         else:
-            search = int(frame_start+PULSE_FRAME*scale)
-            if preloaded_following is not None:
-                following_start, following_scale, following_confidence = \
-                    preloaded_following
-                candidate = (following_start-search+16*following_scale,
-                             following_scale, following_confidence)
-                preloaded_following = None
-            else:
-                candidate = PULSE.measure_pulses(
-                    _mono(samples[search:]), min_scale=min_scale,
-                    max_scale=max_scale)
-            if candidate is not None:
-                candidate_start = search + candidate[0] - 16*candidate[1]
-                interval = (candidate_start-frame_start)/scale
-                current_match = (abs(interval-PULSE_FRAME) <=
-                                 max(12, .03*PULSE_FRAME))
-                if (candidate[2] >= .45 and
-                        abs(candidate[1]/scale-1) <= .03 and current_match):
-                    following = candidate
-                    next_start = candidate_start
-                    following_scale = candidate[1]
-                    following_confidence = candidate[2]
-            if following is not None:
+            marker = _measure_eof_marker(
+                mono_samples, frame_start, scale)
+            if marker is None:
+                marker = _spliced_eof_marker(
+                    mono_samples, frame_start, scale, min_scale, max_scale)
+        if marker is not None:
+            frame_min, frame_max = pulse_sample_scale_bounds(sample_rate)
+            candidate_scale = marker['packet_scale']
+            if (frame_min*.98 <= candidate_scale <= frame_max*1.02 and
+                    marker['end']-frame_start >
+                    .9*SPLICE_MIN_LENGTH*PULSE_FRAME*scale):
                 following_valid = True
-                frame_scale = (next_start-frame_start)/frame_length
+                next_start = marker['end']
+                frame_scale = candidate_scale
+                following_scale = marker['scale']
+                following_confidence = marker['confidence']
+                if marker.get('witness') == 'next_header':
+                    next_header_witnesses += 1
+                else:
+                    eof_markers_validated += 1
+                boundary_diag = marker
         if not following_valid:
             # A frame is committed only after its selected endpoint witness.
             # A whole recording continues at the next header (the packet is
             # held as lost); a live window, or the end of a capture, stops.
             resync = None
-            if not latest_only and frame_boundary == 'eof':
+            if not latest_only:
                 resync_from = int(frame_start+.5*PULSE_FRAME*scale)
                 hit = (PULSE.measure_pulses(mono_samples[resync_from:],
                                             min_scale=min_scale,
@@ -4874,7 +4793,6 @@ def _decode_pulse_samples(model, samples, diagnostics, latest_only, models,
                                    'reason': 'no_packet_endpoint',
                                    'pulse_confidence': float(confidence)}))
             cursor, measured = resync
-            header_recovered = False
             counter += 1
             continue
         start = frame_start + PULSE.SYNC_LEN*scale
@@ -4901,10 +4819,8 @@ def _decode_pulse_samples(model, samples, diagnostics, latest_only, models,
                 pulse_map = _pulse_warp_map(
                     frame_start, next_start, scale, following_scale,
                     confidence, following_confidence, reference_positions,
-                    endpoint_position=(next_start if frame_boundary == 'eof'
-                                       else None),
-                    endpoint_coordinate=(PULSE_FRAME
-                                         if frame_boundary == 'eof' else None))
+                    endpoint_position=next_start,
+                    endpoint_coordinate=PULSE_FRAME)
             pulse_timing_diag = {
                 'mode_requested': 'pulse-warp',
                 'mode_applied': 'baseline',
@@ -4927,50 +4843,46 @@ def _decode_pulse_samples(model, samples, diagnostics, latest_only, models,
                     'local_scale_max': float(np.max(local_scales)),
                 })
         if pulse_map is None:
-            if frame_boundary == 'eof':
-                # The header origin and measured EOF endpoint define one
-                # packet-wide affine time map. Use its scale for both the
-                # body origin and every metadata sample; mixing the local
-                # preamble scale into either offset breaks that shared clock.
-                indexes = (frame_start +
-                           (PULSE.SYNC_LEN+np.arange(FRAME))*frame_scale)
-                metadata_indexes = (
-                    frame_start+(PULSE.SYNC_LEN+FRAME+
-                                 np.arange(META_SYMBOL))*frame_scale)
-                spliced = (_splice_map(samples, frame_start, next_start,
-                                       scale, indexes, model=model)
-                           if boundary_diag is not None else None)
-                current_score = (
-                    spliced[2]['cp_score'] if spliced is not None else
-                    float(np.sum(_cp_scores_at(samples, indexes))))
-                if (boundary_diag is not None and
-                        not boundary_diag.get('splice_search') and
-                        current_score < F*SPLICE_SUSPECT_CP):
-                    # The body does not fit the EOF found where the header
-                    # predicted it: a splice can move the real mark out of
-                    # reach while something else matches there. Ask the next
-                    # header, and keep whichever endpoint fits the body.
-                    alternate = _spliced_eof_marker(
-                        mono_samples, frame_start, scale, min_scale,
-                        max_scale, exclude_end=next_start)
-                    alternate_map = (
-                        _splice_map(samples, frame_start, alternate['end'],
-                                    scale, indexes, force=True, model=model)
-                        if alternate is not None else None)
-                    if (alternate_map is not None and
-                            alternate_map[2]['cp_score'] >
-                            current_score+SPLICE_MIN_GAIN):
-                        spliced = alternate_map
-                        boundary_diag = alternate
-                        next_start = alternate['end']
-                        frame_scale = alternate['packet_scale']
-                        following_scale = alternate['scale']
-                        following_confidence = alternate['confidence']
-                if spliced is not None:
-                    indexes, metadata_indexes, splice_diag = spliced
-            else:
-                indexes = start + np.arange(FRAME)*frame_scale
-                metadata_indexes = None
+            # The header origin and measured EOF endpoint define one
+            # packet-wide affine time map. Use its scale for both the
+            # body origin and every metadata sample; mixing the local
+            # preamble scale into either offset breaks that shared clock.
+            indexes = (frame_start +
+                       (PULSE.SYNC_LEN+np.arange(FRAME))*frame_scale)
+            metadata_indexes = (
+                frame_start+(PULSE.SYNC_LEN+FRAME+
+                             np.arange(META_SYMBOL))*frame_scale)
+            spliced = (_splice_map(samples, frame_start, next_start,
+                                   scale, indexes, model=model)
+                       if boundary_diag is not None else None)
+            current_score = (
+                spliced[2]['cp_score'] if spliced is not None else
+                float(np.sum(_cp_scores_at(samples, indexes))))
+            if (boundary_diag is not None and
+                    not boundary_diag.get('splice_search') and
+                    current_score < F*SPLICE_SUSPECT_CP):
+                # The body does not fit the EOF found where the header
+                # predicted it: a splice can move the real mark out of
+                # reach while something else matches there. Ask the next
+                # header, and keep whichever endpoint fits the body.
+                alternate = _spliced_eof_marker(
+                    mono_samples, frame_start, scale, min_scale,
+                    max_scale, exclude_end=next_start)
+                alternate_map = (
+                    _splice_map(samples, frame_start, alternate['end'],
+                                scale, indexes, force=True, model=model)
+                    if alternate is not None else None)
+                if (alternate_map is not None and
+                        alternate_map[2]['cp_score'] >
+                        current_score+SPLICE_MIN_GAIN):
+                    spliced = alternate_map
+                    boundary_diag = alternate
+                    next_start = alternate['end']
+                    frame_scale = alternate['packet_scale']
+                    following_scale = alternate['scale']
+                    following_confidence = alternate['confidence']
+            if spliced is not None:
+                indexes, metadata_indexes, splice_diag = spliced
         if indexes[-1] >= len(samples)-1:
             break
         if confidence < .45:
@@ -4983,10 +4895,7 @@ def _decode_pulse_samples(model, samples, diagnostics, latest_only, models,
             frame_length = PULSE_FRAME
             cursor = int(next_start if following_valid
                          else frame_start + frame_length*scale)
-            if following_valid and frame_boundary == 'baseline':
-                measured = (16*following_scale, following_scale,
-                            following_confidence)
-            elif following_valid and frame_boundary == 'eof':
+            if following_valid:
                 measured = _measure_pulse_after_eof_marker(
                     mono_samples, cursor, following_scale,
                     min_scale, max_scale)
@@ -5002,7 +4911,7 @@ def _decode_pulse_samples(model, samples, diagnostics, latest_only, models,
         # Metadata is deliberately decoded before the image body.  Its pilots
         # are self-referencing, so the bootstrap model's absolute scale cancels
         # out; the protected encoding ID can therefore select the source model.
-        metadata_scale = (frame_scale if frame_boundary == 'eof' else scale)
+        metadata_scale = frame_scale
         meta_start = (frame_start + (PULSE.SYNC_LEN+FRAME)*metadata_scale)
         metadata_candidates = decode_metadata(
             model, samples, meta_start, metadata_scale, None, force_float32,
@@ -5021,7 +4930,7 @@ def _decode_pulse_samples(model, samples, diagnostics, latest_only, models,
             if spliced_meta[1]:
                 meta, metadata_valid, provisional = spliced_meta
                 splice_diag['metadata_anchor'] = 'header'
-        if (not metadata_valid and frame_boundary == 'eof' and
+        if (not metadata_valid and
                 pulse_map is None and boundary_diag is not None and
                 not boundary_diag.get('splice_search')):
             # The body fitted the EOF found at the predicted place but the
@@ -5120,11 +5029,8 @@ def _decode_pulse_samples(model, samples, diagnostics, latest_only, models,
                         confidence, following_confidence,
                         PULSE.SYNC_LEN+FRAME+
                         np.arange(META_SYMBOL)-shift,
-                        endpoint_position=(next_start
-                                           if frame_boundary == 'eof' else None),
-                        endpoint_coordinate=(PULSE_FRAME
-                                             if frame_boundary == 'eof'
-                                             else None))
+                        endpoint_position=next_start,
+                        endpoint_coordinate=PULSE_FRAME)
                     corrected_indexes = (None if corrected_map is None else
                                          corrected_map[0])
                     retry_candidates = (decode_metadata(
@@ -5226,9 +5132,6 @@ def _decode_pulse_samples(model, samples, diagnostics, latest_only, models,
                 result.diag['metadata_pilot_retry'] = metadata_retry
             if metadata_predicted:
                 result.diag['metadata_predicted'] = True
-            if header_recovered:
-                result.diag['header_recovered'] = True
-                headers_recovered += 1
             if pulse_timing_diag is not None:
                 result.diag['pulse_timing'] = pulse_timing_diag
             if boundary_diag is not None:
@@ -5259,31 +5162,17 @@ def _decode_pulse_samples(model, samples, diagnostics, latest_only, models,
         frame_length = PULSE_FRAME
         cursor = int(next_start if following_valid
                      else frame_start + frame_length*scale)
-        header_recovered = False
-        if following_valid and frame_boundary == 'baseline':
-            measured = (16*following_scale, following_scale,
-                        following_confidence)
-        elif following_valid and frame_boundary == 'eof':
+        if following_valid:
             measured = _measure_pulse_after_eof_marker(
                 mono_samples, cursor, following_scale, min_scale, max_scale)
-            if measured is None and not latest_only:
-                # No header where this packet ended: a cut header. The next
-                # packet starts here at this packet's scale if its own EOF
-                # (or the header after it) confirms it.
-                if (_measure_eof_marker(mono_samples, cursor, scale)
-                        is not None or _spliced_eof_marker(
-                            mono_samples, cursor, scale, min_scale,
-                            max_scale) is not None):
-                    measured = (16*scale, scale, confidence)
-                    header_recovered = True
         else:
             measured = None
         counter += 1
     info = {'frames': len(results), 'pulse_frames': len(results),
-            'recovered': bool(results), 'frame_boundary': frame_boundary,
+            'recovered': bool(results),
             'eof_markers_validated': eof_markers_validated,
             'next_header_witnesses': next_header_witnesses,
-            'headers_recovered': headers_recovered}
+            }
     if diagnostics is not None:
         info['diagnostics'] = _diagnostic_summary(diagnostics, 0.0)
     return results, info

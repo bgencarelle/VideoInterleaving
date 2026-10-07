@@ -38,8 +38,7 @@ class ReverseCodedProfileTests(unittest.TestCase):
             for counter in (2, 3, 4, 7):
                 packet = v7_live._encode_pulse_frame_coeffs(
                     self.model, fold.encode_coefficients(self.model, self.values),
-                    counter, aspect_code=6, source_index=counter-1,
-                    eof_marker=True)
+                    counter, aspect_code=6, source_index=counter-1)
                 packet = add_tone_code(
                     packet, counter, encode_status(FOLD_500))
                 reverse = packet[::-1].copy()

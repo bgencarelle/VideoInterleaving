@@ -99,7 +99,7 @@ def send(rig, mode, wire, values, code, packets):
             tone_code.add_tone_code(
                 v7.encode_pulse_frame_coeffs(
                     model, coefficients, counter, aspect_code=code,
-                    source_index=counter-1, pilot_tones=False, eof_marker=True,
+                    source_index=counter-1, pilot_tones=False,
                     pulse_profile_code=wire.pulse_profile_code),
                 counter, tone_code.encode_status(wire.status_mode))
             for counter in range(1, packets+1)])
