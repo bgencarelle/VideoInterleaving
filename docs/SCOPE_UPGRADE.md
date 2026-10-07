@@ -5868,3 +5868,22 @@ only the default selection or an audio-device list index.
 
 **Handoff:** choose System default / automatic or an enumerated audio output in
 the GUI. The native XY on/off control still controls output muting.
+
+---
+
+## Appendix A073 — Copyable scope process output — 2026-10-08
+
+**Request:** make the scope process output text copyable.
+
+**Implemented:** the launcher's process-output page has a Copy output button and
+Ctrl+C/Cmd+C shortcut when not editing a settings field. Clipboard text preserves
+full line contents and line breaks, including off-screen/clipped text. Retained
+diagnostic history increased from 26 to 10,000 lines per run; the screen still
+shows its fitting tail. Empty-output and clipboard-error notices are explicit.
+
+**Verification:** launcher suite passed 47 tests and 7 subtests. Native Xvfb/GL
+clipboard checks exercised the Copy output button and Ctrl+C, verifying exact
+clipboard contents for 100 long lines. No audio stream was opened.
+
+**Handoff:** open the process-output page and click Copy output, or use Ctrl+C
+(Cmd+C on macOS), then paste into a text editor or message.

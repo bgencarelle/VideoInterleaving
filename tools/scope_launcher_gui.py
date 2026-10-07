@@ -712,6 +712,7 @@ def _file_picker(current="", directory=False):
 
 
 class ScopeLauncher:
+    OUTPUT_HISTORY_LINES = 10000
     WINDOW_SIZE = (1040, 760)
     ROW_HEIGHT = 31
     FOOTER_HEIGHT = 42
@@ -1512,7 +1513,8 @@ class ScopeLauncher:
                         self.notice = str(record.get("message", "Video control failed"))
                 else:
                     self.lines.append(value)
-                    self.lines = self.lines[-26:]
+                    if len(self.lines) > self.OUTPUT_HISTORY_LINES:
+                        del self.lines[:-self.OUTPUT_HISTORY_LINES]
                     if value:
                         self.notice = value
             elif kind == "exit":
@@ -1814,6 +1816,12 @@ class ScopeLauncher:
             top += unit(52)
         draw.text((unit(20), top), "Scope process output", font=self.font,
                   fill=(231, 240, 246))
+        rect = (width - unit(148), top - unit(4), width - unit(20), top + unit(26))
+        draw.rounded_rectangle(rect, radius=unit(4), fill=(24, 48, 63),
+                               outline=(65, 103, 124))
+        draw.text((rect[0] + unit(12), rect[1] + unit(7)), "Copy output",
+                  font=self.small, fill=(232, 241, 246))
+        self.hits["copy_output"] = rect
         top += unit(32)
         draw.rounded_rectangle((unit(18), top, width - unit(18),
                                 height - self.FOOTER_HEIGHT - unit(38)),
@@ -1825,6 +1833,17 @@ class ScopeLauncher:
             draw.text((unit(30), top + unit(11) + index * unit(19)),
                       self._fit(line, self.small, width - unit(60)),
                       font=self.small, fill=(183, 201, 212))
+
+    def _copy_output(self):
+        if not self.lines:
+            self.notice = "No scope process output to copy yet."
+        else:
+            try:
+                self.glfw.set_clipboard_string(self.window, "\n".join(self.lines) + "\n")
+                self.notice = f"Copied {len(self.lines)} lines of scope process output."
+            except Exception as exc:
+                self.notice = f"Could not copy process output: {exc}"
+        self.dirty = True
 
     def _display_value(self, key):
         if key == "capture_fps" and not str(self.settings.get(key, "")).strip():
@@ -1965,6 +1984,8 @@ class ScopeLauncher:
                 self._ensure_selection()
             elif key == "live":
                 self.page = "live"
+            elif key == "copy_output":
+                self._copy_output()
             elif key == "start":
                 self._stop() if self.process else self._start()
             elif key == "apply":
@@ -2102,7 +2123,10 @@ class ScopeLauncher:
                     pass
             self.dirty = True
             return
-        if key == self.glfw.KEY_ESCAPE:
+        if (self.page == "live" and key == self.glfw.KEY_C
+                and mods & (self.glfw.MOD_CONTROL | getattr(self.glfw, "MOD_SUPER", 0))):
+            self._copy_output()
+        elif key == self.glfw.KEY_ESCAPE:
             if self.dropdown:
                 self.dropdown = None
             elif self.process:
