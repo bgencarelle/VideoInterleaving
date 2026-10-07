@@ -3,8 +3,10 @@ from functools import lru_cache
 
 import numpy as np
 from PIL import Image
-from scipy.fft import dctn, idct, idctn
-from scipy.ndimage import maximum_filter, minimum_filter
+from scipy.fft import idct          # set-up only: the model matrices
+
+from animation_modem.v7_kernel_solve import (forward_plane, inverse_plane,
+                                             masked_gram_solve)
 
 LABEL = 'Viewer-model solve'
 HELP = ('Plain truncation is the best choice only for an ideal receiver. '
@@ -65,48 +67,32 @@ def _ideal(rows, cols, sent_rows, sent_cols, up):
     return axis(rows, sent_rows), axis(cols, sent_cols)
 
 
+@lru_cache(maxsize=32)
+def _normal(viewer, rows, cols, sent_rows, sent_cols, up):
+    """The solve's fixed matrices, on the coefficient grid: M'M per axis and
+    M'T / T'M (viewer model against ideal enlargement).  The viewer-sized
+    pictures themselves are never formed per frame."""
+    my, mx = _model(viewer, rows, cols, sent_rows, sent_cols, up)
+    iy, ix = _ideal(rows, cols, sent_rows, sent_cols, up)
+    return tuple(np.ascontiguousarray(matrix, np.float64) for matrix in
+                 (my.T @ my, mx.T @ mx, my.T @ iy, ix.T @ mx))
+
+
 def post(grid, ctx, viewer, iterations, lam, up, tame):
     if ctx.plane:
         return grid
     rows, cols = grid.shape
     sent_rows, sent_cols = ctx.sent
-    up = int(up)
-    mask = ctx.mask.astype(np.float64)
-    my, mx = _model(int(viewer), rows, cols, sent_rows, sent_cols, up)
-    iy, ix = _ideal(rows, cols, sent_rows, sent_cols, up)
-    c0 = dctn(grid, norm='ortho')*mask
-    # the picture an ideal receiver shows is what the viewer should show
-    target = iy @ c0 @ ix.T
-
-    def forward(c):
-        return my @ (c*mask) @ mx.T
-
-    def adjoint(r):
-        return (my.T @ r @ mx)*mask
-
-    def normal(c):
-        return adjoint(forward(c)) + lam*c*mask
-
-    b = adjoint(target) + lam*c0
-    c = c0.copy()
-    r = b - normal(c)
-    p = r.copy()
-    rs = float((r*r).sum())
-    for _ in range(int(iterations)):
-        if rs < 1e-14:
-            break
-        hp = normal(p)
-        alpha = rs/max(float((p*hp).sum()), 1e-30)
-        c += alpha*p
-        r -= alpha*hp
-        rs_new = float((r*r).sum())
-        p = r + (rs_new/rs)*p
-        rs = rs_new
-    shown = idctn(c, norm='ortho')
+    mask = ctx.weights
+    transforms = ctx.transforms
+    c0 = forward_plane(np.ascontiguousarray(grid, np.float64), transforms[0],
+                       transforms[3])*mask
+    # The picture an ideal receiver shows is what the viewer should show:
+    # minimise |M c - T c0|^2 + lam |c - c0|^2 over the sent coefficients.
+    c = masked_gram_solve(c0, mask, *_normal(int(viewer), rows, cols, sent_rows,
+                                             sent_cols, int(up)),
+                          float(lam), int(iterations))
+    shown = inverse_plane(c, transforms[1], transforms[2])
     if int(tame) > 0 and ctx.reference is not None:
-        low = minimum_filter(ctx.reduce(ctx.reference, 'min'), size=3, mode='nearest')
-        high = maximum_filter(ctx.reduce(ctx.reference, 'max'), size=3, mode='nearest')
-        for _ in range(int(tame)):
-            shown = np.clip(ctx.project(shown), low - 0.02, high + 0.02)
-        shown = ctx.project(shown)
+        shown = ctx.tame(shown, tame)
     return shown

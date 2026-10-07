@@ -1100,6 +1100,26 @@ def _mix_mono_video_audio(modem, frames, source, delay, video_side,
     return output
 
 
+# Sender profiles on offer.  mono-fold-500, fold-500, mono-colour-500 and
+# stereo-slices are deprecated: no longer valid choices, though their wires
+# stay (the nested folds ride on them and the receiver still reads them).
+SEND_PROFILES = ('aspect-fold-500', 'aspect-mono-500',
+                 'aspect-mono-nested', 'stereo-nested')
+DEPRECATED_SEND_PROFILES = ('mono-fold-500', 'fold-500', 'mono-colour-500',
+                            'stereo-slices')
+
+
+def deprecated_profiles_allowed():
+    """The deprecated profiles are refused unless V7_ALLOW_DEPRECATED_PROFILES
+    is set.  The test suite sets it: those wires are still what the nested
+    folds ride on and what the receiver must keep reading, so their tests
+    stay."""
+    return os.environ.get('V7_ALLOW_DEPRECATED_PROFILES', '') not in ('', '0')
+
+
+def selectable_send_profiles():
+    return SEND_PROFILES+(DEPRECATED_SEND_PROFILES
+                          if deprecated_profiles_allowed() else ())
 NESTED_BASE_PROFILES = {'aspect-mono-nested': 'aspect-mono-500',
                         'stereo-nested': 'stereo-slices'}
 
@@ -1153,18 +1173,52 @@ def _kernel_defaults_profile(args):
 
 def _default_kernel_for_profile(profile):
     """The quality-tuned active kernel default for Aspect profiles."""
-    if profile in ('aspect-fold-500', 'aspect-mono-500'):
+    if profile in ('aspect-fold-500', 'aspect-mono-500', 'aspect-mono-nested'):
         return 'viewer_solve'
+    if profile == 'stereo-nested':
+        # Benchmark winner through the live nested chain (see the sender GUI's
+        # PROFILE_DEFAULT_KERNELS, which this mirrors).
+        return 'upscale_precomp'
     return K.REFERENCE
 
 
 HOST_PARAM_NAMES = ('luma_mix', 'chroma_mix')
 
 
+def _resolve_named_send_device(sd, args):
+    """Make a numeric ``--device`` name the device ``--device-name`` says.
+
+    A device index is only valid inside one PortAudio device list.  The
+    sender GUI reads its list in another process, possibly before a device
+    was plugged in or removed, so the index it passes can name a different
+    device here.  With the name given, the index is checked against it and
+    corrected; a device that is gone or ambiguous is an error, never a
+    silent substitute.
+    """
+    from tools.v7_device_recovery import resolve_device_index
+
+    expected_name = getattr(args, 'device_name', None)
+    if not expected_name or not isinstance(args.device, int):
+        return
+    expected = {'name': str(expected_name),
+                'hostapi': str(getattr(args, 'device_hostapi', None) or '')}
+    try:
+        resolved = resolve_device_index(sd, args.device, expected, 'output')
+    except ValueError as exc:
+        raise RuntimeError(f'Audio output device: {exc}') from exc
+    if resolved != args.device:
+        print(json.dumps({
+            'status': 'sender_device_index_corrected',
+            'device': expected['name'], 'requested_index': args.device,
+            'index': resolved}), flush=True)
+        args.device = resolved
+
+
 def run_send(args):
     import sounddevice as sd
     from tools.v7_device_recovery import device_identity
 
+    _resolve_named_send_device(sd, args)
     try:
         identity = device_identity(sd, args.device, 'output')
         if not identity.get('name'):
@@ -1271,7 +1325,10 @@ def _run_send_session(args):
     try:
         kernel_name = getattr(args, 'dct_kernel', None)
         if kernel_name is None:
-            kernel_name = _default_kernel_for_profile(kernel_profile)
+            # The default follows the profile as named (a nested fold has its
+            # own); kernel parameter defaults follow the wire it rides on.
+            kernel_name = _default_kernel_for_profile(
+                getattr(args, 'profile', None) or kernel_profile)
         kernel_controls = LiveKernelControls(
             kernel_registry, kernel_name,
             _kernel_cli_values(getattr(args, 'dct_kernel_param', None)),
@@ -2794,7 +2851,11 @@ class _AdaptiveProfileDecoder:
         if result is not None:
             result.diag['slices_shown'] = '+'.join(sorted(
                 half.kind for half in used))
-        return wire.values(halves)
+        values = wire.values(halves)
+        if result is not None:
+            # A nested fold's account of its coefficients, for the display.
+            result.diag['luma_room'] = getattr(wire, 'last_room', None)
+        return values
 
     def values(self, model, result):
         mode = result.diag.get('profile_mode')
@@ -2981,6 +3042,12 @@ def _make_auto_profile_decoder(args, fold):
 def run_receive(args):
     if getattr(args, 'image_only', False) and getattr(args, 'headless', False):
         raise ValueError('--image-only cannot be combined with --headless')
+    if getattr(args, 'nested_smooth', None) is not None:
+        if args.nested_smooth < 0:
+            raise ValueError('--nested-smooth must be 0 or more')
+        _ensure_test_modem_path()
+        import nested_fold
+        nested_fold.SMOOTH_PASSES = int(args.nested_smooth)
     runtime_options = getattr(args, 'runtime_options', None)
     if runtime_options is not None:
         identity = runtime_options.snapshot().get('audio_input_identity')
@@ -4227,7 +4294,8 @@ def _run_receive_session(args, fold, mono_wire=None, adaptive_profile=None,
                     previous_values = latest.copy()
                 display_frames.publish(
                     latest, model.coder.grids, meter['aspect'],
-                    pixel_shapes=result.diag.get('pixel_shapes'))
+                    pixel_shapes=result.diag.get('pixel_shapes'),
+                    luma_room=result.diag.get('luma_room'))
                 shown_times.append(time.monotonic())
                 meter['shown_index'] = result.diag.get('source_index')
                 meter['shown_direction'] = result.diag.get('direction')
@@ -4429,6 +4497,12 @@ def parser():
                       help='capture source; omitted interactively prompts for one')
     send.add_argument('--device', type=_device_arg, required=True,
                       help='explicit sounddevice output, e.g. BlackHole 2ch')
+    send.add_argument('--device-name', default=None,
+                      help='expected name of a numeric --device; when the '
+                           'index names another device, the device with this '
+                           'name is used instead')
+    send.add_argument('--device-hostapi', default=None,
+                      help='audio backend of --device-name, e.g. Core Audio')
     send.add_argument('--fixture', type=Path, default=DEFAULT_FIXTURE,
                       help=argparse.SUPPRESS)
     send.add_argument('--encode-filter', choices=('nearest', 'box'),
@@ -4541,19 +4615,12 @@ def parser():
     _add_aspect_arguments(send)
     send_profile = send.add_mutually_exclusive_group()
     send_profile.add_argument(
-        '--profile', choices=('mono-fold-500', 'fold-500', 'mono-colour-500',
-                              'aspect-fold-500',
-                              'aspect-mono-500', 'stereo-slices',
-                              'aspect-mono-nested', 'stereo-nested'),
+        '--profile', choices=selectable_send_profiles(),
         default=None,
-        help=('wire profile: mono video with Fold 500 (recommended), '
-              'stereo Fold 500 (default), '
-              'mono video with colour-weighted Fold 500 (experimental), '
-              'stereo Fold 500 with an aspect-matched coefficient layout '
-              '(experimental; set the receiver\'s --aspect-layout and '
-              '--aspect-tail to match), or mono video colour Fold 500 with '
-              'an aspect-matched layout (experimental; set the receiver\'s '
-              '--aspect-layout to match)'))
+        help=('wire profile: aspect-fold-500 (stereo), aspect-mono-500 (mono '
+              'video), or the nested fold under test against each: '
+              'stereo-nested and aspect-mono-nested. The receiver reads all '
+              'of them without a setting.'))
     send_profile.add_argument('--experimental-mono-fold', action='store_true',
                               help=argparse.SUPPRESS)
     send_profile.add_argument('--experimental-fold', type=int, default=None,
@@ -4653,6 +4720,11 @@ def parser():
                            'plus one frame and a small guard (default: 1)')
     recv.add_argument('--no-tail-memory', action='store_true',
                       help='do not reuse tail coefficients from earlier packets')
+    recv.add_argument('--nested-smooth', type=int, default=None, metavar='PASSES',
+                      help='nested-fold pictures: passes of decoding inside '
+                           'the bounds, a work-around that smooths stair '
+                           'error (default 0: off, pictures are shown as '
+                           'decoded; 16 was the earlier default)')
     recv.add_argument('--temporal-fusion', choices=('off', 'held'),
                       default='off',
                       help='average successive packets of a held picture '

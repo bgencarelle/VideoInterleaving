@@ -319,7 +319,7 @@ def grain_detail_mask(luma):
 
 def dct_reconstruct_planes(planes, mode, viewport_size=None, edge=False,
                            edge_strength=1.0, pixel_shapes=None,
-                           chroma='off'):
+                           chroma='off', luma_room=None):
     """Resample decoded planes by evaluating their retained DCT spectrum.
 
     The input planes are already spatial-domain inverse-DCT output. Transforming
@@ -334,6 +334,10 @@ def dct_reconstruct_planes(planes, mode, viewport_size=None, edge=False,
     twice its grid. ``edge_strength`` (0 to 1) mixes that rebuild with the
     plain picture. ``pixel_shapes`` is the pixel grid the picture was sent
     on, when the wire names one; mode 'pixel' then shows that grid.
+
+    ``luma_room`` is the decoder's own account of the luma coefficients
+    (see edge_consistent_plane): which were sent and how far each may lie
+    from its decoded value. Edge reconstruction then works from that.
 
     With ``chroma`` 'guided' the chroma planes are first rebuilt on the luma
     grid with luma-predicted detail (CHROMA_MODES); their output sizes are
@@ -377,7 +381,7 @@ def dct_reconstruct_planes(planes, mode, viewport_size=None, edge=False,
                                                     reconstruct_plane,
                                                     viewport_shapes)
         luma = edge_consistent_plane(
-            planes[0], strength=edge_strength,
+            planes[0], strength=edge_strength, room=luma_room,
             **(EDGE_HIGH if edge == 'high' else {})) if edged else planes[0]
         if mode == 'viewport':
             if viewport_size is None or len(viewport_size) != 2:

@@ -71,6 +71,8 @@ from pathlib import Path
 import numpy as np
 from scipy.fft import dctn, idctn
 
+from animation_modem import v7_kernel_solve as _solve
+
 REFERENCE = 'reference'
 DEFAULT_DIR = Path(__file__).resolve().parents[1]/'dct_kernels'
 ENV_DIRS = 'V7_KERNEL_DIR'
@@ -154,6 +156,7 @@ class KernelContext:
                        if len(rows_on) and len(cols_on) else self.sent)
         self.reference = reference            # pre-window plane, post only
         self.mask_key = hashlib.blake2b(mask.tobytes(), digest_size=8).digest()
+        self._weights = None
 
     def nu(self):
         """(rows x 1, 1 x cols) frequencies in cycles per sent pixel."""
@@ -169,19 +172,54 @@ class KernelContext:
         v = np.arange(self.grid[1], dtype=np.float64)[None, :]
         return np.hypot(u/rows, v/cols)
 
+    # Per-frame work is compiled (animation_modem/v7_kernel_solve.py); these
+    # hand kernels the arrays those routines take.
+    @property
+    def weights(self):
+        """The mask as 1.0 where a coefficient is sent, 0.0 elsewhere."""
+        if self._weights is None:
+            self._weights = np.ascontiguousarray(self.mask, np.float64)
+        return self._weights
+
+    @property
+    def transforms(self):
+        """(row basis, transpose, column basis, transpose) of the grid."""
+        return _solve.transforms(*self.grid)
+
     def project(self, grid):
         """The picture the receiver can show: only the coefficients sent."""
-        coefficients = dctn(np.asarray(grid, np.float64), norm='ortho')
-        coefficients[~self.mask] = 0.0
-        return idctn(coefficients, norm='ortho')
+        return _solve.project(np.ascontiguousarray(grid, np.float64), self.weights,
+                              *self.transforms)
 
     def reduce(self, array, how='mean'):
         """A pixel-domain array brought down to the grid (mean, min or max
         over the source pixels each grid pixel covers)."""
-        array = np.asarray(array, np.float64)
+        if how not in _REDUCTIONS:
+            raise ValueError("reduce(how) is 'mean', 'min' or 'max'")
+        array = np.ascontiguousarray(array, np.float64)
+        if array.ndim == 2:
+            return _solve.reduce_plane(array, self.grid[0], self.grid[1], _REDUCTIONS[how])
         for axis, count in enumerate(self.grid):
             array = _reduce_axis(array, axis, count, how)
         return array
+
+    def source_range(self, radius=1, margin=0.0):
+        """(low, high): the range the source had within ``radius`` grid
+        pixels of each grid pixel, widened by ``margin``."""
+        return (_solve.neighbourhood_extreme(self.reduce(self.reference, 'min'),
+                                             int(radius), False, -float(margin)),
+                _solve.neighbourhood_extreme(self.reduce(self.reference, 'max'),
+                                             int(radius), True, float(margin)))
+
+    def tame(self, grid, rounds, radius=1, margin=0.02):
+        """Halo clean-up: ``rounds`` times, show what the receiver can and
+        move it back inside the source's local range; then show it."""
+        low, high = self.source_range(radius, margin)
+        return _solve.clip_project(np.ascontiguousarray(grid, np.float64), self.weights,
+                                   low, high, int(rounds), *self.transforms)
+
+
+_REDUCTIONS = {'mean': 0, 'min': 1, 'max': 2}
 
 
 def _reduce_axis(array, axis, count, how):
@@ -301,6 +339,7 @@ class Kernel:
         self._error = None
         self.failures = 0
         self.post_ms = 0.0            # smoothed time of the refit per call
+        self._post_warm = False       # the first refit has run
         self.build_ms = 0.0           # time of the last window built
         self._warned_slow = False
 
@@ -462,7 +501,12 @@ class Kernel:
         started = time.perf_counter()
         result = np.asarray(self._post_call(grid, ctx, params), np.float64)
         elapsed = (time.perf_counter()-started)*1000
-        self.post_ms = elapsed if not self.post_ms else .8*self.post_ms+.2*elapsed
+        if not self._post_warm:
+            # The first call loads the compiled routines it uses; that is a
+            # one-off at start-up, not what a frame costs, so it is not timed.
+            self._post_warm = True
+        else:
+            self.post_ms = elapsed if not self.post_ms else .8*self.post_ms+.2*elapsed
         if result.shape != grid.shape or not np.isfinite(result).all():
             raise KernelError('post must return a finite grid of the same shape')
         if np.abs(result).max() > 8:

@@ -16,12 +16,16 @@ of this is tape validation.
 | 1 | Reverse loses resolution (stereo) | **Fixed** |
 | 2 | Reverse / forward colour loss | Not reproduced against the base wire; two real causes found (3, 7) |
 | 3 | Band-limited nested packets pass the pilot gate and are shown damaged | **Partly fixed**; gate policy still open |
-| 4 | Grain | Open. Cause known; needs the filter below |
-| 5 | Banding | Open. Same cause; needs dither |
+| 4 | Grain | **Reduced**: decoding inside the bounds (every packet) and dither (held pictures). Parts A and B still open |
+| 5 | Banding | **Fixed** by dither (no dead zone, no fixed contours) |
 | 6 | Stereo nested behind stock slices under a 4 kHz low-pass | Open |
 | 7 | Mono and slices wires carry less chroma than `aspect-fold-500` | Open, by design of the base wires |
 | 8 | Cold start when the signature is unreadable | Open, minor |
 | 9 | GUI kernel defaults ignored for nested profiles | **Fixed** |
+| 10 | Body sent 1.5 dB lower since `b147922` (all profiles) | By design: the auto-leveller keeps header and end marker loudest |
+| 12 | Through the real display the folds do not beat stock | **Open, the main finding** |
+| 13 | False colour in every mode | Diagnosed: too little chroma is sent |
+| 11 | Sender GUI could start the sender on the wrong output device | **Fixed** |
 
 ## 1. Reverse resolution (fixed)
 
@@ -175,6 +179,225 @@ A and B change tables, so they require a retune (`tools/v7_nested_build.py`)
 and re-running `tools/v7_nested_eval.py` torture and playback. C changes
 sender and receiver together and is not readable by a receiver without it,
 so it needs its own level-pattern rows or a new signature.
+
+### Part C as built (subtractive dither)
+
+Code: `test_modem_v7/nested_fold.py` (`DITHER`, `FrozenFold.offset`,
+`Held`), kernels `*_dithered` in `tools/v7_sk_fold.py`. No table change.
+
+- Every folded slot's staircase is shifted by a known offset within half a
+  step. There are seven offset sets; the packet's tail slice (the sender's
+  counter modulo 7, which the metadata already carries, forwards and in
+  reverse) picks one. The second stereo channel uses the first's offsets
+  negated, so a mono sum is read exactly as before.
+- A dithered packet carries its level pattern negated. The receiver reads
+  the sign per packet, so plain-stair packets still decode. A receiver from
+  before this change does not read dithered packets (it sees no nested
+  signature); `NESTED_FOLD_DITHER=0` on the sender sends plain stairs.
+- `Held`: the receiver shows the mean of the last seven decoded pictures
+  while the picture is not moving. Motion is read on the packet-to-packet
+  change of the hosts, against what noise and stair error explain; a moved
+  picture, a level change, a packet out of sequence or plain stairs start
+  again from the packet in hand, shown as decoded. `NESTED_FOLD_HOLD=0`
+  turns the average off.
+- Dithered packets are not passed through `--temporal-fusion held`, which
+  averages slot values before the fold is undone.
+
+Measured through the live sender and receiver, clean, on the repo's 3:4
+motion fixture frame and the reference face (luma error energy by band,
+cycles per picture height; "held" is the picture shown after one cycle):
+
+| | Band | Stock, same wire | Plain stairs | Dithered, first packet | Dithered, held |
+|---|---|---|---|---|---|
+| Mono | 0–12 | 0.10 | 13.8 | 12.7 | 2.0 |
+| Mono | 12–24 | 112 | 44.0 | 47.2 | 34.6 |
+| Stereo | 12–24 | 0.55 | 43.8 | 45.5 | 9.6 |
+| Stereo, hiss −45 | 12–24 | | 84.1 | 87.6 | 18.1 |
+
+On a moving picture (the fixture movie, a new frame every packet) the
+average never engages and the error is that of a single packet: mono about
+1% above plain stairs, stereo equal. So dither fixes the fixed pattern
+(banding, static grain on stills and slow scenes); it does not lower the
+error of one packet. That needs parts A and B, which need a table rebuild.
+
+### Decoding inside the bounds (receiver only)
+
+Code: `smooth_within_bounds` in `tools/v7_sk_fold.py` (numba);
+`FrozenFold.room` and `FrozenFold.clean` in `test_modem_v7/nested_fold.py`.
+No sender or wire change; it works on a single packet, so also in motion.
+
+What arrives is a set of bounds, not values: a folded host lies within half
+a stair of what was decoded, a plain host within its noise, a guest is taken
+as read, and a coefficient that was not sent is unknown. The receiver used
+to show the middle of every bound and zero for everything unsent. It now
+shows the picture of least total variation that fits the bounds (projected
+gradient descent with momentum, 16 passes, about 2 ms). Flat areas come out flat and the
+ringing of the cut-off spectrum goes, because the unsent coefficients are
+free to fill in.
+
+- `--nested-smooth PASSES` on the receiver, or `NESTED_FOLD_SMOOTH`: the
+  strength; 0 shows the decoded values as they are.
+- `NESTED_FOLD_SMOOTH_ROOM` (default 0.5): the share of the half stair a
+  folded host may move. 1 is flattest and starts to look painted; 0 leaves
+  every sent value alone and only fills in what was not sent.
+- One channel or a mono sum of the stereo table is shown as decoded: there
+  only base plus or minus detail is bounded, not each coefficient.
+
+Luma error through the live sender and receiver, clean, one packet:
+
+| Picture | Mono nested, as decoded | Mono, shown | Stereo nested, as decoded | Stereo, shown |
+|---|---|---|---|---|
+| Reference face | 0.0755 | 0.0678 | 0.0681 | 0.0604 |
+| Robot movie frame | 0.2584 | 0.2487 | 0.2004 | 0.1918 |
+| 1/f noise (test texture) | 0.0942 | 0.0994 | 0.0819 | 0.0891 |
+
+It costs dense texture with no flat areas about 5 to 9%. Judged by eye on
+the fixture movies: the mottle on flat dark areas is gone and text edges are
+cleaner; fine vertical stripes in `stereo-nested` on the line chart are
+reduced, not removed.
+
+Seen in the same pictures and not addressed: false colour in every mode,
+stock included (green and purple on the black-and-white checkerboard, pink
+on white bars, colour bars smearing upward). That is the chroma of the base
+wires (issue 7), not the fold.
+
+### Cost per packet and the downscale kernel
+
+Per packet through the live receiver on the sandbox's two cores, clean
+link: mono nested 9.7 ms to 5.0 ms, stereo nested 14.5 ms to 6.3 ms.
+
+- The stair decoder skips terms more than seven noise deviations away
+  (2.7 ms to 0.2 ms clean, about 2 ms at heavy noise; results change by
+  under 1e-7).
+- The stereo decode reuses the stair decode for the averaged picture.
+- The smoothing carries momentum: 16 passes reach what 40 plain ones did
+  (5.3 ms to 2.2 ms).
+- Sender: a held picture's level is chosen once (0.5 to 0.8 ms a packet).
+  `dct_kernels/viewer_solve.py` now solves on the coefficient grid with a
+  compiled conjugate gradient (`animation_modem/v7_kernel_solve.py`);
+  output unchanged to 1e-15, about 4.8 ms to 1.5 ms a frame.
+
+Downscale kernels were scored through the live nested sender and receiver
+at a bilinear display (SSIMULACRA2, higher is better; mean of astronaut,
+chelsea, coffee, rocket and the reference face):
+
+| Kernel | Mono nested | Stereo nested | Stock stereo-slices |
+|---|---|---|---|
+| none (reference) | -52.09 | -45.25 | -43.00 |
+| viewer_solve | **-50.40** | -42.84 | -43.71 |
+| upscale_precomp | -50.79 | **-41.91** | -42.55 |
+| csf_peak | -50.44 | -44.71 | |
+
+`aspect-mono-nested` keeps `viewer_solve`. `stereo-nested` used to inherit
+"no kernel" from `stereo-slices`; its default is now `upscale_precomp`, in
+the GUI and the CLI. Kernel parameters were left at their defaults; none
+was tuned for the folds.
+
+## 12. Through the real display the folds do not beat stock (open, the main finding)
+
+Everything above was judged on the decoded 96x80 grid or on coefficient
+error. The receiver does not show that grid: `tools/v7_gl_viewer.py` puts it
+through 4x DCT reconstruction, edge reconstruction at 75% and luma-guided
+colour. Edge reconstruction already does what "decoding inside the bounds"
+does for unsent coefficients (it keeps every received coefficient exactly
+and fills the rest by total variation), and it treats every non-zero
+coefficient as received. So it rebuilds detail from stock's clean
+coefficients, and it keeps the folds' stair-noisy ones exactly.
+
+`tools/v7_nested_display_eval.py` scores through that path (SSIMULACRA2,
+higher is better; astronaut, chelsea, coffee and the reference face, none of
+them used to build tables; 3:4 layout):
+
+| Mode, tables | Clean | Hiss -45 | Hiss -35 |
+|---|---|---|---|
+| aspect-mono-500 (stock) | -38.8 | -47.5 | -54.9 |
+| mono nested, shipped tables | -38.2 | -53.1 | -60.4 |
+| mono nested, shipped, smoothing off | -39.1 | -51.8 | -59.9 |
+| mono nested, rebuilt on photo samples | -39.0 | -52.3 | -60.2 |
+| stereo-slices (stock) | -19.9 | -26.2 | -42.7 |
+| stereo nested, shipped tables | -26.3 | -38.3 | -53.4 |
+| stereo nested, rebuilt on photo samples | -21.3 | -36.8 | -50.3 |
+| stereo nested, rebuilt, 900 of 1,020 slots plain | -20.7 | -29.7 | -46.2 |
+
+- Mono nested equals stock when clean and is 5 to 6 points worse under hiss.
+- Stereo nested is worse than stock in every condition.
+- A sweep of the step size (kappa 6 to 28) and of the number of plain slots
+  went one way only: coarser steps and fewer folded slots score better, that
+  is, the nearer a table is to stock the better it looks. Finer steps score
+  worse, because the guest gets less room. The table rebuild that parts A
+  and B call for does not fix this.
+- By eye the folds are sharper than stock and noisier; the metric prefers
+  clean and soft. That judgement needs a person.
+- The training pictures matter: the photo samples
+  (`tools/v7_nested_corpus.py`) give better stereo tables than the shipped
+  Kodak ones here; adding textures and the test charts made them worse.
+  The shipped tables are unchanged: with the rebuilt set one reverse test
+  fails, and no table beats stock anyway.
+
+## 14. Tables rebuilt for general pictures plus the project's screens
+
+The shipped tables came from the 24 Kodak photographs alone. They are now
+built from `tools/v7_nested_corpus.py`: windows of bundled photographs,
+frames of the fixture movies (line and colour screens, robot count) and
+the 27 line patterns of `tools/v7_test_patterns.py`.
+
+    .venv/bin/python tools/v7_nested_corpus.py --out tmp/nested-corpus
+    .venv/bin/python tools/v7_nested_build.py --corpus tmp/nested-corpus
+
+The mix matters. Patterns at full weight decide the tables on their own
+and photographs fall below stock; photographs alone carry a third less of
+the patterns. The default (every picture at one contrast, photographs
+weighted eight to one, patterns at half contrast) was chosen on held-out
+pictures. Original score (effective luma coefficients), clean, 3:4 layout:
+
+| Pictures | aspect-mono-500 | Mono nested, Kodak | Mono nested, rebuilt | aspect-fold-500 | Stereo nested, Kodak | Stereo nested, rebuilt |
+|---|---|---|---|---|---|---|
+| Held-out photographs (4) | 1,345 | 1,496 | 1,460 | 2,165 | 1,979 | 1,970 |
+| Held-out screens (3) | 1,110 | 1,549 | 1,599 | 1,796 | 2,312 | 2,334 |
+| Line patterns (8) | 998 | 1,506 | 2,219 | 1,522 | 2,790 | 2,826 |
+
+Across torture conditions on a photograph, two screens and a pattern the
+rebuilt tables are ahead of the Kodak ones clean and at hiss -45, level at
+hiss -35, and behind for mono under a 4 kHz low-pass (803 against 1,079).
+The old tables are not kept in the repository; rebuild from Kodak to
+compare. Scores above use `tools/v7_nested_eval.py`; the stair work-arounds
+are off.
+
+## 13. False colour is the chroma budget (diagnosed, open)
+
+Green and purple on black-and-white detail, pink on white, colour bars
+smearing upward, in every mode. On the mono wire 76 Cb and 136 Cr
+coefficients are sent of 1,920 each. Swapped in through the display: the
+sent chroma arriving exactly looks the same as the decode; the full chroma
+is clean. So it is neither coding error nor the display's colour step, it
+is how little chroma is sent, and anti-ringing cannot repair that. A
+receiver-side rebuild that lets colour change only at luma edges confines
+the bars a little on the chart (CIEDE2000 18.4 to 17.5) and makes the
+astronaut blotchy (SSIMULACRA2 -53.6 to -57.3): not adopted. The fix is
+more chroma on the wire.
+
+## 10. Body level since `b147922` (by design)
+
+`encode_pulse_frame_coeffs` now fits the body 1.5 dB under the lower of the
+header and end-marker peaks, measured after the timing tones are mixed. The
+end marker sits about 1.5 dB under the header, so every EOF packet's body,
+stock profiles included, goes out about 1.5 dB lower than at `d658975`
+(body RMS 0.147 to 0.124 on `aspect-fold-500`, 0.112 to 0.094 on mono
+nested). Clean scores are identical. At hiss −45 the effective luma
+coefficients fall 3 to 6% (mono nested 1,324 to 1,247, stereo nested 2,146
+to 2,078); under soft saturation they rise 3 to 12%. Whether the marker
+needs that margin is a tape question.
+
+## 11. Sender GUI output device (fixed)
+
+`tools/v7_send_gui.py` passed the sender a bare PortAudio index. The GUI
+reads its device list once, in its own process; the sender is a new process
+with a fresh list. If a device was plugged in or removed after the GUI
+started, the same index named a different device and the sender opened it.
+The GUI now also passes `--device-name` and `--device-hostapi`, and the
+sender (`_resolve_named_send_device` in `tools/v7_live.py`) checks the index
+against the name, corrects it, and refuses to start if the device is gone.
+The GUI's own list is still only as fresh as its PortAudio session.
 
 ## 6. Stereo nested under a 4 kHz low-pass (open)
 

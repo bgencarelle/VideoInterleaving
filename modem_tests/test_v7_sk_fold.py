@@ -36,6 +36,93 @@ class KernelTests(unittest.TestCase):
         self.assertAlmostEqual(y[-1], 1.0)
         self.assertTrue(0 < power < 1)
 
+    def test_shifted_stairs_reduce_to_plain_stairs_at_zero_offset(self):
+        rng = np.random.default_rng(11)
+        n = 400
+        hosts, guests = laplace(n, 12), .4*laplace(n, 13)
+        level = (np.arange(n) % 4 > 0).astype(np.int64)
+        step = rng.uniform(.3, 1.2, n)
+        scale = rng.uniform(.7, 1.3, n)
+        alpha = np.array([0.0, .35, .35])
+        table, _ = sk.fit_compander(guests, 1/3)
+        inverse = sk.expand_table(table)
+        density = sk.residual_density(guests, table)
+        zero = np.zeros(n)
+        for index, width in ((0, .7), (1, .7), (-3, .4), (5, 1.1)):
+            mass, mean = sk.laplace_cell((index-.5)*width, (index+.5)*width)
+            self.assertAlmostEqual(mean, sk.laplace_centroid(index, width), places=12)
+            self.assertGreater(mass, 0)
+        total = sum(sk.laplace_cell((k-.5)*.7+.2, (k+.5)*.7+.2)[0] for k in range(-60, 61))
+        self.assertAlmostEqual(total, 1.0, places=9)
+        plain = sk.encode_frame(hosts, guests, zero, level, step, scale, alpha, 3, .25, table, 1.0)
+        np.testing.assert_allclose(
+            sk.encode_frame_dithered(hosts, guests, level, step, scale, alpha, table, zero), plain)
+        np.testing.assert_allclose(sk.stair_values_dithered(hosts, level, step, zero),
+                                   sk.stair_values(hosts, level, step), atol=1e-12)
+        sigma = np.full(n, .02)
+        received = plain+.02*rng.standard_normal(n)
+        for ours, theirs in zip(
+                sk.soft_decode_frame_dithered(received, level, step, scale, alpha, sigma,
+                                              density, inverse, zero),
+                sk.soft_decode_frame(received, level, step, scale, alpha, sigma, density, inverse)):
+            np.testing.assert_allclose(ours, theirs, atol=1e-9)
+
+    def test_a_shifted_staircase_is_read_back_on_the_same_shift(self):
+        rng = np.random.default_rng(14)
+        n = 400
+        hosts, guests = laplace(n, 15), .4*laplace(n, 16)
+        level = np.ones(n, np.int64)
+        step = np.full(n, .8)
+        scale = np.ones(n)
+        alpha = np.array([0.0, .35, .35])
+        table, _ = sk.fit_compander(guests, 1/3)
+        inverse = sk.expand_table(table)
+        density = sk.residual_density(guests, table)
+        offset = rng.uniform(-.5, .5, n)*step
+        sent = sk.encode_frame_dithered(hosts, guests, level, step, scale, alpha, table, offset)
+        sigma = np.full(n, 1e-3)
+        got_hosts, got_guests = sk.soft_decode_frame_dithered(
+            sent, level, step, scale, alpha, sigma, density, inverse, offset)
+        # Hosts land in their own cell of the shifted stairs; guests survive.
+        self.assertLessEqual(float(np.max(np.abs(got_hosts-hosts))), .8+1e-9)
+        np.testing.assert_allclose(
+            got_hosts, sk.stair_values_dithered(hosts, level, step, offset), atol=1e-6)
+        self.assertLess(float(np.mean((got_guests-guests)**2)), .1*float(np.mean(guests**2)))
+        wrong, _ = sk.soft_decode_frame_dithered(
+            sent, level, step, scale, alpha, sigma, density, inverse, np.zeros(n))
+        self.assertGreater(float(np.mean((wrong-hosts)**2)),
+                           float(np.mean((got_hosts-hosts)**2)))
+
+    def test_smoothing_stays_within_the_bounds_and_cleans_a_flat_area(self):
+        rows, cols = 24, 20
+        left, right = sk.dct_matrix(rows), sk.dct_matrix(cols)
+        transforms = (left, np.ascontiguousarray(left.T), right, np.ascontiguousarray(right.T))
+        picture = np.full((rows, cols), -.6)
+        picture[6:18, 5:15] = .7                       # a bright block on a flat ground
+        truth = sk.separable(left, picture, np.ascontiguousarray(right.T))
+        rng = np.random.default_rng(21)
+        u, v = np.meshgrid(np.arange(rows), np.arange(cols), indexing='ij')
+        sent = u+v < 14
+        room = np.where(sent, .02, np.inf)
+        room[0, :3] = 0.0                              # sent exactly: must not move
+        seen = np.where(sent, truth+rng.uniform(-.02, .02, truth.shape), 0.0)
+        seen[0, :3] = truth[0, :3]
+        low, high = seen-room, seen+room
+
+        def variation(plane):
+            image = left.T@plane@right
+            return float(np.abs(np.diff(image, axis=0)).sum()+np.abs(np.diff(image, axis=1)).sum())
+
+        np.testing.assert_array_equal(
+            sk.smooth_within_bounds(seen, low, high, *transforms, 0, .01, .25), seen)
+        out = sk.smooth_within_bounds(seen, low, high, *transforms, 80, .01, .25)
+        self.assertTrue(np.all(out >= low-1e-12) and np.all(out <= high+1e-12))
+        np.testing.assert_array_equal(out[0, :3], seen[0, :3])
+        self.assertLess(variation(out), .9*variation(seen))
+        # Nearer the picture than showing zeros for everything unsent.
+        self.assertLess(float(np.sum((out-truth)**2)), .8*float(np.sum((seen-truth)**2)))
+        self.assertTrue(np.any(out[~sent] != 0))
+
     def test_water_filling_matches_closed_forms(self):
         # Equal variances: D = n*lambda*2^(-2R/n).
         theta, distortion, active = sk.reverse_water_fill(np.full(50, 2.0), 100.0)

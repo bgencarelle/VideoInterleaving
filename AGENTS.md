@@ -128,3 +128,38 @@ an inspection tool. Use `--device null` for headless scope checks; it does not
 verify PortAudio/device behavior. Run device-backed audio tests only through an
 explicitly verified virtual/loopback route, never physical speakers.
 `server_config.py` is the source of truth for application port assignments.
+
+## Compiled arithmetic (standing rule)
+
+Per-packet and per-frame arithmetic in the V7 fold and nested-fold code is
+written as numba kernels (`@njit(cache=True)`), not as numpy or scipy
+expressions, and new work in this area uses nothing else. Favour compiled
+code for everything that runs per packet.
+
+- Kernels live in `tools/v7_sk_fold.py`. `test_modem_v7/nested_fold.py`
+  holds tables, state and decisions and calls kernels; it does no array
+  arithmetic of its own.
+- numpy arrays remain the containers kernels take and return. Convert once,
+  at table load or codec set-up (`_f8`, `np.ascontiguousarray`), never per
+  packet.
+- numpy is acceptable only for one-time set-up: loading tables, slicing a
+  stock model, building constant matrices.
+- A rewrite into kernels must be shown to change nothing: compare live
+  decodes before and after, on more than one picture and with smoothing
+  both on and off.
+- Downscale kernels (`dct_kernels/`): a kernel's per-frame `post` step calls
+  compiled routines in `animation_modem/v7_kernel_solve.py` (or the
+  `KernelContext` helpers `project`, `reduce`, `source_range`, `tame`, which
+  do). Only what is built once per setting (a gain window, a model matrix)
+  may use numpy or scipy.
+- Compiled means faster, not just "not numpy". Measure before and after.
+  Two per-frame steps stay on library code because the compiled version was
+  measured slower: `clip_aware_luma` (scipy's FFT-based DCT, ten rounds a
+  frame, about three times faster than a compiled matrix transform) and the
+  gamma power on float frames (numpy's vectorised power). Replace them only
+  with something measured faster.
+- Kernels that multiply matrices: `v7_source_dct._separable` avoids BLAS on
+  purpose (its docstring: BLAS worker threads were seen to spin and cost 3-4x
+  the useful CPU on a two-core host). The nested smoothing and the kernel
+  solves use `np.dot` inside numba, which is BLAS; on the development sandbox
+  that burned no extra CPU, but it has not been measured on the target Mac.

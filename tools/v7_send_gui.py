@@ -33,15 +33,27 @@ from tools.v7_preview_protocol import parse_preview_datagram
 from animation_modem import v7_kernels
 
 
+# The profiles on offer: the two aspect profiles and the nested fold that is
+# being tested against each.  Fold 500, mono colour Fold 500 and stereo
+# slices are deprecated and no longer selectable (DEPRECATED_PROFILES); their
+# wires remain in the code because the nested folds ride on them and the
+# receiver still reads them.
 PROFILE_CHOICES = (
     ('Aspect Fold 500 · stereo · recommended', 'aspect-fold-500'),
-    ('Fold 500 · stereo', 'fold-500'),
     ('Mono video · aspect colour Fold 500', 'aspect-mono-500'),
-    ('Mono video · colour Fold 500', 'mono-colour-500'),
-    ('Stereo slices · each channel a whole picture · new', 'stereo-slices'),
     ('Mono video · nested fold · more detail · experimental', 'aspect-mono-nested'),
     ('Stereo redundant · nested fold · experimental', 'stereo-nested'),
 )
+DEPRECATED_PROFILES = ('fold-500', 'mono-fold-500', 'mono-colour-500', 'stereo-slices')
+
+
+def valid_profiles():
+    """Profile names a send may use: the choices above, plus the deprecated
+    ones only where V7_ALLOW_DEPRECATED_PROFILES is set (the test suite)."""
+    import os
+    allowed = os.environ.get('V7_ALLOW_DEPRECATED_PROFILES', '') not in ('', '0')
+    return tuple(value for _label, value in PROFILE_CHOICES)+(
+        DEPRECATED_PROFILES if allowed else ())
 # Nested-fold modes ride on these wires and share their kernel defaults.
 NESTED_BASE_PROFILES = {'aspect-mono-nested': 'aspect-mono-500',
                         'stereo-nested': 'stereo-slices'}
@@ -310,11 +322,18 @@ DEFAULT_KERNEL_BENCHMARK_WINNERS = {
 PROFILE_DEFAULT_KERNELS = {
     'aspect-mono-500': 'viewer_solve',
     'aspect-fold-500': 'viewer_solve',
+    # Scored through the live nested sender and receiver at a bilinear
+    # display (docs/V7_NESTED_FOLD_ISSUES.md): the mono fold does best with
+    # its base wire's kernel, the stereo fold with this one.  The stock
+    # stereo-slices wire gains nothing from either and stays on the reference.
+    'stereo-nested': 'upscale_precomp',
 }
 
 
 def default_kernel_for_profile(profile):
     """Kernel enabled by default for the selected sender wire profile."""
+    if profile in PROFILE_DEFAULT_KERNELS:
+        return PROFILE_DEFAULT_KERNELS[profile]
     return PROFILE_DEFAULT_KERNELS.get(NESTED_BASE_PROFILES.get(profile, profile),
                                        ENCODE_DEFAULTS['dct_kernel'])
 
@@ -1152,7 +1171,7 @@ def validate_settings(settings, devices, sd_module=None, audio_devices=()):
             f'{device.name} cannot open {channels} channel(s) at {sample_text}: {exc}') from exc
 
     profile = settings.get('profile')
-    if profile not in dict(PROFILE_CHOICES).values():
+    if profile not in valid_profiles():
         raise ValueError('Choose a supported wire profile.')
     mono_profile = profile in MONO_PROFILES
     mono_video_side = (settings.get('mono_video_side', 'right')
@@ -1547,6 +1566,13 @@ def build_command(settings, devices, sd_module=None, python=None,
     if (image_preview_port is not None and
             settings.get('preview', 'window') in ('window', 'popout')):
         command.extend(('--image-preview-port', str(int(image_preview_port)),))
+    # A numeric index is only valid inside one PortAudio enumeration. The
+    # sender is a new process with its own enumeration, so it also gets the
+    # device's name and backend and resolves the index itself.
+    if checked['device'].name:
+        command.extend(('--device-name', checked['device'].name))
+        if checked['device'].hostapi:
+            command.extend(('--device-hostapi', checked['device'].hostapi))
     return command
 
 

@@ -2874,7 +2874,8 @@ class ReceiverGui:
                             edge=self.edge_mode,
                             edge_strength=self.edge_strength,
                             pixel_shapes=getattr(frame, 'pixel_shapes', None),
-                            chroma=self.chroma_mode)
+                            chroma=self.chroma_mode,
+                            luma_room=getattr(frame, 'luma_room', None))
                     if (self.display_mode in FILTER_PRECOMPUTE_MODES and
                             self.dct_reconstruction == 'off'):
                         planes = resample_filter_planes(

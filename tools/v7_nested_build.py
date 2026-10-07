@@ -112,7 +112,16 @@ def main(argv=None):
                         help="'training' keeps every second picture out, for held-out scoring")
     parser.add_argument('--layouts', nargs='+')
     parser.add_argument('--families', nargs='+', default=list(PROFILES))
+    parser.add_argument('--design', nargs='+', default=[], metavar='FAMILY:KEY=VALUE',
+                        help="override a design value for this build, e.g. slices:kappa=16 "
+                             "mono:linear=200 (keys: linear, kappa, noise)")
     args = parser.parse_args(argv)
+    for item in args.design:
+        family, setting = item.split(':', 1)
+        key, value = setting.split('=', 1)
+        if family not in DESIGN or key not in DESIGN[family]:
+            parser.error(f'unknown design setting {item!r}')
+        DESIGN[family][key] = type(DESIGN[family][key])(float(value))
     from aspect_fold import LAYOUT_NAMES
     train_files, test_files = study.corpus(args.corpus)
     files = train_files+(test_files if args.pictures == 'all' else [])
