@@ -5319,8 +5319,45 @@ latency, visible image quality, hardware-DAC timing, or 24/25-channel behavior.
 **Handoff:** The bounded software closeout is complete for this workspace:
 supported-mode/null-output checks, matched D0/integrated moving-video results,
 and PortAudio operation through the safe software loopback are recorded.
-Defaults remain unchanged. S7's overall hardware-facing acceptance remains
-open; device-change with actual devices, real camera/screen capture,
-interactive-browser execution, and physical-scope quality/synchronization are
-separate follow-up work requiring their respective environments. No additional
-software-only performance sweep is needed to close this handoff.
+Defaults remain unchanged. Per the user's software-validation disposition in
+A043 and renewed instruction, agent follow-up uses the existing ALSA/Pulse
+loopback and built-in browser/native/CPU visualizers. Physical/offline tests
+are deferred to the user and are not the next agent task or a prerequisite
+for this delivery. Complete available visual inspection and interactive
+controls using the built-in tools; document tool-access limitations precisely.
+No additional software-only performance sweep is needed to close this handoff.
+
+---
+
+## Appendix A061 — Built-in visualization checks and scope correction — 2026-10-07
+
+The user reiterated that agent validation uses the tools and visualizers
+already available in this workspace. Physical hardware validation is not the
+next agent task. This confirms the software-only disposition recorded in A043;
+the agent guidance and A060 handoff now state that scope explicitly.
+
+- Ran `PYTHONPATH=. TMPDIR=/home/linuser/modemTest/tmp .venv/bin/python
+  tests/test_scope_web.py --write
+  tmp/scope-s7-visual-closeout/browser-python-parity.png`. Browser JavaScript
+  and Python renderer parity passed for extent, aspect ratio, lit-pixel area,
+  and ramp/custom/step triggers. Inspected the generated side-by-side image.
+- Exercised `ScopeGUI`'s real preview worker and native GL window under
+  `xvfb-run -a env LIBGL_ALWAYS_SOFTWARE=1` with 3,200-sample traces from video
+  fixture frames 30, 150, and 240. All three tap sequences were rendered with
+  an empty preview-error field. Inspected the native window capture and
+  changing preview images. The check did not start an audio stream or drive
+  live status counters, and does not claim interactive-control validation.
+- Artifacts and reproduction script are under
+  `tmp/scope-s7-visual-closeout/`: `native_check.py`, `native-check.json`,
+  `native-preview-{30,150,240}.png`, and `native-window-{30,150,240}.png`.
+- The session's built-in desktop browser tool returned `browser.disconnected`
+  on tab enumeration. Browser renderer parity was exercised through Node;
+  actual desktop-browser interaction remains unverified until that tool is
+  connected. This does not imply missing PortAudio or missing visualizers.
+
+**Handoff:** Continue only any remaining built-in interactive visualization and
+control checks within the user's software scope. Reuse the existing loopback
+and visualizers; do not introduce physical-device prerequisites or another
+performance sweep. Native/CPU image inspection and browser-renderer parity
+have current evidence; desktop-browser interaction has the specific tool
+connection limitation above.

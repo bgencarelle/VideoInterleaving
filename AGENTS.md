@@ -44,6 +44,13 @@
 
 ## Existing audio validation tooling
 
+- User-directed validation scope: use the existing ALSA/Pulse software loopback
+  and built-in browser/native/CPU scope visualizers. Physical/offline tests are
+  the user's separate work (see `docs/SCOPE_UPGRADE.md` A043). Do not make
+  physical hardware acquisition or scope hookup the next agent task or a
+  prerequisite for this software delivery. Use the available visual inspection
+  tools and renderer artifacts; report a disconnected browser tool precisely
+  rather than assuming the application or audio tooling is unavailable.
 - Verified in this workspace on 2026-10-07: `.venv/bin/python` imports
   `sounddevice` 0.5.6 and loads PortAudio V19.6. The ALSA host API exposes
   `pulse` (then index 0) and `default` (then index 1). PortAudio is available;
