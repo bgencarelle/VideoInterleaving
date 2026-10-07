@@ -44,11 +44,13 @@ from scope_bake import (SweepSource, plan_grid, TraceEmitter,
 from scope_out import Scope, BufferedSource, choose_device  # noqa: E402
 from scope_frame_scheduler import FieldGroupLatch  # noqa: E402
 from scope_prepared_cache import PreparedImageCache  # noqa: E402
+from scope_live_renderers import (LiveVectorEmitter, LiveFusionEmitter, capture_rgb_luma,
+                                  warm_live_preview, LiveCaptureTone)
 from scope_numeric import (captured_luma, gray_units, positive_percentile,
                            moving_test_image)  # noqa: E402
 
 
-def _begin_raster_field(field_group, grab, levels_for):
+def _begin_raster_field(field_group, grab, levels_for, tone=None):
     """Capture one immutable source/tone-map snapshot per accepted picture."""
     request = None
     if field_group.index == 0:
@@ -62,7 +64,10 @@ def _begin_raster_field(field_group, grab, levels_for):
             else:
                 source, source_version = grab(), None
             source_metadata = None
-        lum = np.asarray(source, dtype=np.float32).copy()
+        if tone is None:
+            lum = np.asarray(source, dtype=np.float32).copy()
+        else:
+            lum, source_version = tone.prepare(source, source_version)
         levels, level_state = levels_for(lum)
         if levels is not None:
             levels = tuple(levels)
@@ -140,7 +145,7 @@ def live_capture_modes(args):
     if (args.stream or args.fields != 1 or args.geometry_samples is not None
             or args.traversal_hz is not None):
         return ("raster",)
-    return ("raster", "stochastic", "stipple")
+    return ("vector", "raster", "stochastic", "stipple", "fusion")
 
 
 def _source_presentation_identity(captured, field, fields, mode="raster"):
@@ -297,6 +302,76 @@ def _read_exact(stream, nbytes):
     return frame
 
 
+def modem_camera_source(spec, fps=None, width=160, startup_timeout=15.0):
+    """Use the modem's camera backend, PPM framing and driver diagnostics."""
+    from tools.v7_capture import camera_source
+    source_default = fps is None
+    if fps is None:
+        from tools.v7_send_gui import enumerate_capture_fps
+        print("[SCREEN] checking camera-supported rates (modem capture workflow)…", flush=True)
+        choices = enumerate_capture_fps("camera", camera=spec)
+        rates = [float(value) for _label, value in choices if value]
+        if rates:
+            fps = min(rates, key=lambda rate: abs(rate - 30.0))
+            print(f"[SCREEN] camera source rate: {fps:g} fps", flush=True)
+    capture_rgb_luma(np.zeros((2, 2, 3), np.uint8))
+    source = camera_source(fps=fps, width=width, spec=spec, scale_flags="area")
+    done, expired = threading.Event(), threading.Event()
+
+    def watchdog():
+        if not done.wait(startup_timeout):
+            expired.set()
+            source.close()
+
+    threading.Thread(target=watchdog, daemon=True, name="scope-camera-startup").start()
+    sequence = [0]
+    metadata = [{}]
+
+    def grab():
+        nonlocal source, fps
+        started = time.monotonic_ns()
+        try:
+            try:
+                rgb = source()
+            except RuntimeError as first_error:
+                # AVFoundation reports supported size/rate ranges when its
+                # default input mode rejects 30 Hz. Negotiate only for the
+                # Source default choice; explicit user rates remain explicit.
+                import re
+                ranges = re.findall(r'@\[\s*\d+(?:\.\d+)?\s+(\d+(?:\.\d+)?)\s*\]\s*fps', str(first_error))
+                candidates = [float(value) for value in ranges
+                              if 0 < float(value) <= 1000 and abs(float(value) - (fps or 30)) > .01]
+                if not source_default or not candidates or expired.is_set():
+                    raise
+                fps = min(candidates, key=lambda rate: abs(rate - 30))
+                print(f"[SCREEN] camera default rejected; retrying driver-reported {fps:g} fps", flush=True)
+                source.close()
+                source = camera_source(fps=fps, width=width, spec=spec, scale_flags="area")
+                grab.proc = source.proc
+                rgb = source()
+        except BaseException as exc:
+            done.set()
+            source.close()
+            if expired.is_set() and isinstance(exc, Exception):
+                raise RuntimeError("Camera startup timed out. Allow camera access for "
+                                   "the launching application, then retry; choose a "
+                                   "device-reported capture rate or Source default.") from exc
+            raise
+        done.set()
+        lum = capture_rgb_luma(rgb)
+        sequence[0] += 1
+        metadata[0] = {"source_kind": "camera", "source_sequence": sequence[0],
+                       "requested_at_ns": started, "decode_started_at_ns": started,
+                       "ready_at_ns": time.monotonic_ns()}
+        return lum
+
+    grab.proc = source.proc
+    grab.close = lambda: source.close()
+    grab.timing_snapshot = lambda: dict(metadata[0])
+    grab.capture_fps = lambda: fps or 30.0
+    return grab
+
+
 def ffmpeg_source(width=160, fps=12, region=None, input_spec=None,
                   display=None, source_kind="capture", startup_timeout=15.0):
     """
@@ -447,6 +522,7 @@ class Throttled:
         self.captures = 0
         self.polls = 0
         self.failures = 0
+        self.last_error = ""
         self.last_capture_duration_ms = max(0.0, (ready_ns - started_ns) / 1e6)
         self._period = 1.0 / max(fps, 0.5)
         self._t = threading.Thread(target=self._run, daemon=True,
@@ -491,8 +567,13 @@ class Throttled:
                         self.captures += 1
                     self.last_capture_duration_ms = max(
                         0.0, (ready_ns - started_ns) / 1e6)
-            except Exception:
+                    self.last_error = ""
+            except Exception as exc:
                 self.failures += 1
+                message = str(exc)
+                if message != self.last_error:
+                    print(f"[SCREEN] capture failed: {message}", flush=True)
+                    self.last_error = message
                 changed = False
             if self._drain:
                 # A pipe may return its final frame immediately at EOF. Avoid
@@ -524,6 +605,7 @@ class Throttled:
                 "captures": self.captures,
                 "polls": self.polls,
                 "failures": self.failures,
+                "last_error": self.last_error,
                 "pending_latest_age_ms": max(
                     0.0, (time.monotonic_ns() - ready_ns) / 1e6),
                 "last_capture_duration_ms": self.last_capture_duration_ms,
@@ -534,6 +616,9 @@ class Throttled:
 
     def close(self):
         self._stop.set()
+        close = getattr(self._grab, "close", None)
+        if callable(close):
+            close()
         self._t.join(timeout=2.0)
 
 
@@ -812,20 +897,19 @@ def _profile(args, grab):
     for _ in range(3):
         inner()
     t0 = time.perf_counter()
+    cpu0 = time.process_time()
     for _ in range(20):
         inner()
     cap = (time.perf_counter() - t0) / 20 * 1000
+    cap_cpu = (time.process_time() - cpu0) / 20 * 1000
 
     lum = np.asarray(inner(), dtype=np.float32)
-    profile_grid = None
-    if args.geometry_samples is not None or args.traversal_hz is not None:
-        geometry_budget = args.geometry_samples or 3200
-        profile_grid = plan_grid(
-            lum, geometry_budget, density=args.density, trim=args.trim,
-            rows=args.rows, fields=max(1, args.fields))
+    geometry_budget = args.geometry_samples or (3200 if args.traversal_hz is not None else n)
+    profile_grid = plan_grid(lum, geometry_budget, density=args.density, trim=args.trim,
+                             rows=args.rows, fields=max(1, args.fields))
     # Time the REAL path, not a hand-rolled approximation of it -- a probe that
     # measures something the program never runs is worse than no probe.
-    _probe_em = TraceEmitter(48000, n, gamma=args.gamma, trim=args.trim,
+    _probe_em = TraceEmitter(96000, n, gamma=args.gamma, trim=args.trim,
                              density=args.density, rows=args.rows,
                              fields=max(1, args.fields),
                              border=getattr(args, "border", 0.0),
@@ -834,25 +918,43 @@ def _profile(args, grab):
                              traversal_hz=args.traversal_hz,
                              grid=profile_grid,
                              close_frame=not args.scope_trigger)
+    options = dict(gamma=args.gamma, trim=args.trim, dc_comp=args.dc_comp, border=args.border)
+    if args.render_mode == "vector":
+        _probe_em = LiveVectorEmitter(96000, n, **options)
+    elif args.render_mode == "fusion":
+        _probe_em = LiveFusionEmitter(96000, n, density=args.density, rows=args.rows,
+                                      grid=profile_grid, oversample=args.oversample, **options)
+    elif args.render_mode == "stochastic":
+        _probe_em = StochasticEmitter(96000, n, **options)
+    elif args.render_mode == "stipple":
+        _probe_em = StippleEmitter(96000, n, **options)
+
+    def build():
+        frame = _probe_em.emit(lum)
+        if args.render_mode != "raster":
+            accept = getattr(_probe_em, "accept", None) or _probe_em.chain_from
+            accept(frame[-1])
     for _ in range(3):
-        _probe_em.emit(lum)
+        build()
     t0 = time.perf_counter()
+    cpu0 = time.process_time()
     for _ in range(30):
-        _probe_em.emit(lum)
-    build = (time.perf_counter() - t0) / 30 * 1000
+        build()
+    build_ms = (time.perf_counter() - t0) / 30 * 1000
+    build_cpu = (time.process_time() - cpu0) / 30 * 1000
 
     cap_hz = args.capture_fps
     print()
+    print(f"  renderer: {args.render_mode}; {n} samples; nominal 96 kHz; same-picture warm build")
     if ffmpeg_mode:
         print(f"  pipe read + convert : {cap:6.2f} ms x {cap_hz:.0f}/s "
-              f"= {cap * cap_hz / 10:5.1f}% of a core   (Python side only;")
+               f"wall; {cap_cpu:.2f} ms CPU/read   (Python side only;")
         print( "                        ffmpeg does the capture and scaling in "
                "its own process)")
     else:
         print(f"  capture + downscale : {cap:6.2f} ms x {cap_hz:.0f}/s "
-              f"= {cap * cap_hz / 10:5.1f}% of a core")
-    print(f"  trace build         : {build:6.2f} ms x {args.fps}/s "
-          f"= {build * args.fps / 10:5.1f}% of a core")
+               f"wall; {cap_cpu:.2f} ms CPU/read")
+    print(f"  trace build         : {build_ms:6.2f} ms wall; {build_cpu:.2f} ms CPU/trace")
     bs = args.blocksize or 256
     print(f"  audio callbacks     : {96000 / bs:6.0f}/s at blocksize {bs} "
           "(Python overhead per wake-up)")
@@ -870,7 +972,7 @@ def _profile(args, grab):
                     g()
                 ms = (time.perf_counter() - t0) / 10 * 1000
                 print(f"    --region 0,0,{wh[0]},{wh[1]:<5} {ms:6.2f} ms "
-                      f"= {ms * cap_hz / 10:5.1f}% of a core at "
+                       f"= {ms * cap_hz / 10:5.1f}% wall-time load at "
                       f"{cap_hz:.0f} grabs/s")
             except Exception as e:
                 print(f"    --region 0,0,{wh[0]},{wh[1]}: {e}")
@@ -902,7 +1004,7 @@ def build_parser():
     ap.add_argument("--fps", type=int, default=30,
                     help="traces per second; lower = bigger grid, more flicker")
     ap.add_argument("--samples", type=int, help="samples per trace (overrides --fps)")
-    ap.add_argument("--render-mode", choices=("raster", "stochastic", "stipple"),
+    ap.add_argument("--render-mode", choices=("vector", "raster", "stochastic", "stipple", "fusion"),
                     default="raster", help="drawing style for captured images")
     ap.add_argument("--geometry-samples", type=int, metavar="N",
                     help="raster trajectory detail budget independent of DAC samples")
@@ -931,7 +1033,7 @@ def build_parser():
                     help="tone-mapping time constant. Live content cannot be "
                          "pre-scanned, but adapting fast makes cells flicker, "
                          "so this is deliberately slow. 0 = fixed 0..1")
-    ap.add_argument("--capture-fps", type=float, default=12.0,
+    ap.add_argument("--capture-fps", type=float, default=None,
                     help="how often to grab the source, independent of the "
                          "trace rate. Capture is the expensive part and a ~56 "
                          "cell display does not need 30 grabs a second.")
@@ -986,9 +1088,43 @@ def build_parser():
     return ap
 
 
+def _close_capture_process(proc):
+    import subprocess
+    try:
+        if proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait(timeout=2)
+    finally:
+        if proc.stdout is not None:
+            proc.stdout.close()
+
+
+def _own_capture(resources, source):
+    close = getattr(source, "close", None)
+    if callable(close):
+        resources.callback(close)
+    elif getattr(source, "proc", None) is not None:
+        resources.callback(_close_capture_process, source.proc)
+
+
 def main(argv=None):
+    from contextlib import ExitStack
+    with ExitStack() as resources:
+        return _run_main(argv, resources)
+
+
+def _run_main(argv, resources):
     ap = build_parser()
     args = ap.parse_args(argv)
+    camera_fps = args.capture_fps
+    if camera_fps is not None and (not math.isfinite(camera_fps) or camera_fps <= 0):
+        ap.error("--capture-fps must be finite and greater than zero")
+    args.capture_fps = (camera_fps if camera_fps is not None else
+                        (30.0 if args.source == "camera" else 12.0))
     if args.render_mode not in live_capture_modes(args):
         ap.error("stochastic/stipple require whole traces, one field, and no "
                  "raster geometry/traversal override")
@@ -1029,37 +1165,50 @@ def main(argv=None):
     gui_enabled = bool(args.scope_gui)
 
     region = [int(v) for v in args.region.split(",")] if args.region else None
-    if args.source in ("ffmpeg", "camera"):
+    if args.source == "camera":
+        raw_grab = modem_camera_source(args.ffmpeg_input, fps=camera_fps, width=args.downto)
+        _own_capture(resources, raw_grab)
+        grab = (raw_grab if args.profile else
+                Throttled(raw_grab, fps=args.capture_fps, source_kind="camera", drain=True))
+    elif args.source == "ffmpeg":
         raw_grab = ffmpeg_source(width=args.downto, fps=args.capture_fps,
                                  region=region, input_spec=args.ffmpeg_input,
                                  display=args.display,
-                                 source_kind=args.source)
+                                  source_kind=args.source)
+        _own_capture(resources, raw_grab)
         grab = (raw_grab if args.profile else
                 Throttled(raw_grab, fps=args.capture_fps,
                           source_kind=args.source, drain=True))
     elif args.source == "screen":
         raw_grab = screen_source(region, downto=args.downto)
+        _own_capture(resources, raw_grab)
         grab = (raw_grab if args.profile else
                 Throttled(raw_grab, fps=args.capture_fps,
                           source_kind="screen"))
     elif args.source == "video":
         video = video_source(args.file, downto=args.downto,
-                             start_at=args.start_at)
+                              start_at=args.start_at)
+        _own_capture(resources, video)
         grab = (video if args.profile else
                 Throttled(video.read_latest_due, fps=args.capture_fps,
                           source_kind="video"))
     else:
         raw_grab = test_source()
         grab = (raw_grab if args.profile else
-                Throttled(raw_grab, fps=args.capture_fps,
-                          source_kind="test"))
+                 Throttled(raw_grab, fps=args.capture_fps,
+                           source_kind="test"))
+    if isinstance(grab, Throttled):
+        resources.callback(grab.close)
 
     probe = grab()
+    if args.source == "camera" and callable(getattr(raw_grab, "capture_fps", None)):
+        args.capture_fps = raw_grab.capture_fps()
     print(f"[SCREEN] source {args.source}, {probe.shape[1]}x{probe.shape[0]} "
           "after downscale")
 
     if args.profile:
         try:
+            resources.pop_all()
             _profile(args, grab)
         finally:
             if hasattr(grab, "close"):
@@ -1080,11 +1229,13 @@ def main(argv=None):
         trigger_shape=args.scope_trigger_shape,
         yt_trigger_us=args.scope_trigger_us, rotation=args.rotation,
         mirror=args.mirror, physical_dwell=args.physical_dwell)
+    resources.callback(scope.stream.close)
     if gui_enabled:
         scope.set_tap_fields(max(1, args.fields))
     n = scope.samples_per_frame
     stop = threading.Event()
     render_lock = threading.RLock()
+    tone = LiveCaptureTone()
     control_messages = queue.Queue()
     control_thread = None
     producer_thread = None
@@ -1171,13 +1322,18 @@ def main(argv=None):
             traversal_hz=args.traversal_hz)
         field_group = FieldGroupLatch(max(1, args.fields))
         if len(live_capture_modes(args)) > 1 and (gui_enabled or args.render_mode != "raster"):
+            print("[SCREEN] preparing live drawing kernels before output starts…", flush=True)
             # Constructors warm compiled kernels before the stream starts,
             # including modes that may be selected interactively later.
             options = dict(gamma=args.gamma, trim=args.trim,
                            dc_comp=args.dc_comp, border=args.border)
             image_emitters = {
+                "vector": LiveVectorEmitter(scope.samplerate, n, **options),
                 "stochastic": StochasticEmitter(scope.samplerate, n, **options),
                 "stipple": StippleEmitter(scope.samplerate, n, **options),
+                "fusion": LiveFusionEmitter(scope.samplerate, n, density=args.density,
+                                             rows=args.rows, oversample=args.oversample,
+                                             grid=(_grid_rows, _grid_cols), **options),
             }
 
         def push():
@@ -1193,7 +1349,9 @@ def main(argv=None):
             with render_lock:
                 mode = selected_mode[0]
                 field, captured = _begin_raster_field(
-                    field_group, grab, levels_for)
+                    field_group, grab, levels_for, tone=tone)
+                if gui_enabled:
+                    scope.publish_luma(captured["lum"])
                 if mode != "raster":
                     accepted = _push_live_image(
                         scope, image_emitters[mode], captured, mode)
@@ -1237,6 +1395,7 @@ def main(argv=None):
 
         trace_period = scope.trace_samples / max(scope.samplerate, 1)
         next_deadline = [0.0]
+        last_render_error = [None]
         rws = cls = 0
 
         def pump():
@@ -1252,9 +1411,14 @@ def main(argv=None):
                 started = now
                 try:
                     produced = push()
-                except Exception:
+                except Exception as exc:
+                    message = str(exc)
+                    if message != last_render_error[0]:
+                        print(f"[SCREEN] render failed: {message}", flush=True)
+                        last_render_error[0] = message
                     produced = False
                 if produced:
+                    last_render_error[0] = None
                     # Anchor to the observed ready boundary. This leaves the
                     # render time available before the next DAC boundary.
                     next_deadline[0] = started + trace_period
@@ -1268,7 +1432,13 @@ def main(argv=None):
             target=pump, daemon=True, name="scope-frames")
 
     gui = None
+    stream_reference_key = None
+    if gui_enabled:
+        warm_live_preview()
     try:
+        # Normal execution owns shutdown in the existing finally block below.
+        # Until this point, ExitStack also covers first-read/JIT interruption.
+        resources.pop_all()
         last_reported_adoption_sequence = 0
         scope.stream.start()
         if producer_thread is not None:
@@ -1279,6 +1449,7 @@ def main(argv=None):
             live_state = {
                 "trim": args.trim, "density": args.density,
                 "gamma": args.gamma, "rows": args.rows or 0,
+                "invert": False, "rotation": args.rotation, "mirror": args.mirror,
                 "lowpass": args.scope_lowpass or 0.0,
                 "mode": args.render_mode, "raster": args.render_mode == "raster",
                 "mode_locked": len(live_capture_modes(args)) == 1,
@@ -1292,6 +1463,13 @@ def main(argv=None):
         last_report = 0.0
         while not stop.is_set():
             if gui is not None:
+                if gen is not None and hasattr(grab, "prepared_snapshot"):
+                    raw, version = grab.prepared_snapshot()
+                    key = (version, tone.invert)
+                    if key != stream_reference_key:
+                        luminance, _version = tone.prepare(raw, version)
+                        scope.publish_luma(luminance)
+                        stream_reference_key = key
                 source = getattr(scope, "source", None)
                 buffered_samples = (
                     source.buffered_samples
@@ -1390,6 +1568,23 @@ def main(argv=None):
                         live_state["audio_muted"] = not audible
                     elif action[0] == "fullscreen":
                         gui.set_fullscreen(action[1])
+                    elif action[0] == "image_only":
+                        gui.set_image_only(action[1])
+                    elif action[0] == "key":
+                        key = action[1]
+                        with render_lock:
+                            if key == "i":
+                                tone.invert = not tone.invert
+                                live_state["invert"] = tone.invert
+                                lv.update(lo=None, hi=None)
+                                if gen is not None:
+                                    gen.configure(invert=tone.invert)
+                            elif key == "r":
+                                scope.set_rotation((scope.rotation + 90) % 360)
+                                live_state["rotation"] = scope.rotation
+                            elif key == "m":
+                                scope.set_mirror(not scope.mirror)
+                                live_state["mirror"] = scope.mirror
                 if gui is not None and gui.close_requested:
                     break
             while True:

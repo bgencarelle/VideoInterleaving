@@ -749,9 +749,8 @@ def configure_runtime():
                              "--scope-source images")
             if not render_was_selected:
                 requested_render = "raster"
-            if requested_render not in ("raster", "stochastic", "stipple"):
-                parser.error("--scope-source images supports raster, stochastic, "
-                             "or stipple rendering; vector/fusion require a bake")
+            if requested_render not in ("vector", "raster", "stochastic", "stipple", "fusion"):
+                parser.error("Choose a supported scope renderer")
             settings.SCOPE_RENDER_MODE = requested_render
             if args.scope_mix is not None:
                 parser.error("--scope-mix requires baked vector geometry and "

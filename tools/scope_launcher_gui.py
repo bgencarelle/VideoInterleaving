@@ -31,8 +31,7 @@ APP_SOURCE_CHOICES = (("Baked XY libraries", "bake"),
 RENDER_CHOICES = (("Vector", "vector"), ("Raster", "raster"),
                   ("Stochastic", "stochastic"), ("Stipple", "stipple"),
                   ("Fusion", "fusion"))
-IMAGE_RENDER_CHOICES = tuple(item for item in RENDER_CHOICES
-                             if item[1] in ("raster", "stochastic", "stipple"))
+IMAGE_RENDER_CHOICES = RENDER_CHOICES
 LIVE_SOURCE_CHOICES = (("Video file / stream", "video"),
                        ("Screen capture · MSS", "screen"),
                        ("Screen / FFmpeg input", "ffmpeg"),
@@ -67,7 +66,7 @@ def _enumerate_camera_sources():
 
 
 SELECT_CHOICES = {
-    "live_render_mode": IMAGE_RENDER_CHOICES,
+    "live_render_mode": RENDER_CHOICES,
     "run_mode": RUN_CHOICES,
     "app_source": APP_SOURCE_CHOICES,
     "render_mode": RENDER_CHOICES,
@@ -160,7 +159,8 @@ def _settings_defaults():
         "live_density": "1.0",
         "live_rows": "",
         "adapt": "4.0",
-        "capture_fps": "12.0",
+        "capture_fps": "",
+        "camera_rate_explicit": False,
         "downto": "160",
         "stream": False,
         "buffer_blocks": "6",
@@ -294,7 +294,7 @@ def validate_settings(settings, outputs=(), root=ROOT):
     x_only = bool(settings.get("x_only", False))
     min_channels = required_output_channels(channels, x_only)
     device = str(settings.get("device", "")).strip()
-    if device and device.lower() != "null":
+    if device:
         try:
             device_index = int(device)
         except ValueError as exc:
@@ -318,7 +318,7 @@ def validate_settings(settings, outputs=(), root=ROOT):
         if renderer not in dict(RENDER_CHOICES).values():
             raise ValueError("Choose a supported scope renderer")
         if source == "images" and renderer not in dict(IMAGE_RENDER_CHOICES).values():
-            raise ValueError("Runtime images support raster, stochastic, or stipple")
+            raise ValueError("Choose a supported runtime-image renderer")
         if settings.get("trigger_shape", "ramp") not in dict(TRIGGER_SHAPES).values():
             raise ValueError("Choose a supported trigger shape")
         if settings.get("yt_timing", "dwell") not in dict(YT_TIMINGS).values():
@@ -397,13 +397,13 @@ def validate_settings(settings, outputs=(), root=ROOT):
 
     source = settings.get("live_source", "test")
     live_mode = settings.get("live_render_mode", "raster")
-    if live_mode not in dict(IMAGE_RENDER_CHOICES).values():
-        raise ValueError("Live capture supports raster, stochastic, or stipple")
+    if live_mode not in dict(RENDER_CHOICES).values():
+        raise ValueError("Choose a supported live capture renderer")
     if live_mode != "raster" and (
             settings.get("stream") or _number(settings, "live_fields", integer=True) != 1
             or str(settings.get("geometry_samples", "")).strip()
             or str(settings.get("traversal_hz", "")).strip()):
-        raise ValueError("Live stochastic/stipple require whole traces, one field, "
+        raise ValueError("Live non-raster modes require whole traces, one field, "
                          "and no raster geometry/traversal override")
     if source not in dict(LIVE_SOURCE_CHOICES).values():
         raise ValueError("Choose a supported live source")
@@ -455,7 +455,8 @@ def validate_settings(settings, outputs=(), root=ROOT):
         raise ValueError("Tone gamma must be greater than zero")
     if _number(settings, "live_density") <= 0:
         raise ValueError("Samples per cell must be greater than zero")
-    if _number(settings, "capture_fps") <= 0:
+    capture_fps = _number(settings, "capture_fps", optional=True)
+    if capture_fps is not None and capture_fps <= 0:
         raise ValueError("Capture rate must be greater than zero")
     live_trim = _number(settings, "live_trim")
     if not 0.0 <= live_trim <= 1.0:
@@ -722,13 +723,25 @@ class ScopeLauncher:
         self._device_cache = {}
         self._camera_cache = None
         self._camera_pending = False
+        self._capture_fps_cache = {}
+        self._capture_fps_pending = set()
+        self._camera_start_requested = False
         self.preference_path = Path(preference_path or preferences_path())
         self.settings = dict(DEFAULT_SETTINGS)
         self.resume = {}
+        legacy_camera_rate = False
         if restore_preferences:
             saved, self.resume = load_preferences(self.preference_path)
             self.settings.update({key: value for key, value in saved.items()
                                   if key in self.settings})
+            legacy_camera_rate = (
+                self.settings.get("run_mode") == "live" and self.settings.get("live_source") == "camera"
+                and str(self.settings.get("capture_fps", "")) in ("12", "12.0")
+                and not self.settings.get("camera_rate_explicit"))
+            if legacy_camera_rate:
+                self.settings["capture_fps"] = ""
+        if str(self.settings.get("device", "")).strip().lower() == "null":
+            self.settings["device"] = ""
         if (self.settings.get("app_source") == "images" and
                 self.settings.get("render_mode") not in
                 dict(IMAGE_RENDER_CHOICES).values()):
@@ -742,7 +755,9 @@ class ScopeLauncher:
         self.dropdown_scroll = 0
         self.editing = False
         self.edit_buffer = ""
-        self.notice = device_error or "Choose a source. Check Output, then Start scope."
+        self.notice = device_error or (
+            "Camera capture uses Source default instead of the legacy 12 fps setting."
+            if legacy_camera_rate else "Choose a source. Check Output, then Start scope.")
         self.process = None
         self.active_settings = None
         self.restart_requested = False
@@ -945,7 +960,6 @@ class ScopeLauncher:
             self.device_error = error
             self.notice = error
         choices = [("System default / automatic", "")]
-        choices.append(("Null · virtual scope output", "null"))
         choices.extend((f"[{index}] {name} · {api} · {rate or '?'} Hz", str(index))
                        for index, (_global, name, api, rate) in enumerate(devices))
         return tuple(choices), devices
@@ -980,8 +994,23 @@ class ScopeLauncher:
         return (f"Video device enumeration failed: {error}. "
                 "Try Screen / FFmpeg input.")
 
+    def _camera_permissions(self):
+        """Open the host's camera-access settings after a permission failure."""
+        try:
+            if sys.platform == "darwin":
+                subprocess.Popen(["open", "x-apple.systempreferences:com.apple.preference.security?Privacy_Camera"])
+            elif sys.platform.startswith("win"):
+                os.startfile("ms-settings:privacy-webcam")
+            self.notice = ("Allow camera access for the app/terminal launching scope, then retry Start."
+                           if sys.platform == "darwin" or sys.platform.startswith("win") else
+                           "Check access to the selected /dev/video device and close other camera apps; then retry Start.")
+        except OSError as exc:
+            self.notice = f"Could not open camera access settings: {exc}"
+        self.dirty = True
+
     def _is_dropdown_field(self, key):
         return (key in SELECT_CHOICES or key == "device" or
+                (key == "capture_fps" and self.settings.get("live_source") == "camera") or
                 (key == "ffmpeg_input" and
                  self.settings.get("live_source") == "camera"))
 
@@ -1004,6 +1033,13 @@ class ScopeLauncher:
         self.dropdown_scroll = max(0, index - 4)
 
     def _choices(self, key):
+        if key == "capture_fps" and self.settings.get("live_source") == "camera":
+            camera = str(self.settings.get("ffmpeg_input", ""))
+            if camera and camera not in self._capture_fps_cache and camera not in self._capture_fps_pending:
+                self._capture_fps_pending.add(camera)
+                threading.Thread(target=self._discover_capture_fps, args=(camera,),
+                                 daemon=True, name="scope-camera-rates").start()
+            return self._capture_fps_cache.get(camera, (("Source default", ""),))
         if key == "device":
             return self._device_choices()[0]
         if key == "ffmpeg_input" and self.settings.get("live_source") == "camera":
@@ -1011,6 +1047,15 @@ class ScopeLauncher:
         if key == "render_mode" and self.settings.get("app_source") == "images":
             return IMAGE_RENDER_CHOICES
         return SELECT_CHOICES.get(key, ())
+
+    def _discover_capture_fps(self, camera):
+        try:
+            from tools.v7_send_gui import enumerate_capture_fps
+            choices = enumerate_capture_fps("camera", camera=camera)
+            error = ""
+        except Exception as exc:
+            choices, error = (("Source default", ""),), str(exc)
+        self.events.put(("capture_rates", (camera, choices, error)))
 
     def _sections(self):
         groups = []
@@ -1123,17 +1168,36 @@ class ScopeLauncher:
             self._persist()
 
     def _assign(self, key, value):
+        previous = self.settings.get(key)
         self.settings[key] = value
+        if key in ("live_source", "ffmpeg_input", "run_mode"):
+            self._camera_start_requested = False
+        if key == "live_render_mode" and value != "raster":
+            self.settings.update(stream=False, live_fields="1",
+                                 geometry_samples="", traversal_hz="")
+            self.notice = "Drawing mode selected: whole traces, one field; raster-only overrides cleared."
+        if key == "app_source" and value == "images":
+            self.settings.update(geometry_samples="", traversal_hz="")
         if key in ("run_mode", "app_source", "live_source"):
             if key == "run_mode":
                 self.selected = "app_source" if value == "app" else "live_source"
-            elif key == "app_source" and value == "images" and self.settings.get("render_mode") not in dict(IMAGE_RENDER_CHOICES).values():
+            elif (key == "app_source" and value == "images" and previous != "images"
+                  and self.settings.get("render_mode") in ("vector", "fusion")):
                 self.settings["render_mode"] = "raster"
             elif key == "live_source":
+                if value == "camera":
+                    self.settings["capture_fps"] = ""
+                    self.settings["camera_rate_explicit"] = False
                 if value == "video" and not self.settings.get("video_file"):
                     self.selected = "video_file"
                 elif value == "camera" and not self.settings.get("ffmpeg_input"):
                     self.selected = "ffmpeg_input"
+        if key == "ffmpeg_input" and self.settings.get("live_source") == "camera":
+            self.settings["capture_fps"] = ""
+            self.settings["camera_rate_explicit"] = False
+            self._choices("capture_fps")
+        if key == "capture_fps" and self.settings.get("live_source") == "camera":
+            self.settings["camera_rate_explicit"] = bool(str(value).strip())
         self.dropdown = None
         self._ensure_selection()
         if hasattr(self, "_height"):
@@ -1218,6 +1282,17 @@ class ScopeLauncher:
         if self.editing and not self._edit_finish():
             return
         if self.process is not None:
+            return
+        if self._camera_start_requested:
+            self._camera_start_requested = False
+            self.notice = "Camera start cancelled."
+            self.dirty = True
+            return
+        if (self.settings.get("run_mode") == "live" and self.settings.get("live_source") == "camera"
+                and self.settings.get("ffmpeg_input") in self._capture_fps_pending):
+            self._camera_start_requested = True
+            self.notice = "Waiting for camera rate discovery… Click Cancel start to cancel."
+            self.dirty = True
             return
         try:
             command = self._build_command()
@@ -1408,7 +1483,17 @@ class ScopeLauncher:
                 kind, value = self.events.get_nowait()
             except queue.Empty:
                 break
-            if kind == "cameras":
+            if kind == "capture_rates":
+                camera, choices, error = value
+                self._capture_fps_pending.discard(camera)
+                self._capture_fps_cache[camera] = tuple(choices)
+                if self.settings.get("ffmpeg_input") == camera and error:
+                    self.notice = f"Camera rate discovery: {error}. Source default is available."
+                if (self._camera_start_requested and self.settings.get("live_source") == "camera"
+                        and self.settings.get("ffmpeg_input") == camera):
+                    self._camera_start_requested = False
+                    self._start()
+            elif kind == "cameras":
                 self._camera_cache = value
                 self._camera_pending = False
                 if self.settings.get("live_source") == "camera":
@@ -1481,14 +1566,17 @@ class ScopeLauncher:
         self.hits = {}
         toolbar_height = self.TOOLBAR_HEIGHT
         draw.rectangle((0, 0, width, toolbar_height), fill=(10, 18, 25, 255))
-        toolbar = (("start", "Stop scope" if self.process else "Start scope",
-                    "Stop scope" if self.process else "Start scope"),
+        start_label = ("Stop scope" if self.process else
+                       "Cancel start" if self._camera_start_requested else "Start scope")
+        toolbar = (("start", start_label, start_label),
                    ("defaults", "Defaults", "Defaults"),
                    ("refresh", "Devices", "Devices"),
                    ("fullscreen", "Restore" if self.fullscreen else "Fullscreen",
                     "Restore" if self.fullscreen else "Full"))
         if self._settings_pending():
             toolbar = (("apply", "Apply & restart", "Apply"),) + toolbar
+        if self.settings.get("live_source") == "camera" and self.settings.get("run_mode") == "live":
+            toolbar += (("camera_access", "Camera access", "Access"),)
         compact = width < 980
         right = width - unit(12)
         compact_gutter = unit(5)
@@ -1739,6 +1827,8 @@ class ScopeLauncher:
                       font=self.small, fill=(183, 201, 212))
 
     def _display_value(self, key):
+        if key == "capture_fps" and not str(self.settings.get(key, "")).strip():
+            return "Source default"
         value = self.settings.get(key, "")
         if key == "render_mode" and self.settings.get("run_mode") == "live":
             return "Raster only · live screen / video"
@@ -1825,10 +1915,15 @@ class ScopeLauncher:
         if action != self.glfw.PRESS:
             return
         stop_rect = self.hits.get("start")
-        if (self.process is not None and stop_rect is not None
+        if ((self.process is not None or self._camera_start_requested) and stop_rect is not None
                 and stop_rect[0] <= x <= stop_rect[2]
                 and stop_rect[1] <= y <= stop_rect[3]):
-            self._stop()
+            if self._camera_start_requested:
+                self._camera_start_requested = False
+                self.notice = "Camera start cancelled."
+                self.dirty = True
+            else:
+                self._stop()
             return
         if self.editing and not self._edit_finish():
             return
@@ -1877,11 +1972,13 @@ class ScopeLauncher:
             elif key == "fullscreen":
                 self._toggle_fullscreen()
             elif key == "defaults":
+                self._camera_start_requested = False
                 self.settings = dict(DEFAULT_SETTINGS)
                 self._ensure_selection()
                 self._persist()
                 self.notice = "Settings reset to application defaults."
             elif key == "refresh":
+                self._capture_fps_cache.clear()
                 self._device_choices(refresh=True)
                 cameras, camera_error = self._camera_choices(refresh=True)
                 if (self.settings.get("run_mode") == "live" and
@@ -1890,6 +1987,8 @@ class ScopeLauncher:
                                    f"Refreshed {len(cameras)} camera device(s).")
                 else:
                     self.notice = "Audio and video device lists refreshed."
+            elif key == "camera_access":
+                self._camera_permissions()
             elif key == "play_pause":
                 if self.process is None:
                     self._start()
@@ -1911,6 +2010,7 @@ class ScopeLauncher:
             self.notice = str(exc)
             return
         if path:
+            self._camera_start_requested = False
             if key == "video_file" and str(self.settings.get(key, "")) != path:
                 if self.process is None:
                     self.playback = None
@@ -1945,12 +2045,14 @@ class ScopeLauncher:
     def _on_drop(self, _window, paths):
         if not paths:
             return
+        self._camera_start_requested = False
         path = Path(paths[0]).expanduser()
         if path.is_dir():
+            previous_source = self.settings.get("app_source")
             self.settings["run_mode"] = "app"
             self.settings["app_source"] = "images"
             self.settings["image_dir"] = str(path)
-            if self.settings.get("render_mode") not in dict(IMAGE_RENDER_CHOICES).values():
+            if previous_source != "images" and self.settings.get("render_mode") in ("vector", "fusion"):
                 self.settings["render_mode"] = "raster"
             self.selected = "image_dir"
             self.notice = f"Selected image folder: {path.name}"

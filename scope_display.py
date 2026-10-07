@@ -670,12 +670,6 @@ def run_scope(clock_source=None):
     if scope_source not in ("bake", "images"):
         raise ValueError("SCOPE_SOURCE must be 'bake' or 'images'")
     live_size = max(16, int(getattr(settings, "SCOPE_LIVE_SIZE", 128)))
-    if scope_source == "images" and render_mode == "vector":
-        render_mode = "raster"
-    if scope_source == "images" and render_mode not in (
-            "raster", "stochastic", "stipple"):
-        raise ValueError("live scope images support raster, stochastic, "
-                         "or stipple; vector/fusion need an XY bake")
     _validate_independent_trajectory(
         scope_source, render_mode, geometry_samples, traversal_hz, trigger_on)
     use_raster = render_mode == "raster"
@@ -1095,7 +1089,12 @@ def run_scope(clock_source=None):
                   x_only=x_only,
                   channel_pair=channel_pair,
                   yt_trigger_us=trigger_us)
+    if scope_source == "images" and (gui_enabled or render_mode in ("vector", "fusion")):
+        from scope_live_renderers import LiveVectorEmitter
+        scope._runtime_vector = LiveVectorEmitter(scope.samplerate, scope.samples_per_frame)
     if gui_enabled:
+        from scope_live_renderers import warm_live_preview
+        warm_live_preview()
         # Keep the native visualizer quiet on launch. The preview tap remains
         # upstream of this output-stage mute, so the GUI image is unaffected.
         scope.set_output_audio(muted=True)
@@ -1420,11 +1419,7 @@ def run_scope(clock_source=None):
                       audio_muted=gui_enabled,
                       mix_hz=mix_hz, mix_duty=mix_duty,
                       fps=fps, ips=IPS, fields=fields,
-                      available_modes=(
-                          ("raster", "stochastic", "stipple")
-                          if scope_source == "images"
-                          else ("vector", "raster", "stochastic", "stipple",
-                                "fusion")),
+                      available_modes=("vector", "raster", "stochastic", "stipple", "fusion"),
                       stipple_points=stipple_points,
                       fusion_components=fusion_components)
     # --- monitoring ---
@@ -2690,6 +2685,16 @@ def _emit(scope, ml, fl, index, render_mode, sweep, sweep_mode,
             fields=target.fields, precondition=target.precondition,
             yt_fixed=(target.yt_timing == "fixed"))
 
+    def runtime_vector(luminance):
+        from scope_live_renderers import LiveVectorEmitter
+        target = getattr(scope, "_runtime_vector", None)
+        if target is None or target.n != n:
+            target = LiveVectorEmitter(scope.samplerate, n)
+            scope._runtime_vector = target
+        target.gamma, target.trim = gamma, trim
+        target._end = (None if beam_start is None else np.asarray(beam_start, dtype=np.float32))
+        return target.emit(luminance)
+
     if render_mode == "fusion":
         # Build corresponding V/R/S position arrays, then select their entries
         # by sampled source light. No coordinates are averaged and no
@@ -2708,8 +2713,10 @@ def _emit(scope, ml, fl, index, render_mode, sweep, sweep_mode,
         try:
             fusion_luma = prepare_luma(
                 ml, index, fl, index, raw=True, invert=invert)
+            if Scope._tap_until > _time_mono():
+                Scope.publish_luma(fusion_luma)
             if "v" in components:
-                vector_frame = (
+                vector_frame = (runtime_vector(fusion_luma) if source_thumbnails is not None else
                     prepared_cache.vector_frame(
                         ml, index, fl, index, samples=n,
                         min_feature=min_feature, rotation=rotation)
@@ -2897,6 +2904,8 @@ def _emit(scope, ml, fl, index, render_mode, sweep, sweep_mode,
             return end
     else:
         # empty -> safe idle circle, never a parked dot
+        if Scope._tap_until > _time_mono():
+            Scope.publish_luma(prepare_luma(ml, index, fl, index, raw=True, invert=invert))
         if vector_trajectory is not None:
             canonical_n = vector_trajectory.geometry_samples or n
             canonical = (prepared_cache.vector_frame(
@@ -2915,13 +2924,14 @@ def _emit(scope, ml, fl, index, render_mode, sweep, sweep_mode,
             frame = vector_trajectory.emit(
                 canonical, n, scope.samplerate)
         else:
-            frame = (prepared_cache.vector_frame(
+            frame = (runtime_vector(prepare_luma(ml, index, fl, index, raw=True, invert=invert))
+                     if source_thumbnails is not None else prepared_cache.vector_frame(
                 ml, index, fl, index, samples=n, min_feature=min_feature,
                 rotation=rotation) if prepared_cache is not None else
                 rotate_frame(rasterize(
                     merge(ml, index, fl, index, min_feature=min_feature), n),
                     rotation))
-        if invert and vector_trajectory is None:
+        if invert and vector_trajectory is None and source_thumbnails is None:
             inverse_luma = prepare_luma(
                 ml, index, fl, index, raw=True, invert=True)
             weights = trace_luminance_weights(

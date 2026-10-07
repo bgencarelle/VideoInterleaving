@@ -5759,3 +5759,112 @@ No new performance or physical-camera compatibility claim is made.
 Drawing buttons switch it during playback for whole-trace, one-field output
 without raster trajectory overrides. A068–A070 changes are local follow-ups;
 S7/S8 transport closeout remains unchanged.
+
+---
+
+## Appendix A071 — Renderer responsiveness, live geometry and modem camera workflow — 2026-10-07
+
+**Request:** after reporting poor renderer quality/speed, missing live vector and
+fusion, and camera permission/rate errors, the user requested “fix everything.”
+This is a bounded scope GUI/capture follow-up to A067–A070.
+
+**Implemented:** native preview production is capped at 30 Hz with a bounded
+512-pixel CPU phosphor workspace. Preview-only refresh uploads its own RGB texture
+and composites it in one GL draw; it avoids PIL resizing and whole-control-canvas
+comparison on each moving frame. Controls remain independently rate-limited;
+metrics-only full redraws are limited to 1 Hz. Lower preview exposure and narrower
+spot defaults reduce bloom. Preview controls include explicitly labelled Output
+trace and Source reference views; the latter shows captured luminance, not a claim
+about the output waveform. Source-view exposure/spot controls are disabled.
+
+`scope_live_renderers.py` provides three-band captured-luminance contour geometry,
+compiled nearest-contour traversal/arc-length sampling, and aligned V/R/S temporal
+fusion through the existing PositionMultiplexer. Empty vector geometry uses the
+existing idle trajectory. Vector and fusion are available for standalone live
+capture and application runtime-image folders without an XY bake. Candidate
+trajectory/RNG/multiplexer state is restored on rejected live output. GUI selection
+clears incompatible raster-only overrides; direct CLI validation still enforces
+whole-trace, one-field output for non-raster modes. Runtime-image default selection
+remains raster. Adaptive levels remain raster-only. Contour extraction uses native
+OpenCV; band masks, traversal and per-sample arithmetic use Numba.
+
+Camera selection now reuses modem device/rate discovery and `v7_capture.camera_source`
+itself, including PPM framing, RGB geometry and FFmpeg diagnostics. Camera Capture
+FPS offers Source default and device-reported rates; legacy unmarked 12-fps camera
+preferences migrate to Source default. Explicit selections are preserved. Source
+default selects a reported rate near 30 when available, and retries once using an
+AVFoundation-supported range from a rejected input's diagnostic. Capture startup
+remains bounded; rate discovery stays asynchronous, and Start waits for its pending
+probe rather than opening the camera concurrently. Pending start can be cancelled.
+Camera access opens host permission settings on macOS/Windows and provides Linux
+device-access guidance. Actual permission decisions remain with the host OS.
+
+Live Invert, Rotate, Mirror and image-only actions are now connected to the live
+pipeline. Transformed luminance is pinned per source version and ordered field
+group. Streaming inversion uses SweepSource.configure; output orientation uses
+Scope's existing setters. Capture/render failures retain their diagnostics, and
+startup interruption/output-setup failure closes owned capture resources. GUI
+preview/new renderer kernels are prepared before stream start.
+
+**Measured evidence:** matching eight-second moving-video runs used
+`modem_tests/fixtures/v7_pixel_motion_16x9.mp4`, 30-Hz capture and software GL under
+Xvfb. The preview baseline was HEAD's A070 ScopeGUI, with the same current capture
+harness; these are follow-up comparisons, not fresh D0/S7 validation.
+
+| Path | Preview presented/s, before → after | Accepted traces/s, before → after | Process CPU cores, before → after |
+|---|---|---|---|
+| NullStream | 2.00 → 27.43 | 29.34 → 29.43 | 0.40 → 0.92 |
+| PortAudio pulse → loop | 2.00 → 27.48 | 29.31 → 29.34 | 0.37 → 0.88 |
+
+The verified Pulse route was the existing stereo 44.1-kHz null sink `loop`, default
+source `loop.monitor`, channels 1/2. Both Pulse runs recorded zero DAC dropouts.
+These counts are accepted traces and observed preview refreshes, not complete
+picture throughput or physical-display latency. More preview frames consumed more
+software-GL CPU; full control redraw median also increased (Pulse 25.6 → 36.2 ms),
+although metrics-only redraw frequency was reduced. The change is not an overall
+CPU reduction or satisfaction of the frozen 30+ complete-picture objective.
+
+Preview-only microbenchmark: 680-pixel median 7.57 ms versus 512-pixel 3.86 ms on
+3,200-sample synthetic raster input. New renderer warm microbenchmarks, alternating
+two decoded fixture pictures: vector median/p95 2.22/2.35 ms, fusion 3.78/4.25 ms.
+These exclude capture/output/GUI and are not end-to-end performance evidence.
+
+**Verification:** selected scope regression and scope lazy-import checks passed
+378 tests plus 49 subtests. Native simulated-camera/NullStream interaction checks
+switched vector → fusion → stochastic → stipple → raster, observed accepted output
+after every transition, switched Source reference/Output trace, and verified live
+Invert/Rotate/Mirror/image-only state. An actual X-display screenshot verified fast
+GPU overlay scaling, placement and top/bottom orientation. Launcher/native layout
+artifacts at compact/normal sizes had in-bounds hit rectangles; screenshots were
+inspected. Shared FFmpeg capture was exercised with red/blue file frames, checking
+PPM framing, aspect, RGB luminance and cleanup. Camera negotiation/permission and
+startup-resource branches have mocked regressions; no physical camera was used.
+
+**Artifacts:** `tmp/scope-renderer-followup/` contains before/after JSON, screenshots,
+layout checks and live renderer timing; runners are `tmp/scope_preview_comparison.py`,
+`tmp/scope_preview_gpu_check.py`, `tmp/scope_live_render_costs.py`,
+`tmp/scope_camera_backend_check.py`, `tmp/scope_camera_mode_check.py` and
+`tmp/scope_gui_evaluation.py`. All are ignored local evidence.
+
+**Limits/Handoff:** interactive browser inspection is still blocked by the precise
+`browser.disconnected` result from tabs.list. Ordinary web-mode visual/performance
+parity and the user's physical camera/permissions are not established. The source
+reference offers a direct diagnostic comparison; it does not substitute for trace
+quality. Camera → Drawing offers all five renderers; Preview switches between the
+output trace and source reference. S7/S8 remain closed with their prior disclosed
+limits. This entry supersedes A070's raw-capture vector/fusion restriction.
+
+---
+
+## Appendix A072 — Remove Null output from the GUI — 2026-10-07
+
+**Request:** the user stated “output null has to go away. it has no function.”
+
+**Implemented:** removed Null from the launcher's output picker. Saved Null device
+preferences reset to System default / automatic. Launcher validation now accepts
+only the default selection or an audio-device list index.
+
+**Verification:** launcher suite passed 47 tests and 7 subtests.
+
+**Handoff:** choose System default / automatic or an enumerated audio output in
+the GUI. The native XY on/off control still controls output muting.

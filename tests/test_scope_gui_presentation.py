@@ -92,6 +92,31 @@ class ScopePresentationTests(unittest.TestCase):
         texture.release.assert_called_once()
         self.assertEqual(gui.context.texture.call_count, 2)
 
+    def test_moving_preview_upload_bypasses_control_redraw_and_full_canvas_diff(self):
+        import numpy as np
+        gui = self.make_gui()
+        gui.Image = Image
+        gui._canvas = Image.new("RGBA", (32, 24))
+        gui._uploaded_image = gui._canvas.copy()
+        gui._preview_display_rect = (4, 3, 8, 8)
+        gui.texture = SimpleNamespace(size=(32, 24), write=Mock(), use=Mock())
+        gui._gpu_preview_texture = SimpleNamespace(size=(8, 8), write=Mock(), use=Mock())
+        gui.context = SimpleNamespace(viewport=None)
+        gui.moderngl = SimpleNamespace(TRIANGLES=1)
+        gui.vao = SimpleNamespace(render=Mock())
+        with patch("scope_gui.time.monotonic", return_value=10):
+            gui.poll({})
+        rgb = np.full((8, 8, 3), 123, np.uint8)
+        gui._preview_rgb = rgb
+        with patch("scope_gui.time.monotonic", return_value=10.04):
+            gui.poll({})
+        self.assertEqual(gui._draw.call_count, 1)
+        gui.texture.write.assert_not_called()
+        gui._gpu_preview_texture.write.assert_called_once_with(rgb.tobytes(), alignment=1)
+        self.assertEqual(gui.vao.render.call_count, 2)
+        self.assertEqual(gui.context.viewport, (0, 0, 32, 24))
+        self.assertIs(gui._last_draw_preview_rgb, rgb)
+
     def test_pointer_tabs_and_preview_presets_do_not_dispatch_output_changes(self):
         gui = self.make_gui()
         gui.glfw.MOUSE_BUTTON_LEFT = 0
@@ -102,7 +127,7 @@ class ScopePresentationTests(unittest.TestCase):
         self.assertEqual(gui._control_tab, "preview")
         gui._hits = {"preview:crisp": (0, 0, 10, 10)}
         gui._on_mouse_button(gui.window, 0, 1, 0)
-        self.assertEqual(gui.preview_exposure, 0.7)
+        self.assertEqual(gui.preview_exposure, 0.35)
         self.assertEqual(gui.preview_spot_width, 0.5)
         gui.specs = {"exposure": SimpleNamespace(default=1.3),
                      "spot": SimpleNamespace(default=1.0)}
@@ -111,6 +136,13 @@ class ScopePresentationTests(unittest.TestCase):
         self.assertEqual(gui.preview_exposure, 1.3)
         self.assertEqual(gui.preview_spot_width, 1.0)
         self.assertEqual(gui._actions, [])
+        gui._hits = {"view:source": (0, 0, 10, 10)}
+        gui._on_mouse_button(gui.window, 0, 1, 0)
+        self.assertEqual(gui._preview_view, "source")
+        self.assertTrue(gui._slider_disabled("exposure", {}))
+        gui._hits = {"view:trace": (0, 0, 10, 10)}
+        gui._on_mouse_button(gui.window, 0, 1, 0)
+        self.assertFalse(gui._slider_disabled("exposure", {}))
 
     def test_cached_static_text_matches_pillow_and_reuses_surfaces(self):
         gui = self.make_gui()

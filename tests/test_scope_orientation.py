@@ -201,11 +201,11 @@ class CommandLineTests(unittest.TestCase):
         self.assertEqual(settings.SCOPE_CHANNELS, (18, 19))
         self.assertEqual(settings.SCOPE_RENDER_MODE, "raster")
 
-    def test_live_scope_rejects_bake_only_renderers(self):
-        with contextlib.redirect_stderr(io.StringIO()):
-            with self.assertRaises(SystemExit) as err:
-                self.configure("--scope-source", "images", "--scope-mode", "vector")
-        self.assertEqual(err.exception.code, 2)
+    def test_runtime_images_accept_vector_and_fusion_without_a_bake(self):
+        for mode in ("vector", "fusion"):
+            with self.subTest(mode=mode):
+                self.configure("--scope-source", "images", "--scope-mode", mode)
+                self.assertEqual(settings.SCOPE_RENDER_MODE, mode)
 
     def test_a_non_quarter_turn_is_rejected_at_the_boundary(self):
         with contextlib.redirect_stderr(io.StringIO()):

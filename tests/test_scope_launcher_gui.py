@@ -23,7 +23,7 @@ class ScopeLauncherCommandTests(unittest.TestCase):
         self.root = Path(self.temp.name)
         self.settings = copy.deepcopy(DEFAULT_SETTINGS)
         self.settings.update({
-            "device": "null", "channels": "1,2", "x_only": True,
+            "device": "", "channels": "1,2", "x_only": True,
             "trigger": True, "xy_dir": "", "image_dir": str(self.root),
         })
 
@@ -110,11 +110,14 @@ class ScopeLauncherCommandTests(unittest.TestCase):
         self.assertIn("--scope-gui-image-only", command)
         self.assertIn("--scope-gui-fullscreen", command)
 
-    def test_runtime_images_reject_baked_geometry_modes(self):
+    def test_runtime_images_support_vector_and_fusion_without_a_bake(self):
         self.settings.update({"run_mode": "app", "app_source": "images",
                               "render_mode": "vector"})
-        with self.assertRaisesRegex(ValueError, "Runtime images"):
-            validate_settings(self.settings, root=self.root)
+        for mode in ("vector", "fusion"):
+            self.settings["render_mode"] = mode
+            command = build_command(self.settings, root=self.root)
+            self.assertNotIn("--xy-dir", command)
+            self.assertEqual(command[command.index("--scope-mode") + 1], mode)
 
     def test_live_video_command_includes_transport_and_saved_position(self):
         video = self.root / "clip.mp4"
@@ -156,7 +159,7 @@ class ScopeLauncherCommandTests(unittest.TestCase):
     def test_camera_commands_forward_all_supported_drawing_modes(self):
         self.settings.update(run_mode="live", live_source="camera",
                              ffmpeg_input="v4l2:/dev/video0")
-        for mode in ("raster", "stochastic", "stipple"):
+        for mode in ("vector", "raster", "stochastic", "stipple", "fusion"):
             with self.subTest(mode=mode):
                 self.settings["live_render_mode"] = mode
                 command = build_command(self.settings, root=self.root)
@@ -418,11 +421,81 @@ class RunningSettingsTests(unittest.TestCase):
         self.assertIn("live_render_mode", gui._visible_fields())
         self.assertNotIn("render_mode", gui._visible_fields())
         self.assertEqual([value for _label, value in gui._choices("live_render_mode")],
-                         ["raster", "stochastic", "stipple"])
+                         ["vector", "raster", "stochastic", "stipple", "fusion"])
         gui._assign("run_mode", "app")
         gui._assign("app_source", "images")
         self.assertEqual([value for _label, value in gui._choices("render_mode")],
-                         ["raster", "stochastic", "stipple"])
+                          ["vector", "raster", "stochastic", "stipple", "fusion"])
+
+    def test_camera_selection_reuses_modem_rate_picker_without_stale_12fps(self):
+        gui = self.gui
+        gui.settings["capture_fps"] = "12"
+        gui._assign("live_source", "camera")
+        self.assertEqual(gui.settings["capture_fps"], "")
+        rates = (("Source default", ""), ("60 fps", "60"))
+        with patch("tools.scope_launcher_gui.threading.Thread"), \
+                patch("tools.v7_send_gui.enumerate_capture_fps", return_value=rates) as probe:
+            gui._assign("ffmpeg_input", "avfoundation:0")
+            self.assertTrue(gui._is_dropdown_field("capture_fps"))
+            gui._discover_capture_fps("avfoundation:0")
+            gui._drain_events()
+        probe.assert_called_once_with("camera", camera="avfoundation:0")
+        self.assertEqual(gui._choices("capture_fps"), rates)
+
+    def test_restore_migrates_legacy_camera_12fps_but_preserves_explicit_choices(self):
+        for explicit in (False, True):
+            with self.subTest(explicit=explicit):
+                path = Path(self.temp.name) / f"camera-{explicit}.json"
+                save_preferences(path, {"run_mode": "live", "live_source": "camera",
+                                        "capture_fps": "12.0", "camera_rate_explicit": explicit}, {})
+                with patch.object(ScopeLauncher, "_init_graphics"):
+                    restored = ScopeLauncher(preference_path=path)
+                self.assertEqual(restored.settings["capture_fps"], "12.0" if explicit else "")
+
+    def test_selecting_live_vector_clears_incompatible_raster_settings(self):
+        gui = self.gui
+        gui.settings.update(stream=True, live_fields="2", geometry_samples="3200", traversal_hz="30")
+        gui._assign("live_render_mode", "vector")
+        self.assertFalse(gui.settings["stream"])
+        self.assertEqual(gui.settings["live_fields"], "1")
+        self.assertEqual(gui.settings["geometry_samples"], "")
+        self.assertEqual(gui.settings["traversal_hz"], "")
+
+    def test_camera_access_action_opens_macos_settings(self):
+        with patch("tools.scope_launcher_gui.sys.platform", "darwin"), \
+                patch("tools.scope_launcher_gui.subprocess.Popen") as open_settings:
+            self.gui._camera_permissions()
+        self.assertIn("Privacy_Camera", open_settings.call_args.args[0][1])
+        self.assertIn("Allow camera access", self.gui.notice)
+
+    def test_camera_start_waits_for_rate_probe_without_opening_device_concurrently(self):
+        gui = self.gui
+        gui.process = None
+        gui.settings.update(live_source="camera", ffmpeg_input="avfoundation:0")
+        gui._capture_fps_pending.add("avfoundation:0")
+        with patch.object(gui, "_build_command", return_value=["python", "scope"]), \
+                patch("tools.scope_launcher_gui.subprocess.Popen") as start, \
+                patch("tools.scope_launcher_gui.threading.Thread"):
+            gui._start()
+            start.assert_not_called()
+            self.assertTrue(gui._camera_start_requested)
+            gui.events.put(("capture_rates", ("avfoundation:0", (("Source default", ""),), "")))
+            gui._drain_events()
+            start.assert_called_once()
+        self.assertFalse(gui._camera_start_requested)
+
+    def test_cancelled_camera_start_does_not_launch_when_probe_finishes(self):
+        gui = self.gui
+        gui.process = None
+        gui.settings.update(live_source="camera", ffmpeg_input="avfoundation:0")
+        gui._capture_fps_pending.add("avfoundation:0")
+        with patch("tools.scope_launcher_gui.subprocess.Popen") as start:
+            gui._start()
+            gui._start()
+            gui.events.put(("capture_rates", ("avfoundation:0", (("Source default", ""),), "")))
+            gui._drain_events()
+        start.assert_not_called()
+        self.assertIsNone(gui.process)
 
 
 class VideoSourceTransportTests(unittest.TestCase):

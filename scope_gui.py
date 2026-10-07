@@ -21,7 +21,9 @@ TEXT_SURFACE_CACHE_LIMIT = 512
 # producer, especially on software-rendered desktops. Input events are still
 # polled at the engine tick; only visible UI/preview refresh is capped here.
 GUI_REDRAW_HZ = 5.0
-PREVIEW_RENDER_HZ = 2.0
+METRICS_REDRAW_HZ = 1.0
+PREVIEW_RENDER_HZ = 30.0
+PREVIEW_WORK_SIZE = 512
 SLIDER_ROW_HEIGHT = 54
 SLIDER_RANGES = {
     "ips": (1.0, 60.0, 1.0),
@@ -192,7 +194,7 @@ class ScopeGUI:
     stream.  Only the expensive phosphor preview is computed by a worker.
     """
 
-    def __init__(self, initial_state, preview_exposure=1.0,
+    def __init__(self, initial_state, preview_exposure=0.45,
                  start_image_only=False, start_fullscreen=False):
         self._state = dict(initial_state)
         self.preview_exposure = float(preview_exposure)
@@ -213,6 +215,7 @@ class ScopeGUI:
         self.close_requested = False
         self.message = "Amber ticks mark startup defaults"
         self._actions = []
+        self._metrics = {}
         self._hits = {}
         self._dragging = None
         self._drag_value = None
@@ -233,6 +236,7 @@ class ScopeGUI:
         self._text_surface_cache = OrderedDict()
         self._canvas = None
         self._control_tab = "picture"
+        self._preview_view = "trace"
         self._last_draw_signature = None
         self._refresh_revision = 0
         self._uploaded_image = None
@@ -356,11 +360,23 @@ class ScopeGUI:
             """,
             fragment_shader=self._shader_version + """
                 uniform sampler2D screen_image;
+                uniform sampler2D preview_image;
+                uniform bool preview_enabled;
+                uniform vec4 preview_rect;
                 in vec2 uv;
                 out vec4 color;
-                void main() { color = texture(screen_image, uv); }
+                void main() {
+                    vec2 local = (uv - preview_rect.xy) / preview_rect.zw;
+                    if (preview_enabled && local.x >= 0.0 && local.y >= 0.0
+                        && local.x <= 1.0 && local.y <= 1.0)
+                        color = vec4(texture(preview_image, local).rgb, 1.0);
+                    else color = texture(screen_image, uv);
+                }
             """)
         self.program["screen_image"].value = 0
+        self.program["preview_image"].value = 1
+        self.program["preview_enabled"].value = False
+        self.program["preview_rect"].value = (0., 0., 1., 1.)
         self.vao = self.context.vertex_array(self.program, [])
         self.font = self._font(17)
         self.small = self._font(13)
@@ -459,6 +475,8 @@ class ScopeGUI:
             from scope_out import Scope
             import numpy as np
             _warm_preview_kernels()
+            from scope_live_renderers import source_reference
+            source_reference(np.zeros((2, 2), np.uint8), PREVIEW_WORK_SIZE)
         except Exception as exc:
             with self._preview_lock:
                 self._preview_error = f"Preview unavailable: {exc}"
@@ -466,6 +484,10 @@ class ScopeGUI:
         while not self._preview_stop.is_set():
             Scope.want_tap(1.0)
             seq, points = Scope.read_tap()
+            source_view = getattr(self, "_preview_view", "trace") == "source"
+            if source_view:
+                seq, points = Scope.read_luma()
+                seq = -seq - 2
             if points is not None:
                 if seq != self._preview_seq:
                     self._preview_seq = seq
@@ -475,7 +497,7 @@ class ScopeGUI:
                 spot_width = self.preview_spot_width
                 changed_spot = spot_width != self._rendered_spot_width
                 target_size = min(
-                    MAX_PREVIEW_RENDER_SIZE,
+                    PREVIEW_WORK_SIZE,
                     max(1, int(self._preview_target_size)))
                 changed_size = target_size != self._rendered_size
                 render_pending = (seq != self._rendered_seq
@@ -486,19 +508,20 @@ class ScopeGUI:
                     >= 1.0 / PREVIEW_RENDER_HZ)
                 if self._preview_points is not None and render_pending and render_due:
                     try:
+                        render_started = time.monotonic()
                         workspace = getattr(self, "_preview_workspace", None)
                         if workspace is None or workspace.size != target_size:
                             workspace = PreviewWorkspace(target_size)
                             self._preview_workspace = workspace
                         kwargs = {"size": target_size, "exposure": exposure}
                         kwargs["workspace"] = workspace
-                        if spot_width != 1.0:
+                        if not source_view:
                             points_array = np.asarray(self._preview_points)
                             from scope_numeric import preview_rows
                             rows = preview_rows(np.asarray(points_array,dtype=np.float32))
-                            kwargs["spot"] = max(
-                                0.6, 0.40 * target_size / rows * spot_width)
-                        frame = preview_frame(self._preview_points, **kwargs)
+                            kwargs["spot"] = max(.6, .28 * target_size / rows * spot_width)
+                        frame = (source_reference(self._preview_points, target_size) if source_view else
+                                 preview_frame(self._preview_points, **kwargs))
                         with self._preview_lock:
                             # Detach from the workspace buffer: the worker reuses
                             # it on the next render while the UI may still upload
@@ -509,11 +532,11 @@ class ScopeGUI:
                         self._rendered_exposure = exposure
                         self._rendered_spot_width = spot_width
                         self._rendered_size = target_size
-                        self._last_preview_render = time.monotonic()
+                        self._last_preview_render = render_started
                     except Exception as exc:
                         with self._preview_lock:
                             self._preview_error = f"Preview error: {exc}"
-            self._preview_stop.wait(0.025)
+            self._preview_stop.wait(0.005)
 
     def set_preview_exposure(self, value):
         self.preview_exposure = float(value)
@@ -535,14 +558,25 @@ class ScopeGUI:
             return []
         now = time.monotonic()
         signature = self._draw_signature()
+        previous = self._last_draw_signature
+        controls_changed = (previous is None or signature[0] != previous[0]
+                            or signature[2][1] != previous[2][1]
+                            or signature[3:] != previous[3:])
+        full_due = (controls_changed or getattr(self, "_canvas", None) is None
+                    or now - self._last_draw >= 1.0 / METRICS_REDRAW_HZ)
         if (signature != self._last_draw_signature
+                and full_due
                 and now - self._last_draw >= 1.0 / GUI_REDRAW_HZ):
             self._draw()
             # Record the pre-draw snapshot. A worker publication during drawing
             # will differ on the next poll and cannot be cleared accidentally.
             self._last_draw_signature = signature
-            self._last_draw_preview_rgb = self._signature_preview_rgb
+            self._last_draw_preview_rgb = getattr(self, "_drawn_preview_rgb", self._signature_preview_rgb)
             self._last_draw = now
+        elif (getattr(self, "_canvas", None) is not None
+              and self._signature_preview_rgb is not self._last_draw_preview_rgb
+              and self._signature_preview_rgb is not None):
+            self._present_preview(self._signature_preview_rgb)
         actions, self._actions = self._actions, []
         return actions
 
@@ -559,6 +593,7 @@ class ScopeGUI:
                 self._dragging, self._drag_value,
                 self.preview_exposure, self.preview_spot_width,
                 getattr(self, "_control_tab", "picture"),
+                getattr(self, "_preview_view", "trace"),
                 getattr(self, "_refresh_revision", 0))
 
     def _on_refresh(self, _window):
@@ -619,6 +654,8 @@ class ScopeGUI:
             pass
 
     def _slider_disabled(self, name, state):
+        if name in ("exposure", "spot") and getattr(self, "_preview_view", "trace") == "source":
+            return True
         if name in state.get("disabled_sliders", ()):
             return True
         if name in ("ips", "fps", "fields") and state.get("mode_locked"):
@@ -724,10 +761,12 @@ class ScopeGUI:
         preview_size = layout["preview_size"]
         preview_x = layout["preview_x"]
         preview_y = layout["preview_y"]
+        self._preview_display_rect = (preview_x, preview_y, preview_size, preview_size)
         self._preview_target_size = min(preview_size, MAX_PREVIEW_RENDER_SIZE)
         with self._preview_lock:
             rgb = self._preview_rgb
             preview_error = self._preview_error
+        self._drawn_preview_rgb = rgb
         if rgb is not None:
             pic = self.Image.fromarray(rgb, mode="RGB")
             if pic.size != (preview_size, preview_size):
@@ -745,7 +784,9 @@ class ScopeGUI:
         self._draw_cached_text(
             image, (preview_rect[0] + unit(16), layout["preview_caption_y"]),
             self._fit_text(
-                "Phosphor preview  ·  exposure changes this preview only",
+                ("Source reference · captured image, not the output trajectory"
+                 if getattr(self, "_preview_view", "trace") == "source" else
+                 "Output trajectory · exposure changes this preview only"),
                 self.tiny, preview_rect[2] - preview_rect[0] - unit(32)),
             (119, 145, 160), self.tiny)
 
@@ -807,7 +848,8 @@ class ScopeGUI:
                 label_color, self.small)
             self._draw_cached_text(
                 image, (panel[2] - unit(112), top + unit(3)),
-                self._fit_text(readout, self.tiny, unit(100)),
+                self._fit_text(("Trace view" if name in ("exposure", "spot") else "Fixed")
+                               if disabled else readout, self.tiny, unit(100)),
                 (115, 132, 145) if disabled else (235, 242, 247), self.tiny)
             y = top + max(unit(24), slider_row_height - unit(8))
             thumb = min(unit(6), max(1, slider_row_height // 8))
@@ -903,6 +945,16 @@ class ScopeGUI:
 
         stats_y = button_y + unit(40)
         if tab == "preview":
+            for i, (name, label) in enumerate((("trace", "Output trace"), ("source", "Source reference"))):
+                left = panel[0] + unit(18) + i * ((panel[2] - panel[0] - unit(40)) // 2)
+                rect = (left, stats_y, left + (panel[2] - panel[0] - unit(44)) // 2,
+                        stats_y + unit(32))
+                draw.rounded_rectangle(rect, radius=4,
+                                       fill=(38, 86, 108) if getattr(self, "_preview_view", "trace") == name else (20, 32, 43))
+                self._draw_cached_text(image, (left + unit(10), stats_y + unit(8)),
+                                       label, (222, 238, 244), self.small)
+                self._hits[f"view:{name}"] = rect
+            stats_y += unit(45)
             for i, (name, label) in enumerate((("crisp", "Less glow"), ("reset", "Reset preview"))):
                 left = panel[0] + unit(18) + i * ((panel[2] - panel[0] - unit(40)) // 2)
                 rect = (left, stats_y, left + (panel[2] - panel[0] - unit(44)) // 2,
@@ -955,7 +1007,7 @@ class ScopeGUI:
                                        or metrics.get("underruns", 0))
                 else (133, 158, 173), self.tiny)
         note = self.message
-        if state.get("mode_locked") and tab == "picture":
+        if tab == "picture" and (state.get("mode_locked") or "fps" in state.get("disabled_sliders", ())):
             note = "Fixed rates/fields: change in the launcher."
         if note:
             self._draw_cached_text(
@@ -993,10 +1045,12 @@ class ScopeGUI:
         size = fit_square_image(width, height, MAX_PREVIEW_RENDER_SIZE)
         x = (width - size) // 2
         y = (height - size) // 2
+        self._preview_display_rect = (x, y, size, size)
         self._preview_target_size = size
         with self._preview_lock:
             rgb = self._preview_rgb
             error = self._preview_error
+        self._drawn_preview_rgb = rgb
         if rgb is not None:
             pic = self.Image.fromarray(rgb, mode="RGB")
             if pic.size != (size, size):
@@ -1010,6 +1064,8 @@ class ScopeGUI:
                 (151, 174, 192), self.small)
 
     def _present(self, image):
+        if getattr(self, "program", None) is not None:
+            self.program["preview_enabled"].value = False
         framebuffer = self.glfw.get_framebuffer_size(self.window)
         if framebuffer[0] <= 0 or framebuffer[1] <= 0:
             return
@@ -1039,6 +1095,47 @@ class ScopeGUI:
         self.texture.use(location=0)
         self.vao.render(mode=self.moderngl.TRIANGLES, vertices=3)
         self.glfw.swap_buffers(self.window)
+
+    def _present_preview(self, rgb):
+        """Upload only the moving picture between slower control redraws."""
+        if (self.texture is None or not hasattr(self, "_preview_display_rect")
+                or self.texture.size != self.glfw.get_window_size(self.window)):
+            return
+        x, y, width, height = self._preview_display_rect
+        size = (rgb.shape[1], rgb.shape[0])
+        preview = getattr(self, "_gpu_preview_texture", None)
+        if preview is None or preview.size != size:
+            if preview is not None:
+                preview.release()
+            preview = self.context.texture(size, 3, rgb.tobytes(), alignment=1)
+            preview.filter = (self.moderngl.LINEAR, self.moderngl.LINEAR)
+            self._gpu_preview_texture = preview
+        else:
+            preview.write(rgb.tobytes(), alignment=1)
+        framebuffer = self.glfw.get_framebuffer_size(self.window)
+        logical = self.glfw.get_window_size(self.window)
+        if min(framebuffer) <= 0:
+            return
+        self.context.viewport = (0, 0, framebuffer[0], framebuffer[1])
+        self.texture.use(location=0)
+        if getattr(self, "program", None) is not None:
+            self.program["preview_enabled"].value = True
+            self.program["preview_rect"].value = (x/logical[0], y/logical[1],
+                                                   width/logical[0], height/logical[1])
+            preview.use(location=1)
+            self.vao.render(mode=self.moderngl.TRIANGLES, vertices=3)
+            self.glfw.swap_buffers(self.window)
+            self._last_draw_preview_rgb = rgb
+            return
+        self.vao.render(mode=self.moderngl.TRIANGLES, vertices=3)
+        scale_x, scale_y = framebuffer[0]/logical[0], framebuffer[1]/logical[1]
+        self.context.viewport = (round(x*scale_x), round((logical[1]-y-height)*scale_y),
+                                 round(width*scale_x), round(height*scale_y))
+        preview.use(location=0)
+        self.vao.render(mode=self.moderngl.TRIANGLES, vertices=3)
+        self.context.viewport = (0, 0, framebuffer[0], framebuffer[1])
+        self.glfw.swap_buffers(self.window)
+        self._last_draw_preview_rgb = rgb
 
     @staticmethod
     def _fit_text(text, font, width):
@@ -1089,11 +1186,16 @@ class ScopeGUI:
                         self._control_tab = hit.split(":", 1)[1]
                         self._last_draw = 0.0
                     elif hit == "preview:crisp":
-                        self.set_preview_exposure(0.7)
+                        self._preview_view = "trace"
+                        self.set_preview_exposure(0.35)
                         self.set_preview_spot_width(0.5)
                     elif hit == "preview:reset":
+                        self._preview_view = "trace"
                         self.set_preview_exposure(self.specs["exposure"].default)
                         self.set_preview_spot_width(self.specs["spot"].default)
+                    elif hit.startswith("view:"):
+                        self._preview_view = hit.split(":", 1)[1]
+                        self._last_draw = 0.0
                     elif hit == "fullscreen:toggle":
                         self._actions.append(("fullscreen", not self.fullscreen))
                     elif hit == "image_only:toggle":
@@ -1173,6 +1275,8 @@ class ScopeGUI:
         try:
             if getattr(self, "texture", None) is not None:
                 self.texture.release()
+            if getattr(self, "_gpu_preview_texture", None) is not None:
+                self._gpu_preview_texture.release()
             if getattr(self, "vao", None) is not None:
                 self.vao.release()
             if getattr(self, "program", None) is not None:
