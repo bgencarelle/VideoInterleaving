@@ -39,7 +39,8 @@ ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # repo r
 if ROOT_DIR not in sys.path:
     sys.path.insert(0, ROOT_DIR)
 
-from scope_bake import SweepSource, plan_grid, TraceEmitter   # noqa: E402
+from scope_bake import (SweepSource, plan_grid, TraceEmitter,
+                        StochasticEmitter, StippleEmitter)   # noqa: E402
 from scope_out import Scope, BufferedSource, choose_device  # noqa: E402
 from scope_frame_scheduler import FieldGroupLatch  # noqa: E402
 from scope_prepared_cache import PreparedImageCache  # noqa: E402
@@ -106,7 +107,8 @@ def _queue_raster_candidate(scope, emitter, frame, handoff=None,
         scope.frames_accepted > accepted_before
         if accepted_before is not None else endpoint is not None)
     if accepted:
-        emitter.accept(frame[-1] if endpoint is None else endpoint)
+        accept = getattr(emitter, "accept", None) or emitter.chain_from
+        accept(frame[-1] if endpoint is None else endpoint)
         if field_group is not None:
             field_group.accept()
         if levels_commit is not None:
@@ -116,7 +118,32 @@ def _queue_raster_candidate(scope, emitter, frame, handoff=None,
     return accepted
 
 
-def _source_presentation_identity(captured, field, fields):
+def _push_live_image(scope, emitter, captured, mode):
+    """Queue a captured-image trajectory, rolling back rejected walk state."""
+    checkpoint = emitter.checkpoint()
+    handoff = None if emitter._end is None else emitter._end.copy()
+    try:
+        frame = emitter.emit(captured["lum"])
+        accepted = _queue_raster_candidate(
+            scope, emitter, frame, handoff=handoff,
+            identity=_source_presentation_identity(captured, 0, 1, mode))
+    except Exception:
+        emitter.restore(checkpoint)
+        raise
+    if not accepted:
+        emitter.restore(checkpoint)
+    return accepted
+
+
+def live_capture_modes(args):
+    """Whole captured images share the runtime-image renderer choices."""
+    if (args.stream or args.fields != 1 or args.geometry_samples is not None
+            or args.traversal_hz is not None):
+        return ("raster",)
+    return ("raster", "stochastic", "stipple")
+
+
+def _source_presentation_identity(captured, field, fields, mode="raster"):
     """Carry the chosen capture/video timestamp through Scope adoption."""
     metadata = captured.get("source_metadata") or {}
     source_version = captured.get("source_version")
@@ -124,7 +151,7 @@ def _source_presentation_identity(captured, field, fields):
     if sequence is None:
         sequence = id(source_version)
     return (
-        0, "screen-raster", int(sequence), 0, 0, int(field), int(fields),
+        0, f"screen-{mode}", int(sequence), 0, 0, int(field), int(fields),
         str(metadata.get("source_kind", "capture")),
         captured.get("selected_at_ns"), metadata.get("requested_at_ns"),
         metadata.get("decode_started_at_ns"), metadata.get("ready_at_ns"),
@@ -271,7 +298,7 @@ def _read_exact(stream, nbytes):
 
 
 def ffmpeg_source(width=160, fps=12, region=None, input_spec=None,
-                  display=None, source_kind="capture"):
+                  display=None, source_kind="capture", startup_timeout=15.0):
     """
     Capture via ffmpeg instead of in Python.
 
@@ -286,6 +313,7 @@ def ffmpeg_source(width=160, fps=12, region=None, input_spec=None,
     """
     import shutil
     import subprocess
+    import threading
 
     if shutil.which("ffmpeg") is None:
         raise SystemExit("ffmpeg not found. brew install ffmpeg / apt install ffmpeg")
@@ -324,7 +352,22 @@ def ffmpeg_source(width=160, fps=12, region=None, input_spec=None,
             "-f", "rawvideo", "-an", "-sn", "-"]
 
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE,
-                            stderr=subprocess.DEVNULL, bufsize=0)
+                            stderr=None, bufsize=0)
+    # Drivers can wait indefinitely for permission or an unavailable camera.
+    # Bound the first read; inherited stderr reaches the launcher's log pipe.
+    startup_done = threading.Event()
+    startup_expired = threading.Event()
+
+    def startup_watchdog():
+        if not startup_done.wait(startup_timeout):
+            startup_expired.set()
+            try:
+                proc.kill()
+            except OSError:
+                pass
+
+    threading.Thread(target=startup_watchdog, daemon=True,
+                     name="scope-capture-startup").start()
     nbytes = w * h
     last = [np.zeros((h, w), np.float32)]
     metadata = [{"source_kind": str(source_kind), "source_sequence": 0,
@@ -335,7 +378,23 @@ def ffmpeg_source(width=160, fps=12, region=None, input_spec=None,
         started_ns = time.monotonic_ns()
         buf = _read_exact(proc.stdout, nbytes)
         if buf is None:
+            if metadata[0]["source_sequence"] == 0:
+                startup_done.set()
+                try:
+                    proc.wait(timeout=2.0)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    proc.wait(timeout=2.0)
+                proc.stdout.close()
+                if startup_expired.is_set():
+                    raise RuntimeError("Camera/capture startup timed out: no frame within "
+                                       f"{startup_timeout:g}s. Check camera permissions, "
+                                       "device availability and capture frame rate.")
+                raise RuntimeError("FFmpeg capture stopped before its first frame. "
+                                   "Check the FFmpeg error above, camera permissions "
+                                   "and supported capture frame rate.")
             return last[0]
+        startup_done.set()
         last[0] = gray_units(np.frombuffer(buf, np.uint8).reshape(h,w))
         metadata[0] = {
             "source_kind": str(source_kind),
@@ -843,6 +902,8 @@ def build_parser():
     ap.add_argument("--fps", type=int, default=30,
                     help="traces per second; lower = bigger grid, more flicker")
     ap.add_argument("--samples", type=int, help="samples per trace (overrides --fps)")
+    ap.add_argument("--render-mode", choices=("raster", "stochastic", "stipple"),
+                    default="raster", help="drawing style for captured images")
     ap.add_argument("--geometry-samples", type=int, metavar="N",
                     help="raster trajectory detail budget independent of DAC samples")
     ap.add_argument("--traversal-hz", type=float, metavar="HZ",
@@ -928,6 +989,9 @@ def build_parser():
 def main(argv=None):
     ap = build_parser()
     args = ap.parse_args(argv)
+    if args.render_mode not in live_capture_modes(args):
+        ap.error("stochastic/stipple require whole traces, one field, and no "
+                 "raster geometry/traversal override")
 
     if args.source == "video" and not args.file:
         ap.error("--source video needs --file")
@@ -1079,6 +1143,8 @@ def main(argv=None):
 
     emitter = None
     gen = None
+    image_emitters = {}
+    selected_mode = [args.render_mode]
     prepared_cache = PreparedImageCache()
     if args.stream:
         gen = SweepSource(lum_fn=grab, samples_per_pass=n, gamma=args.gamma,
@@ -1104,6 +1170,15 @@ def main(argv=None):
             geometry_samples=args.geometry_samples,
             traversal_hz=args.traversal_hz)
         field_group = FieldGroupLatch(max(1, args.fields))
+        if len(live_capture_modes(args)) > 1 and (gui_enabled or args.render_mode != "raster"):
+            # Constructors warm compiled kernels before the stream starts,
+            # including modes that may be selected interactively later.
+            options = dict(gamma=args.gamma, trim=args.trim,
+                           dc_comp=args.dc_comp, border=args.border)
+            image_emitters = {
+                "stochastic": StochasticEmitter(scope.samplerate, n, **options),
+                "stipple": StippleEmitter(scope.samplerate, n, **options),
+            }
 
         def push():
             # Gate on the callback having taken the last frame. Without it a
@@ -1115,9 +1190,16 @@ def main(argv=None):
             # order, instead of one silently replacing the other.
             if not scope.ready():
                 return False
-            field, captured = _begin_raster_field(
-                field_group, grab, levels_for)
             with render_lock:
+                mode = selected_mode[0]
+                field, captured = _begin_raster_field(
+                    field_group, grab, levels_for)
+                if mode != "raster":
+                    accepted = _push_live_image(
+                        scope, image_emitters[mode], captured, mode)
+                    if accepted:
+                        field_group.accept()
+                    return accepted
                 handoff = (None if emitter._end is None
                            else emitter._end.copy())
                 source_key = PreparedImageCache.versioned_array_key(
@@ -1198,10 +1280,12 @@ def main(argv=None):
                 "trim": args.trim, "density": args.density,
                 "gamma": args.gamma, "rows": args.rows or 0,
                 "lowpass": args.scope_lowpass or 0.0,
-                "mode": "raster", "raster": True, "mode_locked": True,
-                "clock_locked": True, "disabled_sliders": ("density", "rows"),
+                "mode": args.render_mode, "raster": args.render_mode == "raster",
+                "mode_locked": len(live_capture_modes(args)) == 1,
+                "clock_locked": True,
+                "disabled_sliders": ("ips", "fps", "fields", "density", "rows"),
                 "audio_muted": False, "fps": args.fps, "ips": args.fps,
-                "fields": args.fields, "available_modes": ("raster",),
+                "fields": args.fields, "available_modes": live_capture_modes(args),
             }
             gui = ScopeGUI(live_state)
         print("[SCREEN] running -- Ctrl+C to stop", flush=True)
@@ -1229,12 +1313,12 @@ def main(argv=None):
                     "device": str(args.device or "Scope output"),
                     "sample_rate": int(scope.samplerate),
                     "trace_hz": scope.samplerate / max(scope.trace_samples, 1),
-                    "picture_hz": (scope.samplerate /
+                    "picture_hz": (0.0 if live_state["mode"] == "stochastic" else scope.samplerate /
                                    max(scope.trace_samples *
                                        max(1, args.fields), 1)),
                     "samples": int(scope.samples_per_frame),
                     "fields": int(args.fields),
-                    "grid": f"{_grid_cols}x{_grid_rows}",
+                    "grid": (f"{_grid_cols}x{_grid_rows}" if live_state["raster"] else "—"),
                     "dropouts": int(scope.dac_dropouts),
                     "underruns": int(getattr(source, "underruns", 0)),
                     "buffered_ms": 1000.0 * buffered_samples /
@@ -1269,6 +1353,8 @@ def main(argv=None):
                             with render_lock:
                                 if emitter is not None:
                                     emitter.gamma = float(value)
+                                for image_emitter in image_emitters.values():
+                                    image_emitter.gamma = float(value)
                             if gen is not None:
                                 gen.configure(gamma=float(value))
                         elif name == "trim":
@@ -1276,6 +1362,8 @@ def main(argv=None):
                             with render_lock:
                                 if emitter is not None:
                                     emitter.trim = float(value)
+                                for image_emitter in image_emitters.values():
+                                    image_emitter.trim = float(value)
                             if gen is not None:
                                 gen.configure(trim=float(value))
                         elif name == "lowpass":
@@ -1284,6 +1372,18 @@ def main(argv=None):
                             live_state["lowpass"] = float(value)
                         elif name == "exposure":
                             gui.set_preview_exposure(value)
+                    elif action[0] == "mode" and action[1] in live_capture_modes(args) and emitter is not None:
+                        with render_lock:
+                            selected_mode[0] = action[1]
+                            field_group.reset()
+                            active = (emitter if action[1] == "raster" else image_emitters[action[1]])
+                            active.reset()
+                            endpoint = scope.last_accepted_endpoint
+                            if endpoint is not None:
+                                accept = getattr(active, "accept", None) or active.chain_from
+                                accept(endpoint)
+                        live_state.update(mode=action[1], raster=action[1] == "raster")
+                        scope.set_tap_fields(1)
                     elif action[0] == "audio":
                         audible = bool(action[1])
                         scope.set_output_audio(muted=not audible)
