@@ -334,7 +334,14 @@ them used to build tables; 3:4 layout):
   The shipped tables are unchanged: with the rebuilt set one reverse test
   fails, and no table beats stock anyway.
 
-## 14. Tables rebuilt for general pictures plus the project's screens
+## 14. Trial: tables built from photographs plus the project's screens (not adopted)
+
+Not adopted, and the shipped tables are the Kodak ones again. The line and
+moire screens are for testing and calibration; training on them trades
+ordinary pictures for line art, which is the wrong trade for a video
+project. The measurements are kept because they show how strongly the
+training pictures steer the tables. See `V7_FOLD_REPAIR_PLAN.md`.
+
 
 The shipped tables came from the 24 Kodak photographs alone. They are now
 built from `tools/v7_nested_corpus.py`: windows of bundled photographs,
@@ -359,8 +366,7 @@ pictures. Original score (effective luma coefficients), clean, 3:4 layout:
 Across torture conditions on a photograph, two screens and a pattern the
 rebuilt tables are ahead of the Kodak ones clean and at hiss -45, level at
 hiss -35, and behind for mono under a 4 kHz low-pass (803 against 1,079).
-The old tables are not kept in the repository; rebuild from Kodak to
-compare. Scores above use `tools/v7_nested_eval.py`; the stair work-arounds
+"Rebuilt" here is that trial build, which is not in the repository. Scores above use `tools/v7_nested_eval.py`; the stair work-arounds
 are off.
 
 ## 13. False colour is the chroma budget (diagnosed, open)
