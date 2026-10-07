@@ -7,10 +7,11 @@ sample. The caller remains responsible for aspect metadata and modem encoding.
 import threading
 from functools import lru_cache
 
+import math
+
 import numpy as np
 from numba import njit, prange
 from scipy.fft import dctn, idctn
-from scipy.ndimage import gaussian_filter
 
 from animation_modem.v7_kernels import KernelContext
 
@@ -1043,6 +1044,106 @@ def _separable(left, plane, right):
     return out
 
 
+# ------------------------------------------------- compiled per-frame pieces
+# Everything below runs once per frame, so it is compiled; like ``_separable``
+# it uses one thread and no BLAS.
+
+@njit(cache=True, fastmath=True, nogil=True)
+def _gaussian_axis(plane, sigma, axis):
+    """Gaussian blur along one axis as scipy.ndimage.gaussian_filter does it:
+    taps out to ``int(4*sigma + .5)``, normalised, edges mirrored about the
+    edge sample's outer side ('reflect')."""
+    radius = int(4.0*sigma+.5)
+    if radius < 1:
+        return plane.copy()
+    taps = np.empty(2*radius+1)
+    total = 0.0
+    for i in range(-radius, radius+1):
+        taps[i+radius] = math.exp(-.5*i*i/(sigma*sigma))
+        total += taps[i+radius]
+    for i in range(2*radius+1):
+        taps[i] /= total
+    rows, cols = plane.shape
+    count = rows if axis == 0 else cols
+    period = 2*count
+    index = np.empty(count+2*radius, np.int64)
+    for i in range(-radius, count+radius):
+        j = i % period
+        if j < 0:
+            j += period
+        index[i+radius] = j if j < count else period-1-j
+    out = np.zeros((rows, cols))
+    if axis == 0:
+        # A whole source row at a time: contiguous, so the inner loop is SIMD.
+        for r in range(rows):
+            for t in range(2*radius+1):
+                weight = taps[t]
+                source = index[r+t]
+                for c in range(cols):
+                    out[r, c] += weight*plane[source, c]
+    else:
+        padded = np.empty(cols+2*radius)
+        for r in range(rows):
+            for c in range(cols+2*radius):
+                padded[c] = plane[r, index[c]]
+            for c in range(cols):
+                value = 0.0
+                for t in range(2*radius+1):
+                    value += taps[t]*padded[c+t]
+                out[r, c] = value
+    return out
+
+
+@njit(cache=True, nogil=True)
+def _unsharp(plane, sigma_y, sigma_x, amount):
+    """``plane + amount*(plane - blurred)`` with a Gaussian blur."""
+    blurred = _gaussian_axis(_gaussian_axis(plane, sigma_y, 0), sigma_x, 1)
+    out = np.empty(plane.shape)
+    for r in range(plane.shape[0]):
+        for c in range(plane.shape[1]):
+            out[r, c] = plane[r, c]+amount*(plane[r, c]-blurred[r, c])
+    return out
+
+
+@njit(cache=True, fastmath=True, nogil=True)
+def _windowed(grid, window, rows_basis, rows_transposed, cols_basis, cols_transposed):
+    """``grid`` with ``window`` applied to its DCT coefficients."""
+    coefficients = _separable(rows_transposed, grid, cols_basis)
+    for r in range(grid.shape[0]):
+        for c in range(grid.shape[1]):
+            coefficients[r, c] *= window[r, c]
+    return _separable(rows_basis, coefficients, cols_transposed)
+
+
+@njit(cache=True, nogil=True)
+def _store_values(result, offset, grid):
+    """``clip(2*grid - 1, -1, 1)`` written into ``result`` from ``offset``;
+    returns the position after it."""
+    rows, cols = grid.shape
+    for r in range(rows):
+        for c in range(cols):
+            value = 2.0*grid[r, c]-1.0
+            result[offset+r*cols+c] = -1.0 if value < -1.0 else (1.0 if value > 1.0 else value)
+    return offset+rows*cols
+
+
+@njit(cache=True, nogil=True)
+def _keep_sent(coefficients, sent):
+    for r in range(coefficients.shape[0]):
+        for c in range(coefficients.shape[1]):
+            if not sent[r, c]:
+                coefficients[r, c] = 0.0
+
+
+@lru_cache(maxsize=16)
+def _grid_transforms(rows, cols):
+    """(row basis, its transpose, column basis, its transpose): grid pixels
+    are ``rows_basis @ coefficients @ cols_transposed``."""
+    row, col = _dct_matrix(rows, rows), _dct_matrix(cols, cols)
+    return tuple(np.ascontiguousarray(matrix, np.float64)
+                 for matrix in (row, row.T, col, col.T))
+
+
 PRESHRINK_FACTOR = 4
 
 
@@ -1120,6 +1221,9 @@ def _direct_planes(rgb, grids, shapes, brightness, gamma, sharpen,
                 data, _tone_lut_fixed(brightness, gamma), block_y, block_x,
                 rows, cols)
     else:
+        # Float frames (not what a capture delivers): numpy's vectorised
+        # power is faster than a compiled per-element one, so this one step
+        # stays numpy.
         toned = np.clip(_rgb_float(data)*brightness, 0.0, 1.0)
         if gamma != 1.0:
             toned = toned**(1.0/gamma)
@@ -1152,15 +1256,12 @@ def _direct_planes(rgb, grids, shapes, brightness, gamma, sharpen,
     # Pixel-domain radii are in luma grid pixels at any source size. Spec
     # order: chroma gain (above), clarity, then usm.
     unit = (rows/luma_rows, cols/luma_cols)
+    y = np.ascontiguousarray(y, np.float64)
     if clarity:
-        blurred = gaussian_filter(y, sigma=(6*unit[0], 6*unit[1]),
-                                  mode='reflect')
-        y = y+clarity*(y-blurred)
+        y = _unsharp(y, 6*unit[0], 6*unit[1], clarity)
     if sharpen == 'usm' and sharpen_strength:
-        blurred = gaussian_filter(y, sigma=(.8*unit[0], .8*unit[1]),
-                                  mode='reflect')
-        y = y+sharpen_strength*(y-blurred)
-    planes[0] = np.ascontiguousarray(y)
+        y = _unsharp(y, .8*unit[0], .8*unit[1], sharpen_strength)
+    planes[0] = y
     taper = sharpen_strength if sharpen == 'taper' else 0.0
     return planes, grids, shapes, taper, target, blocks, (height, width)
 
@@ -1368,7 +1469,9 @@ def _received_chroma_plan(rows, cols, luma_rows, luma_cols):
 def received_chroma(values, grids, chroma_sent):
     """The receiver's Cb, Cr on the luma grid: only the sent coefficients,
     evaluated by DCT zero-padding (what DCT reconstruction displays)."""
-    offsets = np.cumsum([0] + [rows*cols for rows, cols in grids])
+    offsets = [0]
+    for rows, cols in grids:
+        offsets.append(offsets[-1]+rows*cols)
     luma_rows, luma_cols = grids[0]
     out = []
     for plane, sent in zip((1, 2), chroma_sent):
@@ -1379,7 +1482,7 @@ def received_chroma(values, grids, chroma_sent):
             values[offsets[plane]:offsets[plane+1]],
             dtype=np.float64).reshape(rows, cols)
         coefficients = _separable(analysis_y, grid, analysis_x)
-        coefficients[~np.asarray(sent, bool).reshape(rows, cols)] = 0.0
+        _keep_sent(coefficients, np.ascontiguousarray(sent, np.bool_).reshape(rows, cols))
         out.append(_separable(synthesis_y, coefficients, synthesis_x))
     return out
 
@@ -1441,6 +1544,8 @@ def clip_aware_luma(values, luma_shape, sent, iterations=CLIP_AWARE_ITERATIONS):
     sent = np.asarray(sent, dtype=bool).reshape(rows, cols)
     luma = values[:count].reshape(rows, cols)
     full = dctn(luma, norm='ortho')
+    # scipy's FFT-based DCT (compiled C, O(n log n)) is about three times
+    # faster here than a compiled matrix transform, ten rounds a frame.
     target = np.clip(luma, -1.0, 1.0)
     upper = target >= 1.0-_CLIP_EDGE
     lower = target <= -1.0+_CLIP_EDGE
@@ -1830,23 +1935,14 @@ def direct_dct_values(rgb, grids, shapes, *, brightness=1.0, gamma=1.0,
                   not defer_kernel_gain else None)
         if shaped is not None:
             window = shaped if window is None else window*shaped
+        # The fused source-to-grid projection; a window (taper or kernel
+        # gain) is then applied on the grid's own DCT, which avoids a second
+        # pair of dense source matrix products.
+        grid = _separable(left, plane, right)
         if window is not None:
-            # Start with the same fused source-to-grid projection as the
-            # unwindowed path, then apply the cached spectral window using the
-            # FFT-backed grid DCT. This avoids a second pair of dense source
-            # matrix products for each selected kernel.
-            grid = _separable(left, plane, right)
-            coefficients = dctn(grid, norm='ortho')
-            coefficients *= window
-            grid = idctn(coefficients, norm='ortho')
-        else:
-            grid = _separable(left, plane, right)
-        count = grid_rows*grid_cols
-        result[offset:offset+count] = grid.ravel()
-        offset += count
-    result *= 2.0
-    result -= 1.0
-    np.clip(result, -1.0, 1.0, out=result)
+            grid = _windowed(grid, np.ascontiguousarray(window, np.float64),
+                             *_grid_transforms(grid_rows, grid_cols))
+        offset = _store_values(result, offset, grid)
     return result
 
 
@@ -1957,12 +2053,11 @@ def source_dct_values(rgb, grids, shapes, *, brightness=1.0, gamma=1.0,
     if sharpen == 'usm' and sharpen_strength:
         sy = .8*height/grids[0][0]
         sx = .8*width/grids[0][1]
-        y = y+sharpen_strength*(y-gaussian_filter(y, sigma=(sy, sx),
-                                                 mode='reflect'))
+        y = _unsharp(np.ascontiguousarray(y, np.float64), sy, sx, sharpen_strength)
     if clarity:
         sy = 6.0*height/grids[0][0]
         sx = 6.0*width/grids[0][1]
-        y = y+clarity*(y-gaussian_filter(y, sigma=(sy, sx), mode='reflect'))
+        y = _unsharp(np.ascontiguousarray(y, np.float64), sy, sx, clarity)
 
     planes = (y,) if len(grids) == 1 else (y, cb, cr)
     frame = None

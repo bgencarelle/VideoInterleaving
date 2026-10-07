@@ -101,3 +101,14 @@ code for everything that runs per packet.
   `KernelContext` helpers `project`, `reduce`, `source_range`, `tame`, which
   do). Only what is built once per setting (a gain window, a model matrix)
   may use numpy or scipy.
+- Compiled means faster, not just "not numpy". Measure before and after.
+  Two per-frame steps stay on library code because the compiled version was
+  measured slower: `clip_aware_luma` (scipy's FFT-based DCT, ten rounds a
+  frame, about three times faster than a compiled matrix transform) and the
+  gamma power on float frames (numpy's vectorised power). Replace them only
+  with something measured faster.
+- Kernels that multiply matrices: `v7_source_dct._separable` avoids BLAS on
+  purpose (its docstring: BLAS worker threads were seen to spin and cost 3-4x
+  the useful CPU on a two-core host). The nested smoothing and the kernel
+  solves use `np.dot` inside numba, which is BLAS; on the development sandbox
+  that burned no extra CPU, but it has not been measured on the target Mac.
