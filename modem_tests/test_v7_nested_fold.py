@@ -269,12 +269,30 @@ class HeldPictureTests(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        patcher = mock.patch.object(nested_fold, 'SMOOTH_PASSES', 0)
-        patcher.start()
-        cls.addClassCleanup(patcher.stop)
+        # Dither and the held average are off by default; these tests are of
+        # what they do when switched on.
+        for name, value in (('SMOOTH_PASSES', 0), ('DITHER', True), ('HOLD', True)):
+            patcher = mock.patch.object(nested_fold, name, value)
+            patcher.start()
+            cls.addClassCleanup(patcher.stop)
         cls.rig = Rig()
         cls.rgb = textured()
         cls.sent = v7_live._values(cls.rig.base, cls.rgb, 'box', 1.0, dct_encode=True)[0]
+
+    def test_the_stair_work_arounds_are_off_unless_asked_for(self):
+        import importlib
+        import os
+        with mock.patch.dict(os.environ, {}, clear=False):
+            for name in ('NESTED_FOLD_DITHER', 'NESTED_FOLD_HOLD', 'NESTED_FOLD_SMOOTH',
+                         'NESTED_FOLD_DISPLAY_ROOM'):
+                os.environ.pop(name, None)
+            fresh = importlib.util.module_from_spec(importlib.util.spec_from_file_location(
+                'nested_fold_defaults', nested_fold.__file__))
+            fresh.__spec__.loader.exec_module(fresh)
+        self.assertFalse(fresh.DITHER)
+        self.assertFalse(fresh.HOLD)
+        self.assertEqual(fresh.SMOOTH_PASSES, 0)
+        self.assertEqual(fresh.DISPLAY_ROOM, 0.0)
 
     def shown(self, mode, audio):
         """Luma error of each picture shown in the band where that mode's
@@ -388,7 +406,8 @@ class BoundedDecodeTests(unittest.TestCase):
 
         for mode in ('mono nested', 'stereo nested'):
             with mock.patch.object(nested_fold, 'HOLD', False):
-                cleaned = shown(mode)
+                with mock.patch.object(nested_fold, 'SMOOTH_PASSES', 16):
+                    cleaned = shown(mode)
                 with mock.patch.object(nested_fold, 'SMOOTH_PASSES', 0):
                     decoded = shown(mode)
             self.assertLess(cleaned[0], .8*decoded[0], mode)

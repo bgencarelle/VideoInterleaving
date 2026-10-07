@@ -68,8 +68,12 @@ SIGNATURE_SLOTS = 16
 SCORE_MIN = .5                 # signature correlation that marks a nested packet
 DOUBTFUL = .5                  # equaliser confidence below which a slot's own noise is used
 LUMA = 96*80
-# Subtractive dither of the stairs; NESTED_FOLD_DITHER=0 sends plain stairs.
-DITHER = os.environ.get('NESTED_FOLD_DITHER', '1') != '0'
+# The three stair work-arounds below (dither, the held-picture average and
+# decoding inside the bounds) are OFF by default.  They hide stair error
+# without removing it, and they change the picture in ways that are not a
+# more accurate copy of what was sent; the folds are judged as decoded.
+# Subtractive dither of the stairs; NESTED_FOLD_DITHER=1 sends dithered stairs.
+DITHER = os.environ.get('NESTED_FOLD_DITHER', '0') != '0'
 # The packet counter modulo this picks the offset set.  Seven is the cycle
 # both ends already share (the tail slice), forwards and in reverse.
 DITHER_PHASES = 7
@@ -344,7 +348,7 @@ def _NOTHING(slots, _made={}):
 # packet, so the mean of the last DITHER_PHASES decoded pictures of a scene
 # that is not moving carries about a seventh of it.  NESTED_FOLD_HOLD=0 shows
 # every packet as decoded.
-HOLD = os.environ.get('NESTED_FOLD_HOLD', '1') != '0'
+HOLD = os.environ.get('NESTED_FOLD_HOLD', '0') != '0'
 # Mean squared change of the plain (unfolded) hosts between two packets, in
 # units of what their noise explains, above which the picture has moved.
 HOLD_MOTION = 1.5
@@ -420,14 +424,14 @@ class Held:
 # the descent carries momentum, and 16 passes of it reach what 40 plain
 # passes do;
 # NESTED_FOLD_SMOOTH or the receiver's --nested-smooth sets it.
-SMOOTH_PASSES = int(os.environ.get('NESTED_FOLD_SMOOTH', 16))
+SMOOTH_PASSES = int(os.environ.get('NESTED_FOLD_SMOOTH', 0))
 # Share of the half stair a folded host may move.  All of it gives the
 # flattest picture; half of it gave the lowest error on the fixtures and
 # costs dense texture less.
 SMOOTH_ROOM = float(os.environ.get('NESTED_FOLD_SMOOTH_ROOM', .5))
 # The share of the half stair the display is told a folded host may move
 # (NESTED_FOLD_DISPLAY_ROOM).
-DISPLAY_ROOM = float(os.environ.get('NESTED_FOLD_DISPLAY_ROOM', 1.0))
+DISPLAY_ROOM = float(os.environ.get('NESTED_FOLD_DISPLAY_ROOM', 0.0))
 SMOOTH_EDGE = .01              # pixel difference (of -1..1) that counts as flat
 SMOOTH_RATE = .25              # descent step, as a share of SMOOTH_EDGE
 
@@ -555,7 +559,7 @@ def display_room(fold, level, sigma, count, joined):
     from the decoded one.  None when the decoder has already smoothed the
     picture itself (then every coefficient is as final as it will get), or
     when the bounds are not known per coefficient."""
-    if SMOOTH_PASSES > 0:
+    if SMOOTH_PASSES > 0 or DISPLAY_ROOM <= 0:
         return None
     room = fold.room(level, sigma, count, joined, share=DISPLAY_ROOM)
     return None if room is None else room.reshape(96, -1)

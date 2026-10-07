@@ -4721,10 +4721,10 @@ def parser():
     recv.add_argument('--no-tail-memory', action='store_true',
                       help='do not reuse tail coefficients from earlier packets')
     recv.add_argument('--nested-smooth', type=int, default=None, metavar='PASSES',
-                      help='nested-fold pictures: strength of decoding inside '
-                           'the bounds, which shows the cleanest picture that '
-                           'fits what was received (default 16; 0 shows the '
-                           'decoded values as they are)')
+                      help='nested-fold pictures: passes of decoding inside '
+                           'the bounds, a work-around that smooths stair '
+                           'error (default 0: off, pictures are shown as '
+                           'decoded; 16 was the earlier default)')
     recv.add_argument('--temporal-fusion', choices=('off', 'held'),
                       default='off',
                       help='average successive packets of a held picture '

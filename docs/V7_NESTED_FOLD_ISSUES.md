@@ -334,6 +334,35 @@ them used to build tables; 3:4 layout):
   The shipped tables are unchanged: with the rebuilt set one reverse test
   fails, and no table beats stock anyway.
 
+## 14. Tables rebuilt for general pictures plus the project's screens
+
+The shipped tables came from the 24 Kodak photographs alone. They are now
+built from `tools/v7_nested_corpus.py`: windows of bundled photographs,
+frames of the fixture movies (line and colour screens, robot count) and
+the 27 line patterns of `tools/v7_test_patterns.py`.
+
+    .venv/bin/python tools/v7_nested_corpus.py --out tmp/nested-corpus
+    .venv/bin/python tools/v7_nested_build.py --corpus tmp/nested-corpus
+
+The mix matters. Patterns at full weight decide the tables on their own
+and photographs fall below stock; photographs alone carry a third less of
+the patterns. The default (every picture at one contrast, photographs
+weighted eight to one, patterns at half contrast) was chosen on held-out
+pictures. Original score (effective luma coefficients), clean, 3:4 layout:
+
+| Pictures | aspect-mono-500 | Mono nested, Kodak | Mono nested, rebuilt | aspect-fold-500 | Stereo nested, Kodak | Stereo nested, rebuilt |
+|---|---|---|---|---|---|---|
+| Held-out photographs (4) | 1,345 | 1,496 | 1,460 | 2,165 | 1,979 | 1,970 |
+| Held-out screens (3) | 1,110 | 1,549 | 1,599 | 1,796 | 2,312 | 2,334 |
+| Line patterns (8) | 998 | 1,506 | 2,219 | 1,522 | 2,790 | 2,826 |
+
+Across torture conditions on a photograph, two screens and a pattern the
+rebuilt tables are ahead of the Kodak ones clean and at hiss -45, level at
+hiss -35, and behind for mono under a 4 kHz low-pass (803 against 1,079).
+The old tables are not kept in the repository; rebuild from Kodak to
+compare. Scores above use `tools/v7_nested_eval.py`; the stair work-arounds
+are off.
+
 ## 13. False colour is the chroma budget (diagnosed, open)
 
 Green and purple on black-and-white detail, pink on white, colour bars

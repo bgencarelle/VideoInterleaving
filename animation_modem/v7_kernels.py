@@ -339,6 +339,7 @@ class Kernel:
         self._error = None
         self.failures = 0
         self.post_ms = 0.0            # smoothed time of the refit per call
+        self._post_warm = False       # the first refit has run
         self.build_ms = 0.0           # time of the last window built
         self._warned_slow = False
 
@@ -500,7 +501,12 @@ class Kernel:
         started = time.perf_counter()
         result = np.asarray(self._post_call(grid, ctx, params), np.float64)
         elapsed = (time.perf_counter()-started)*1000
-        self.post_ms = elapsed if not self.post_ms else .8*self.post_ms+.2*elapsed
+        if not self._post_warm:
+            # The first call loads the compiled routines it uses; that is a
+            # one-off at start-up, not what a frame costs, so it is not timed.
+            self._post_warm = True
+        else:
+            self.post_ms = elapsed if not self.post_ms else .8*self.post_ms+.2*elapsed
         if result.shape != grid.shape or not np.isfinite(result).all():
             raise KernelError('post must return a finite grid of the same shape')
         if np.abs(result).max() > 8:
