@@ -1,13 +1,12 @@
 <!doctype html>
 <html>
 <head>
-  <meta charset="utf-8">
-  <title>Interleaving Project Scope Monitor</title>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Scope dashboard</title>
   <style>
-    /* Mirrors HTML_TEMPLATE in lightweight_monitor.py. Kept as a separate copy
-       rather than shared, because that template is a Python string literal
-       inside lightweight_monitor.py while this page is served straight off
-       disk by _serve_dynamic_template(). If you restyle one, restyle both. */
+     /* Scope dashboard styling is independent of the general monitor.
+        Transport IDs are shared with the scope-specific JavaScript below. */
     body { background:#111; color:#0f0; font-family:monospace; padding:2em; }
     .label{color:#888;margin-right:1em;}
     a { color:#0f0; }
@@ -75,13 +74,59 @@
     }
     .scope-meta { color:#888; margin-top:0.5em; font-size:0.9em; }
     .scope-meta label { color:#0f0; margin-right:1em; cursor:pointer; }
+    /* Scope-specific responsive presentation; transport IDs remain stable. */
+    :root { color-scheme:dark; --bg:#0c131a; --panel:#15222d;
+      --line:#304653; --text:#e5eef4; --muted:#a6bbc9; --accent:#77c7d5; }
+    * { box-sizing:border-box; }
+    body { margin:0 auto; padding:24px; max-width:1200px; background:var(--bg);
+      color:var(--text); font:15px/1.55 system-ui,sans-serif; }
+    a { color:var(--accent); }
+    h1 { font-size:28px; margin:0; letter-spacing:-.5px; }
+    .dashboard-header { display:flex; justify-content:space-between; gap:16px;
+      align-items:center; margin-bottom:24px; flex-wrap:wrap; }
+    .dashboard-header p,.description { color:var(--muted); margin:6px 0 16px; }
+    h2.section,.control-panel h2 { color:var(--text); border:0;
+      font-size:20px; margin:24px 0 12px; padding:0; }
+    .scope-wrap,.control-panel,details { border:1px solid var(--line);
+      border-radius:12px; padding:20px; background:var(--panel); }
+    #scope-img { width:auto; height:auto; max-width:100%; aspect-ratio:1;
+      margin:0 auto 20px; border:1px solid var(--line); border-radius:6px; }
+    .scope-meta { display:flex; flex-wrap:wrap; gap:16px; align-items:center;
+      color:var(--muted); font-size:14px; }
+    .scope-meta label { color:var(--text); margin:0; }
+    select,button,input { font:inherit; accent-color:var(--accent); }
+    select,.dim-controls select { min-width:0; max-width:100%; padding:8px;
+      color:var(--text); background:#0c1822; border:1px solid var(--line);
+      border-radius:6px; font-family:inherit; }
+    button,.dim-controls button,.preset-btn { padding:9px 16px; border-radius:6px;
+      color:var(--text); background:#27566b; border:1px solid #48778c;
+      font-family:inherit; cursor:pointer; }
+    button:hover,.dim-controls button:hover,.preset-btn:hover { background:#356c82; }
+    button:focus-visible,select:focus-visible,a:focus-visible,summary:focus-visible {
+      outline:2px solid var(--accent); outline-offset:3px; }
+    .dim-controls { gap:16px; align-items:center; flex-wrap:wrap; }
+    .dim-controls label { display:flex; gap:8px; align-items:center; }
+    .current-dims { color:var(--accent); }
+    .label { color:var(--muted); }
+    details { margin:16px 0; }
+    summary { cursor:pointer; font-weight:600; color:var(--text); }
+    #scope_data,#monitor_data { overflow-wrap:anywhere; margin-top:12px; }
+    .warn { color:#f4bc75; }
+    @media(max-width:600px) { body { padding:14px; }
+      .scope-wrap,.control-panel,details { padding:14px; }
+      .dim-controls { align-items:stretch; }
+      .dim-controls label { flex:1 1 160px; justify-content:space-between; }
+      .scope-meta { gap:12px; } }
   </style>
 </head>
 <body>
-  <h1>Interleaving Project Scope Monitor</h1>
-  <div><a href="/">&larr; main monitor</a> &nbsp;|&nbsp; <a href="/log">log</a></div>
+  <header class="dashboard-header">
+    <div><h1>Scope dashboard</h1>
+      <p>View the running output. Preview appearance and browser audio are separate.</p></div>
+    <a href="/log">Open logs</a>
+  </header>
 
-  <h2 class="section">Output</h2>
+  <h2 class="section">Server output preview</h2>
   <!-- Live preview of the trace the beam is drawing. Rendered server-side by
        scope_bake.preview_frame(), the same phosphor model test_scope_pair.py
        uses, and delivered as MJPEG exactly like the main web mode.
@@ -95,10 +140,10 @@
       <label><input type="checkbox" id="preview-on" checked> live preview</label>
       <label>size
         <select id="preview-size">
-          <option value="256">256 &mdash; cheapest, merges</option>
+           <option value="256">256 px</option>
           <option value="384">384</option>
           <option value="512">512</option>
-          <option value="700" selected>700 &mdash; default, sharpest, costly</option>
+           <option value="700" selected>700 px</option>
         </select>
       </label>
       <label>exposure
@@ -111,13 +156,14 @@
       </label>
       <span id="preview-note"></span>
     </div>
+    <p class="description">Exposure changes this visualization only. It does not change server
+      audio level or a physical scope's brightness. Lower exposure reduces glow.</p>
   </div>
 
-  <h2 class="section">Scope</h2>
-  <div id="scope_data">Loading&hellip;</div>
-
-  <h2 class="section">Playback &amp; system</h2>
-  <div id="monitor_data"></div>
+  <details><summary>Output timing and diagnostics</summary>
+    <div id="scope_data">Loading&hellip;</div></details>
+  <details><summary>Playback and system details</summary>
+    <div id="monitor_data"></div></details>
 
   <!-- Sound output. Deliberately the last thing on the page: it is the only
        control here that interrupts the audio, so it should not sit above the
@@ -127,7 +173,9 @@
        AudioContext rate, on their own DAC -- which is the only device that
        can reach their scope. -->
   <div class="control-panel" id="local-audio">
-    <h2>Play on your own scope</h2>
+    <h2>Browser audio output</h2>
+    <p class="description">Starts a separate renderer on this browser's audio device.
+      It does not start, stop, or retune the server output shown above.</p>
     <div class="current-dims" id="local-status">Not running.</div>
     <div class="dim-controls">
       <button id="local-btn" onclick="toggleLocal()">Start audio</button>
@@ -160,7 +208,8 @@
       <select id="sink-select" style="display:none"></select>
       <span id="sink-status"></span>
     </div>
-    <div class="warn">
+    <details><summary>Connection and signal-level guidance</summary>
+    <div class="description">
       For XY, connect left to X and right to Y. For a single-input Y-T scope,
       select X only and connect the mono output to its input. Turn the volume up
       full &mdash; the level is the picture size, and anything the operating
@@ -171,14 +220,17 @@
       Otherwise, select the output in your system sound settings before starting.
       This page never requests microphone access.
     </div>
+    </details>
     <img id="luma-src" style="display:none" alt="">
   </div>
 
   <div class="control-panel" id="audio-controls">
-    <h2>Sound output</h2>
+    <h2>Server audio output</h2>
+    <p class="description">Changes the running server's audio device, not the browser's.
+      Switching interrupts output; choose the browser device in the panel above.</p>
     <div class="current-dims" id="current-device">Loading&hellip;</div>
     <div class="dim-controls">
-      <select id="device-select">
+      <select id="device-select" aria-label="Server output device">
         <option value="">System default output</option>
       </select>
       <button id="apply-btn" onclick="applyDevice()">Switch output</button>
@@ -416,8 +468,8 @@
       img.src = "scope/stream.mjpg?size=" + s
               + "&exposure=" + expSel.value + "&t=" + Date.now();
       note(Number(s) < 512
-        ? "below 512 the scanlines merge \u2014 expect a blob, not features"
-        : "");
+        ? "Lower resolution: less detail, less CPU work."
+        : "Server preview connected; exposure affects this image only.");
     }
 
     function stopPreview() {

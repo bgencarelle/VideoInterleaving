@@ -92,6 +92,26 @@ class ScopePresentationTests(unittest.TestCase):
         texture.release.assert_called_once()
         self.assertEqual(gui.context.texture.call_count, 2)
 
+    def test_pointer_tabs_and_preview_presets_do_not_dispatch_output_changes(self):
+        gui = self.make_gui()
+        gui.glfw.MOUSE_BUTTON_LEFT = 0
+        gui.glfw.PRESS = 1
+        gui.glfw.get_cursor_pos = Mock(return_value=(5, 5))
+        gui._hits = {"tab:preview": (0, 0, 10, 10)}
+        gui._on_mouse_button(gui.window, 0, 1, 0)
+        self.assertEqual(gui._control_tab, "preview")
+        gui._hits = {"preview:crisp": (0, 0, 10, 10)}
+        gui._on_mouse_button(gui.window, 0, 1, 0)
+        self.assertEqual(gui.preview_exposure, 0.7)
+        self.assertEqual(gui.preview_spot_width, 0.5)
+        gui.specs = {"exposure": SimpleNamespace(default=1.3),
+                     "spot": SimpleNamespace(default=1.0)}
+        gui._hits = {"preview:reset": (0, 0, 10, 10)}
+        gui._on_mouse_button(gui.window, 0, 1, 0)
+        self.assertEqual(gui.preview_exposure, 1.3)
+        self.assertEqual(gui.preview_spot_width, 1.0)
+        self.assertEqual(gui._actions, [])
+
     def test_cached_static_text_matches_pillow_and_reuses_surfaces(self):
         gui = self.make_gui()
         gui.Image = Image

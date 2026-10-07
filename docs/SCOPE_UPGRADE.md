@@ -5475,3 +5475,196 @@ not changed by the incoming commits. Logs are in
 **Handoff:** Incoming V7 integration is verified. S7/S8 remain closed as in
 A062; the V7 repair plan is separate future work, not part of this merge.
 Generated local source-list manifests remain outside the commits.
+
+---
+
+## Appendix A064 — User-requested scope GUI usability fix — 2026-10-07
+
+New task after closeout: make source/renderer selection intuitive and remove
+the launcher's dead-end "Stop scope before changing its settings" interaction.
+
+- Source type, source-specific drawing mode, preview toggle and output device
+  now appear at the top of Settings. Live sources explicitly show "Raster only"
+  without an editable mode selector. Runtime-image choices remain raster,
+  stochastic and stipple; baked sources retain all five drawing modes.
+- Settings can be edited while scope runs. Pending changes expose **Apply &
+  restart**; the launcher validates them before stopping the old process and
+  starts the replacement only after that process exits. Stop cancels a queued
+  restart. Video controls and resume records continue to refer to the active
+  source while another source is being selected.
+- Tabs distinguish **Settings** from **Playback / logs**. Application startup
+  stays on Settings; the playback/log page reports the active drawing mode.
+  The preview option is labelled **Open scope preview / live controls**.
+- Native preview mode buttons show supported modes only. Live raster sources
+  show a single **Raster · live source (fixed)** label rather than five disabled
+  buttons. Rendering algorithms, output defaults and stage charter are unchanged.
+
+Verification: **64 focused launcher/native GUI/lazy-import tests passed**,
+including restart sequencing, validation before interruption, Stop cancellation,
+active-source transport/resume isolation, and mode availability. A real native
+launcher check under Xvfb/software GL used the moving-video fixture with
+**NullStream**: mouse-driven edits remained available, Apply restarted into a
+new process with 12-Hz capture and the native preview enabled, and Stop exited
+cleanly. Screenshots were inspected. The native preview harness passed its
+12 existing control checks plus three supported-mode/locked-mode checks.
+Syntax and whitespace checks passed. Local evidence:
+`tmp/scope-gui-intuitive/` (launcher `result.json`, screenshots, native control
+report and logs).
+
+**Handoff:** Reopen `./vi.scope-gui`, edit source/drawing mode in Settings, and
+use Apply & restart during a run. S7/S8 closeout remains as recorded in A062;
+this is a bounded GUI follow-up requested by the user.
+
+---
+
+## Appendix A065 — Final user-requested guideline audit — 2026-10-07
+
+**Status: audit complete; accepted software delivery unchanged.** Reviewed the
+frozen charter/measurement contract and stage exits against the ledger and the
+current A064 GUI-follow-up diff. Branch is `scope-mode-upgrade`, HEAD
+`5ad227455`; pre-existing edits to this ledger, native GUI, launcher and launcher
+tests were preserved. This audit appends findings only and does not reopen the
+completed upgrade or start physical/device/performance sweeps.
+
+| Guideline | Evidence and disposition |
+|---|---|
+| D0/P0 provenance and stage-by-stage comparisons | Baseline/correctness A003–A007; scheduling A019/A024; caches A026–A030; source adoption A033/A037/A040–A043; trajectory A044–A049; numerical/preview A053/A054; integrated A058/A060. Results are scenario-specific, not a universal improvement claim. |
+| Numba, persistent state, exact-signature warming and parity | S1 tests and A053 numerical audit cover compiled recurrence, seeded state/chunks, transforms, preparation and output layouts; cold 46.01 s versus fresh-process cached 0.839 s is recorded. Native OpenCV DFT/blur remain explicit hybrid CPU operations, so do not describe the entire path as exclusively Numba. Deployment-target cache reuse remains a target-specific obligation. |
+| Output ownership, ordered fields, rollback and bounded adoption/caches | S2/S3 follow-ups and focused scheduler, cache, field, trajectory, and source tests cover these invariants. Output/adoption accounting distinguishes accepted/generated traces from displayed/fresh source pictures. |
+| Independent clocks, budgets, appearance | A044–A049 document raster/vector/stipple geometry/traversal, budget sweeps and preview versus physical-dwell semantics. Fusion independent trajectory controls are explicitly unsupported; continuous stochastic buffers are not complete pictures. Occupancy is a software proxy, not perceived quality. |
+| CPU-headless/native/software-GL/browser preview | A054 measures three 60-second trials per cell, size/cost/parity, text caching, selective upload, preview age/cadence and output impact. A061/A062 add visual/control checks. HTTP/Node evidence exists; interactive desktop-browser execution remains unverified because the browser bridge was disconnected. |
+| S7 buffers, supported modes and sustained validation | A055 block/depth/rate frontier, A056 ten-minute NullStream soak, A058 48/96-kHz mode/settings matrix and matched D0 comparison, A059/A060 verified PortAudio-to-Pulse-null-sink evidence. NullStream, software audio loopback and physical output are labelled separately. |
+| Strict 30+ fresh complete-picture target and resource improvements | Not universally met. A049's 30.77 complete raster traversals/s is bounded null-output evidence; A058 sustained fresh transitions were 29.62/s. A060 used 12-Hz capture and approximately 29.77 traces/s. Integrated PortAudio CPU/RSS increased and underflows occurred. These deficits are disclosed, not converted into success by counting callbacks or repeated traces. |
+| Real inputs, device/physical quality and limits | Decoded moving video and software visualizers have evidence. Real-camera/device-switch coverage and physical quality/latency are not established by the final mode matrix. Physical tests are the user's separate work per A043/A060/A062 and AGENTS.md, not an agent release prerequisite. |
+| Defaults, artifacts and single authoritative guide | `settings.py` still specifies channels `(1, 2)`. A064 changes source/mode presentation and restart workflow rather than renderer/output defaults. Charter remains frozen; evidence is append-only; generated measurements stay in ignored `tmp/`. |
+
+Six retained key reports were found and matched their recorded SHA256s:
+A054 moving-preview summary and preview-size sweep, A056 null soak, A058 mode
+matrix and final matched report, and A060 PortAudio matched summary. This verifies
+these retained files, not every historical artifact or every reported metric.
+
+Current-tree verification, from the repository root with `PYTHONPATH=.:tests`:
+**63 launcher/native-presentation/lazy-import tests passed**, followed by
+**290 selected scope/numerical/trajectory/source tests and 30 subtests passed**.
+The inspection tool `test_scope_pair.py` was not launched. `git diff --check`
+passed. No device stream was opened and no new performance measurement was run.
+
+**Decision / Handoff:** The delivered software hits the documented implementation
+and bounded-validation requirements, with the explicit exceptions above. This is
+an accepted software closeout with disclosed unmet objectives, not proof that all
+original physical/performance targets have been achieved. S7/S8 remain closed as
+in A062; the existing A064 usability follow-up remains intact. No new active stage
+or automatic validation cycle is created by this final audit.
+
+---
+
+## Appendix A066 — User-reported GUI usability evaluation — 2026-10-07
+
+The user reports problems with launcher controls, native preview, layout/resizing,
+and the browser dashboard, describing the interface as "ugly and dumb". This
+bounded evaluation inspects usability as well as code behavior; previous regression
+and closeout results do not establish that the GUI is intuitive or visually good.
+No production GUI changes or audio output were made during this evaluation.
+
+**Confirmed functional issue:** with a running live-test process, a valid pending
+capture-rate edit, and an invalid active `live_fps` editor buffer, calling
+`_apply_settings()` closes the invalid editor, keeps the old FPS, sends Stop, and
+queues restart. Its notice becomes "Applying settings: restarting scope…" instead
+of preserving the validation error. `_edit_finish()` returns no success indicator,
+so its caller cannot distinguish rejected edits from committed edits. This is
+reproduced without opening graphics/audio, using the real command builder and a
+mock process/thread. Fix priority: validation must prevent Start/Apply and retain
+the editor/error until the user corrects or cancels the invalid value.
+
+**Visual/interaction findings:** the launcher is a long, uniformly weighted settings
+list with basic source actions competing against low-level output parameters;
+preview and playback require separate contexts. The native view combines source,
+output and preview controls without strong grouping. On locked live-raster sources,
+disabled fields are labelled "Raster only" despite the selected mode already being
+raster, obscuring the actual lock reason. Compact typography is very small and
+metrics are truncated. The supplied motion-frame preview is visibly soft/saturated;
+this observation is about the software phosphor visualization, not physical output
+or proof of renderer damage. Tone/spot controls need clearly separated, discoverable
+preview semantics and source-reference context before changing defaults.
+
+Fresh native captures at launcher 1040x760 / 720x480 (including dropdown) and
+preview 1280x800 / 900x600 were inspected. No recorded hit rectangle fell outside
+those windows. That is limited geometric evidence, not proof of readable text,
+correct drag behavior, or usability. Harness/artifacts:
+`tmp/scope_gui_evaluation.py`, `tmp/scope-gui-evaluation/layouts.json` and the five
+PNG captures. Reproduction: `xvfb-run -a env LIBGL_ALWAYS_SOFTWARE=1 PYTHONPATH=.
+.venv/bin/python tmp/scope_gui_evaluation.py`. Preview uses decoded frame 150 of
+the checked-in motion fixture; no audio child process is launched.
+
+**Browser:** source inspection confirms a visually separate neon-green monospace
+dashboard, no viewport meta tag, fixed minimum-width control styling, and separate
+server-preview and browser-local-audio controls whose relationship is unclear.
+The session browser tool reported `browser.disconnected`; no browser interaction,
+responsive DOM rendering or screenshot is claimed. The application/tooling is not
+therefore assumed unavailable.
+
+**Handoff:** treat the GUI as needing a dedicated corrective usability pass.
+Prioritize invalid-edit/restart correctness; then make Source, Playback, Output and
+Preview tasks visually distinct, move advanced settings behind disclosure, keep
+readable compact layouts, and explain fixed/unsupported controls. Use actual pointer,
+keyboard, resize, and lifecycle checks, not only direct method tests. The existing
+S7/S8 transport closeout remains intact; it is not an acceptance of GUI usability.
+
+---
+
+## Appendix A067 — User-requested GUI corrective pass — 2026-10-07
+
+**Request / scope:** the user requested "fix all of them" after A066. This
+bounded launcher/native/browser usability pass preserves existing A064 work,
+output defaults (including channels 1/2), and the accepted S7/S8 closeout.
+
+**Implemented:** invalid numeric/channel edits retain the editor, input and error.
+Start, Apply and subsequent pointer actions require successful validation; Stop
+remains accessible during an invalid edit. Escape cancels the editor. The launcher
+now groups Source, Drawing, Output, Preview and Playback into task tabs, with
+advanced Drawing/Output options disclosed through More options. Compact layouts
+have readable minimum fonts, and dropdown choices can scroll. Pending settings
+still apply through the existing orderly stop/exit/restart workflow.
+
+The native tuner separates Drawing, Output and Preview controls, supports Tab to
+cycle these groups, explains fixed source-controlled values, and provides Less
+glow and Reset preview actions. Preview appearance controls do not dispatch output
+changes. Compact labels and timing metrics were shortened/split after screenshot
+inspection; queue/latency/xrun details remain on Output. Renderer defaults were
+not changed to compensate for the previously observed soft/saturated preview.
+
+The browser dashboard has a viewport declaration, responsive system-font styling,
+wrapping controls, diagnostic disclosure and explicit descriptions of server
+preview, server output-device selection and separate browser-local audio.
+Existing JavaScript transport IDs remain intact.
+
+**Verification:** 68 focused launcher/native/presentation/web/lazy-import tests
+passed; another 292 selected scope/source/numerical/trajectory tests and 30
+subtests passed. Browser inline scripts passed Node syntax checks; HTML control
+IDs were unique and expected transport controls remained present. These checks
+do not establish browser usability. The browser bridge was retried and returned
+`browser.disconnected`; interactive browser rendering remains unverified.
+
+Real GLFW-window callback checks under Xvfb/software GL exercised invalid active
+edits, Escape cancellation, Apply restart with a changed capture rate and native
+preview enabled, advanced Output access, and clean Stop. The child used
+`--device null`: this is process/UI lifecycle evidence, not device-backed audio.
+The harness needed to focus the launcher after the preview opened; its completed
+run passed. Native window checks also exercised tab clicks, gamma/exposure/spot
+drags, image-only/Escape, fullscreen/restore, supported-mode buttons, preview
+publication after changes and Quit. Preview-only drags dispatched no output
+actions. Ten screenshots covered launcher 1040x760/720x480 and native
+1280x800/900x600, including task tabs; recorded hit rectangles were in bounds.
+Screenshots were inspected and compact native text clipping corrected.
+
+**Artifacts:** `tmp/scope-gui-corrections/` contains screenshots, `layouts.json`
+and `interactions.json`; runners are `tmp/scope_gui_evaluation.py` and
+`tmp/scope_gui_interaction_check.py`. Native drag/keyboard evidence is in
+`tmp/scope-gui-intuitive/native-controls.json`, generated by its
+`native_controls.py`. These are ignored local artifacts.
+
+**Handoff:** the identified functional and presentation fixes are implemented
+with native interaction evidence. Browser source checks are complete, but desktop
+browser visual/interaction acceptance requires a connected bridge. No universal
+usability, physical-quality or new performance claim is made. S7/S8 remain closed;
+this pass does not restart transport validation.

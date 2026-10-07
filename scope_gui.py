@@ -232,6 +232,7 @@ class ScopeGUI:
         self._font_cache = {}
         self._text_surface_cache = OrderedDict()
         self._canvas = None
+        self._control_tab = "picture"
         self._last_draw_signature = None
         self._refresh_revision = 0
         self._uploaded_image = None
@@ -557,6 +558,7 @@ class ScopeGUI:
                 self.image_only, self.fullscreen, self.message,
                 self._dragging, self._drag_value,
                 self.preview_exposure, self.preview_spot_width,
+                getattr(self, "_control_tab", "picture"),
                 getattr(self, "_refresh_revision", 0))
 
     def _on_refresh(self, _window):
@@ -646,8 +648,8 @@ class ScopeGUI:
         unit = lambda value: max(1, round(value * ui_scale))
         self._ui_unit = unit
         self.font = self._font(round(17 * ui_scale))
-        self.small = self._font(round(13 * ui_scale))
-        self.tiny = self._font(round(11 * ui_scale), mono=True)
+        self.small = self._font(max(13, round(13 * ui_scale)))
+        self.tiny = self._font(max(11, round(11 * ui_scale)), mono=True)
         layout = responsive_layout(width, height, ui_scale)
         image = self._canvas_for_size(width, height)
         draw = self.ImageDraw.Draw(image)
@@ -663,7 +665,7 @@ class ScopeGUI:
         header_height = unit(56)
         draw.rectangle((0, 0, width, header_height), fill=(10, 18, 25, 255))
         title_x, title_y = unit(22), unit(15)
-        title = "SCOPE  ·  LIVE TUNER"
+        title = "Scope · Preview"
         self._draw_cached_text(image, (title_x, title_y), title,
                                (239, 245, 249), self.font)
         fullscreen_label = "Restore [F11]" if self.fullscreen else "Fullscreen [F11]"
@@ -751,7 +753,7 @@ class ScopeGUI:
         draw.rounded_rectangle(panel, radius=6, fill=(15, 24, 32, 255),
                                outline=(49, 69, 83, 255), width=unit(1))
         self._draw_cached_text(
-            image, (panel[0] + unit(18), panel[1] + unit(13)), "Live controls",
+            image, (panel[0] + unit(18), panel[1] + unit(13)), "Tune scope",
             (231, 240, 246), self.font)
         draw.line((panel[0] + unit(18), panel[1] + unit(43),
                    panel[2] - unit(18), panel[1] + unit(43)),
@@ -763,29 +765,49 @@ class ScopeGUI:
             image, (panel[2] - unit(174), panel[1] + unit(22)),
             "startup default", (159, 173, 181), self.tiny)
 
-        controls_top = panel[1] + unit(52)
+        tab = getattr(self, "_control_tab", "picture")
+        tabs = (("picture", "Drawing"), ("output", "Output"), ("preview", "Preview"))
+        tab_width = (panel[2] - panel[0] - unit(40)) // 3
+        for i, (name, label) in enumerate(tabs):
+            left = panel[0] + unit(18) + i * (tab_width + unit(2))
+            rect = (left, panel[1] + unit(48), left + tab_width,
+                    panel[1] + unit(82))
+            draw.rounded_rectangle(rect, radius=4,
+                                   fill=(38, 86, 108) if tab == name else (20, 32, 43))
+            self._draw_cached_text(image, (left + unit(10), rect[1] + unit(8)),
+                                   label, (224, 236, 244), self.small)
+            self._hits[f"tab:{name}"] = rect
+        sliders = ({"picture": ("ips", "fps", "fields", "trim", "gamma", "density", "rows"),
+                    "output": ("lowpass",), "preview": ("exposure", "spot")})[tab]
+        controls_top = panel[1] + unit(94)
         available_controls_height = panel[3] - controls_top
         row_fit = ((available_controls_height - unit(166))
-                   // len(SLIDER_RANGES))
+                    // len(sliders))
         preferred_row = max(unit(42), round(SLIDER_ROW_HEIGHT * ui_scale))
         slider_row_height = max(
             unit(30), min(preferred_row, row_fit))
         track_left = panel[0] + unit(20)
         track_right = panel[2] - unit(124)
-        for index, name in enumerate(SLIDER_RANGES):
+        for index, name in enumerate(sliders):
             top = controls_top + index * slider_row_height
             spec = self.specs[name]
             value = self._slider_value(name, state)
             disabled = self._slider_disabled(name, state)
             label_color = (119, 137, 149) if disabled else (208, 220, 228)
             readout = _format_value(name, value)
-            if disabled and name in ("fields", "rows"):
-                readout = "Raster only"
+            if disabled:
+                if state.get("mode_locked") and name in ("ips", "fps", "fields"):
+                    readout = "Fixed"
+                elif name in ("fields", "rows") and state.get("mode") != "raster":
+                    readout = "Raster only"
+                else:
+                    readout = "Fixed by source"
             self._draw_cached_text(
                 image, (track_left, top + unit(3)), SLIDER_LABELS[name],
                 label_color, self.small)
             self._draw_cached_text(
-                image, (panel[2] - unit(112), top + unit(3)), readout,
+                image, (panel[2] - unit(112), top + unit(3)),
+                self._fit_text(readout, self.tiny, unit(100)),
                 (115, 132, 145) if disabled else (235, 242, 247), self.tiny)
             y = top + max(unit(24), slider_row_height - unit(8))
             thumb = min(unit(6), max(1, slider_row_height // 8))
@@ -815,11 +837,16 @@ class ScopeGUI:
                                              track_right + unit(8),
                                              top + slider_row_height - unit(2))
 
-        mode_y = controls_top + len(SLIDER_RANGES) * slider_row_height + unit(4)
+        mode_y = controls_top + len(sliders) * slider_row_height + unit(4)
         mode_gap = unit(5)
-        mode_width = (panel[2] - panel[0] - unit(36) - mode_gap * 4) // 5
+        available = state.get("available_modes", MODES)
+        modes = tuple(mode for mode in MODES if mode in available)
+        if state.get("mode_locked"):
+            modes = (state.get("mode", "raster"),)
+        mode_width = (panel[2] - panel[0] - unit(36)
+                      - mode_gap * (len(modes) - 1)) // max(1, len(modes))
         mode_height = unit(31)
-        for i, mode in enumerate(MODES):
+        for i, mode in enumerate(modes):
             left = panel[0] + unit(18) + i * (mode_width + mode_gap)
             rect = (left, mode_y, left + mode_width, mode_y + mode_height)
             selected = state.get("mode") == mode
@@ -832,10 +859,11 @@ class ScopeGUI:
                 (63, 78, 88) if selected else (38, 48, 56))
             draw.rounded_rectangle(rect, radius=unit(4), fill=fill,
                                    outline=outline, width=unit(1))
-            text_width = self.small.getlength(mode.title())
+            label = "Raster · live source (fixed)" if locked and mode == "raster" else mode.title()
+            text_width = self.small.getlength(label)
             self._draw_cached_text(
                 image, (left + (mode_width - text_width) / 2,
-                        mode_y + unit(8)), mode.title(),
+                        mode_y + unit(8)), label,
                 (231, 241, 247) if not disabled else (113, 127, 136),
                 self.small)
             if not disabled:
@@ -850,8 +878,8 @@ class ScopeGUI:
                    ("key", "r", "Rotate"),
                    ("key", "m", "Mirror"),
                    ("audio", "toggle",
-                    "Hear XY: ON" if not state.get("audio_muted", True)
-                    else "Hear XY: OFF"))
+                     "XY: on" if not state.get("audio_muted", True)
+                     else "XY: off"))
         for i, (kind, key, label) in enumerate(buttons):
             left = panel[0] + unit(18) + i * (button_width + button_gap)
             rect = (left, button_y, left + button_width,
@@ -874,6 +902,20 @@ class ScopeGUI:
                 self._hits[f"key:{key}"] = rect
 
         stats_y = button_y + unit(40)
+        if tab == "preview":
+            for i, (name, label) in enumerate((("crisp", "Less glow"), ("reset", "Reset preview"))):
+                left = panel[0] + unit(18) + i * ((panel[2] - panel[0] - unit(40)) // 2)
+                rect = (left, stats_y, left + (panel[2] - panel[0] - unit(44)) // 2,
+                        stats_y + unit(32))
+                draw.rounded_rectangle(rect, radius=4, fill=(20, 48, 62))
+                self._draw_cached_text(image, (left + unit(10), stats_y + unit(8)),
+                                       label, (222, 238, 244), self.small)
+                self._hits[f"preview:{name}"] = rect
+            stats_y += unit(45)
+            self._draw_cached_text(image, (panel[0] + unit(18), stats_y),
+                                   "Appearance only; output samples are unchanged.",
+                                   (145, 182, 196), self.tiny)
+            stats_y += unit(28)
         trace_hz = float(metrics.get("trace_hz", 0) or 0)
         picture_hz = float(metrics.get("picture_hz", 0) or 0)
         samples = int(metrics.get("samples", 0) or 0)
@@ -892,21 +934,29 @@ class ScopeGUI:
         self._draw_cached_text(
             image, (panel[0] + unit(18), stats_y),
             self._fit_text(
-                f"{trace_hz:.1f} trace/s  ·  {picture_hz:.1f} picture/s  ·  "
-                f"{samples:,} samples  ·  grid {grid}",
+                    f"{trace_hz:.1f} traces/s  ·  {picture_hz:.1f} pictures/s",
                 self.small, panel[2] - panel[0] - unit(36)),
             (158, 190, 205), self.small)
         self._draw_cached_text(
             image, (panel[0] + unit(18), stats_y + unit(21)),
             self._fit_text(
-                f"{metrics.get('fields', 1)} fields  ·  {buffer_kind} "
-                f"{buffer_text}  ·  stream {dac_latency:.1f}ms  ·  "
-                f"scheduled DAC {schedule_text}  ·  {errors}",
+                    (f"{buffer_kind} {buffer_text} · latency {dac_latency:.1f}ms"
+                     if tab == "output" else f"{samples:,} samples · grid {grid}"),
                 self.tiny, panel[2] - panel[0] - unit(36)),
             (218, 153, 122) if (metrics.get("dropouts", 0)
                                 or metrics.get("underruns", 0))
             else (133, 158, 173), self.tiny)
+        if tab == "output":
+            self._draw_cached_text(
+                image, (panel[0] + unit(18), stats_y + unit(42)),
+                self._fit_text(f"Scheduled DAC {schedule_text} · {errors}",
+                               self.tiny, panel[2] - panel[0] - unit(36)),
+                (218, 153, 122) if (metrics.get("dropouts", 0)
+                                       or metrics.get("underruns", 0))
+                else (133, 158, 173), self.tiny)
         note = self.message
+        if state.get("mode_locked") and tab == "picture":
+            note = "Fixed rates/fields: change in the launcher."
         if note:
             self._draw_cached_text(
                 image, (panel[0] + unit(18), panel[3] - unit(23)),
@@ -918,11 +968,10 @@ class ScopeGUI:
                        fill=(9, 15, 20, 255))
         self._draw_cached_text(
             image, (unit(20), height - unit(27)),
-            "XY starts muted; Hear XY enables the DAC. Muted XY leaves a "
-            "center dot on a physical scope (no Z blanking channel).",
+            "XY starts muted. XY: on enables output; mute parks the beam (no Z blanking).",
             (151, 169, 179), self.tiny)
-        footer_note = ("Gamma/trim tune dwell; scope intensity sets tube brightness. "
-                       "F10 image only · F11 fullscreen · Esc restore/close · Q close.")
+        footer_note = ("Preview appearance does not change output brightness. "
+                       "F10 image only · F11 fullscreen · Esc restore · Q close.")
         self._draw_cached_text(
             image, (unit(20), height - unit(13)),
             self._fit_text(footer_note, self.tiny, width - unit(40)),
@@ -1036,6 +1085,15 @@ class ScopeGUI:
                 if rect[0] <= x <= rect[2] and rect[1] <= y <= rect[3]:
                     if hit.startswith("mode:"):
                         self._actions.append(("mode", hit.split(":", 1)[1]))
+                    elif hit.startswith("tab:"):
+                        self._control_tab = hit.split(":", 1)[1]
+                        self._last_draw = 0.0
+                    elif hit == "preview:crisp":
+                        self.set_preview_exposure(0.7)
+                        self.set_preview_spot_width(0.5)
+                    elif hit == "preview:reset":
+                        self.set_preview_exposure(self.specs["exposure"].default)
+                        self.set_preview_spot_width(self.specs["spot"].default)
                     elif hit == "fullscreen:toggle":
                         self._actions.append(("fullscreen", not self.fullscreen))
                     elif hit == "image_only:toggle":
@@ -1089,6 +1147,10 @@ class ScopeGUI:
             self._actions.append(("fullscreen", not self.fullscreen))
         elif key == getattr(self.glfw, "KEY_F10", None):
             self._actions.append(("image_only", not self.image_only))
+        elif key == getattr(self.glfw, "KEY_TAB", None):
+            tabs = ("picture", "output", "preview")
+            self._control_tab = tabs[(tabs.index(getattr(self, "_control_tab", "picture")) + 1) % 3]
+            self._last_draw = 0.0
         elif key == self.glfw.KEY_V:
             self._actions.append(("key", "v"))
         elif key == self.glfw.KEY_I:

@@ -3,7 +3,7 @@ from pathlib import Path
 import tempfile
 import time
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import numpy as np
 
@@ -228,6 +228,131 @@ class CameraDevicePickerTests(unittest.TestCase):
         gui.settings = {"run_mode": "live", "live_source": "test"}
 
         self.assertIn("scope_gui", gui._visible_fields())
+
+
+class RunningSettingsTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        with patch.object(ScopeLauncher, "_init_graphics"):
+            self.gui = ScopeLauncher(
+                preference_path=Path(self.temp.name) / "preferences.json",
+                restore_preferences=False)
+        self.gui.settings.update({"run_mode": "live", "live_source": "video",
+                                  "video_file": str(Path(self.temp.name) / "old.mp4")})
+        self.gui.active_settings = dict(self.gui.settings)
+        self.gui.process = Mock()
+        self.gui.process.poll.return_value = None
+        self.gui.process.stdin = None
+        self.gui.active_video_transport = True
+        self.gui.playback = {"position": 12.5, "duration": 40.0, "paused": False}
+
+    def test_apply_waits_for_old_process_exit_and_preserves_its_resume(self):
+        gui = self.gui
+        old_key = gui._resume_key()
+        gui._assign("video_file", str(Path(self.temp.name) / "new.mp4"))
+        self.assertTrue(gui._settings_pending())
+        self.assertEqual(gui._resume_key(), old_key)
+        self.assertEqual(gui._current_resume(), 0.0)
+        with patch.object(gui, "_build_command", return_value=["python"]), \
+                patch("tools.scope_launcher_gui.threading.Thread"), \
+                patch.object(gui, "_start") as start:
+            gui._apply_settings()
+            self.assertTrue(gui.restart_requested)
+            gui.process.send_signal.assert_called_once()
+            start.assert_not_called()
+            gui.events.put(("exit", 0))
+            gui._drain_events()
+            start.assert_called_once()
+        self.assertEqual(gui.resume[old_key]["position"], 12.5)
+        self.assertIsNone(gui.active_settings)
+
+    def test_invalid_pending_settings_do_not_interrupt_running_scope(self):
+        gui = self.gui
+        gui._assign("live_fps", "invalid")
+        with patch.object(gui, "_build_command", side_effect=ValueError("Invalid FPS")), \
+                patch.object(gui, "_stop") as stop:
+            gui._apply_settings()
+            stop.assert_not_called()
+        self.assertFalse(gui.restart_requested)
+        self.assertEqual(gui.notice, "Invalid FPS")
+
+    def test_invalid_active_editor_blocks_apply_and_keeps_user_input(self):
+        gui = self.gui
+        gui._assign("capture_fps", "12")
+        gui._edit_start("live_fps")
+        gui.edit_buffer = "not-a-number"
+        with patch.object(gui, "_build_command") as build, \
+                patch.object(gui, "_stop") as stop:
+            gui._apply_settings()
+        build.assert_not_called()
+        stop.assert_not_called()
+        self.assertTrue(gui.editing)
+        self.assertEqual(gui.edit_buffer, "not-a-number")
+        self.assertFalse(gui.restart_requested)
+        self.assertIn("Invalid value", gui.notice)
+        self.assertTrue(gui._edit_finish(commit=False))
+        self.assertFalse(gui.editing)
+
+    def test_invalid_editor_blocks_start_until_corrected(self):
+        gui = self.gui
+        gui.process = None
+        gui._edit_start("live_fps")
+        gui.edit_buffer = "bad"
+        with patch("tools.scope_launcher_gui.subprocess.Popen") as start:
+            gui._start()
+        start.assert_not_called()
+        self.assertTrue(gui.editing)
+        gui.edit_buffer = "25"
+        self.assertTrue(gui._edit_finish())
+        self.assertEqual(gui.settings["live_fps"], "25")
+
+    def test_task_tabs_keep_advanced_controls_available_without_clutter(self):
+        gui = self.gui
+        self.assertIn("video_file", gui._visible_fields())
+        self.assertNotIn("blocksize", gui._visible_fields())
+        gui.settings_tab = "output"
+        self.assertIn("device", gui._visible_fields())
+        self.assertNotIn("blocksize", gui._visible_fields())
+        gui.show_advanced = True
+        self.assertIn("blocksize", gui._visible_fields())
+        gui.settings_tab = "preview"
+        self.assertIn("scope_gui", gui._visible_fields())
+
+    def test_stop_cancels_queued_restart(self):
+        gui = self.gui
+        gui.restart_requested = True
+        gui.stop_requested = True
+        gui._stop()
+        with patch.object(gui, "_start") as start:
+            gui.events.put(("exit", 0))
+            gui._drain_events()
+            start.assert_not_called()
+
+    def test_current_video_controls_still_target_active_source_after_edit(self):
+        gui = self.gui
+        gui._assign("run_mode", "app")
+        self.assertTrue(gui._has_video_selection())
+        self.assertTrue(gui._is_control_process())
+        self.assertTrue(gui._settings_pending())
+
+    def test_stopping_after_source_edit_does_not_reuse_old_video_position(self):
+        gui = self.gui
+        old_key = gui._resume_key()
+        gui._assign("video_file", str(Path(self.temp.name) / "new.mp4"))
+        gui.events.put(("exit", 0))
+        gui._drain_events()
+        self.assertEqual(gui.resume[old_key]["position"], 12.5)
+        self.assertEqual(gui._current_resume(), 0.0)
+
+    def test_live_source_explains_its_fixed_renderer(self):
+        gui = self.gui
+        self.assertIn("render_mode", gui._visible_fields())
+        self.assertIn("Raster only", gui._display_value("render_mode"))
+        gui._assign("run_mode", "app")
+        gui._assign("app_source", "images")
+        self.assertEqual([value for _label, value in gui._choices("render_mode")],
+                         ["raster", "stochastic", "stipple"])
 
 
 class VideoSourceTransportTests(unittest.TestCase):

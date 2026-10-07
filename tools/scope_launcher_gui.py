@@ -173,12 +173,14 @@ if (DEFAULT_SETTINGS["app_source"] == "images" and
     DEFAULT_SETTINGS["render_mode"] = "raster"
 
 FIELD_GROUPS = (
-    ("Pipeline", ("run_mode", "device")),
+    ("Source and drawing mode", ("run_mode", "app_source", "render_mode",
+                                 "live_source", "scope_gui", "device")),
+    ("Image source", ("image_dir", "xy_dir", "live_size")),
+    ("Live source", ("video_file", "ffmpeg_input", "display", "region")),
     ("Output and trigger", ("channels", "x_only", "trigger",
                               "trigger_shape", "trigger_us", "lowpass", "physical_dwell",
                              "rotation", "mirror")),
-    ("Image source", ("app_source", "image_dir", "xy_dir", "live_size")),
-    ("Renderer and timing", ("render_mode", "fps", "samples",
+    ("Renderer and timing", ("fps", "samples",
                               "geometry_samples", "traversal_hz", "fields",
                               "yt_timing", "realtime", "sweep")),
     ("Raster and tone", ("invert", "trim", "gamma", "density", "rows",
@@ -188,10 +190,8 @@ FIELD_GROUPS = (
                                      "walk_edge", "walk_hz", "stipple_points",
                                      "fusion")),
     ("Output processing", ("dc_comp", "oversample", "mix", "mix_duty",
-                            "min_feature", "list_from_images", "scope_gui",
+                             "min_feature", "list_from_images",
                             "scope_gui_image_only", "scope_gui_fullscreen")),
-    ("Live source", ("live_source", "video_file", "ffmpeg_input", "display",
-                      "region")),
     ("Live sweep and capture", ("live_fps", "live_samples",
                                   "geometry_samples", "traversal_hz", "live_trim",
                                  "live_gamma", "live_density", "live_rows",
@@ -199,17 +199,16 @@ FIELD_GROUPS = (
                                  "adapt",
                                  "capture_fps", "downto", "stream",
                                  "buffer_blocks", "live_dc_comp", "blocksize")),
-    ("Live visualizer", ("scope_gui",)),
 )
 
 FIELD_LABELS = {
-    "run_mode": "Scope pipeline", "device": "Audio output device",
+    "run_mode": "Source type", "device": "Audio output device",
     "channels": "PortAudio channels · X,Y", "x_only": "X-only mono · Y-T",
     "trigger": "X trigger marker", "trigger_shape": "Trigger shape",
     "trigger_us": "Trigger duration · microseconds", "lowpass": "Output low-pass · Hz",
     "app_source": "Scope input", "image_dir": "Image source folder",
     "xy_dir": "Baked XY folder", "live_size": "Runtime thumbnail width",
-    "render_mode": "Renderer", "fps": "Scope traces / second",
+    "render_mode": "Drawing mode", "fps": "Scope traces / second",
     "samples": "Samples per trace · overrides FPS", "fields": "Raster fields",
     "geometry_samples": "Geometry samples", "traversal_hz": "Traversal Hz",
     "yt_timing": "Raster row timing", "realtime": "Realtime raster stream",
@@ -227,7 +226,7 @@ FIELD_LABELS = {
     "mix_duty": "Mix raster duty", "min_feature": "Vector minimum feature",
     "rotation": "Rotation · degrees", "mirror": "Mirror X",
     "list_from_images": "Rebuild legacy image manifest",
-    "scope_gui": "Open native live tuner",
+    "scope_gui": "Open scope preview / live controls",
     "scope_gui_image_only": "Start tuner in image-only view",
     "scope_gui_fullscreen": "Start fullscreen · image-only",
     "live_source": "Live source", "video_file": "Video file / URL",
@@ -719,13 +718,18 @@ class ScopeLauncher:
                 dict(IMAGE_RENDER_CHOICES).values()):
             self.settings["render_mode"] = "raster"
         self.page = "setup"
+        self.settings_tab = "source"
+        self.show_advanced = False
         self.selected = "run_mode"
         self.scroll = 0
         self.dropdown = None
+        self.dropdown_scroll = 0
         self.editing = False
         self.edit_buffer = ""
-        self.notice = device_error or "Choose a pipeline, source, and output; then Start."
+        self.notice = device_error or "Choose a source. Check Output, then Start scope."
         self.process = None
+        self.active_settings = None
+        self.restart_requested = False
         self.reader = None
         self.events = queue.Queue()
         self.lines = []
@@ -881,14 +885,14 @@ class ScopeLauncher:
 
     def _apply_ui_scale(self, height):
         scale = min(1.35, max(0.75, int(height) / self.WINDOW_SIZE[1]))
-        if scale == self._ui_scale:
+        if scale == self._ui_scale and self.TOOLBAR_HEIGHT >= 104:
             return
         self._ui_scale = scale
-        self.ROW_HEIGHT = max(24, round(31 * scale))
+        self.ROW_HEIGHT = max(32, round(36 * scale))
         self.FOOTER_HEIGHT = max(34, round(42 * scale))
-        self.TOOLBAR_HEIGHT = max(44, round(56 * scale))
-        self.font = self._font(max(12, round(17 * scale)))
-        self.small = self._font(max(10, round(13 * scale)))
+        self.TOOLBAR_HEIGHT = max(104, round(112 * scale))
+        self.font = self._font(max(17, round(19 * scale)))
+        self.small = self._font(max(13, round(14 * scale)))
 
     def _u(self, value):
         return max(1, round(value * self._ui_scale))
@@ -968,6 +972,11 @@ class ScopeLauncher:
             self.dirty = True
             return
         self.dropdown = key
+        choices = self._choices(key)
+        current = str(self.settings.get(key, ""))
+        index = next((i for i, (_label, value) in enumerate(choices)
+                      if str(value) == current), 0)
+        self.dropdown_scroll = max(0, index - 4)
 
     def _choices(self, key):
         if key == "device":
@@ -992,6 +1001,10 @@ class ScopeLauncher:
                     continue
             visible = []
             for key in keys:
+                if key == "app_source" and run_mode != "app":
+                    continue
+                if key == "live_source" and run_mode != "live":
+                    continue
                 if key == "xy_dir" and self.settings.get("app_source") != "bake":
                     continue
                 if key == "list_from_images" and self.settings.get("app_source") != "bake":
@@ -1022,7 +1035,30 @@ class ScopeLauncher:
                 visible.append(key)
             if visible:
                 groups.append((title, visible))
-        return groups
+        source = {"run_mode", "app_source", "live_source", "render_mode",
+                  "image_dir", "xy_dir", "video_file", "ffmpeg_input",
+                  "display", "region", "scope_gui"}
+        output = {"device", "channels", "x_only", "trigger", "trigger_shape",
+                  "trigger_us", "lowpass", "physical_dwell", "rotation", "mirror",
+                  "dc_comp", "oversample", "live_dc_comp", "live_oversample",
+                  "blocksize", "buffer_blocks"}
+        preview = {"scope_gui", "scope_gui_image_only", "scope_gui_fullscreen"}
+        common = {"fps", "live_fps", "capture_fps", "gamma", "live_gamma",
+                  "trim", "live_trim", "density", "live_density", "stipple_points",
+                  "device", "channels", "rotation", "mirror", "trigger"}
+        tab = getattr(self, "settings_tab", "source")
+        shown = []
+        for title, keys in groups:
+            selected = [key for key in keys if (
+                key in source if tab == "source" else
+                key in output if tab == "output" else
+                key in preview if tab == "preview" else
+                key not in source | output | preview)]
+            if tab in ("drawing", "output") and not getattr(self, "show_advanced", False):
+                selected = [key for key in selected if key in common]
+            if selected:
+                shown.append((title, selected))
+        return shown
 
     def _visible_fields(self):
         return [key for _title, keys in self._sections() for key in keys]
@@ -1033,8 +1069,10 @@ class ScopeLauncher:
         except OSError as exc:
             self.notice = f"Could not save scope preferences: {exc}"
 
-    def _resume_key(self):
-        path = str(self.settings.get("video_file", "")).strip()
+    def _resume_key(self, settings=None):
+        if settings is None:
+            settings = self.active_settings or self.settings
+        path = str(settings.get("video_file", "")).strip()
         if not path:
             return ""
         parsed = urlparse(path)
@@ -1090,9 +1128,8 @@ class ScopeLauncher:
 
     def _edit_finish(self, commit=True):
         if not self.editing:
-            return
+            return True
         key, value = self.selected, self.edit_buffer.strip()
-        self.editing = False
         if commit:
             if key in NUMBER_FIELDS and value:
                 try:
@@ -1111,22 +1148,26 @@ class ScopeLauncher:
                 except ValueError:
                     self.notice = f"Invalid value for {FIELD_LABELS.get(key, key)}"
                     self.dirty = True
-                    return
+                    return False
             if key == "channels":
                 try:
                     value = ",".join(map(str, parse_channel_pair(value)))
                 except ValueError as exc:
                     self.notice = str(exc)
                     self.dirty = True
-                    return
+                    return False
             if key == "video_file" and str(self.settings.get(key, "")) != value:
-                self.playback = None
-                self.seek_preview = None
+                if self.process is None:
+                    self.playback = None
+                    self.seek_preview = None
             self.settings[key] = value
             if key == "fields":
                 self.settings["fields_explicit"] = bool(value)
             self._persist()
+            self.notice = f"Updated {FIELD_LABELS.get(key, key)}."
+        self.editing = False
         self.dirty = True
+        return True
 
     def _toggle(self, key):
         self.settings[key] = not bool(self.settings.get(key))
@@ -1134,8 +1175,11 @@ class ScopeLauncher:
         self.dirty = True
 
     def _current_resume(self):
-        if not self._resume_key():
+        selected_key = self._resume_key(self.settings)
+        if not selected_key:
             return 0.0
+        if selected_key != self._resume_key():
+            return max(0.0, float(self.resume.get(selected_key, {}).get("position", 0.0)))
         return self._playback_state()[0]
 
     def _build_command(self):
@@ -1144,8 +1188,8 @@ class ScopeLauncher:
                              video_start=self._current_resume())
 
     def _start(self):
-        if self.editing:
-            self._edit_finish()
+        if self.editing and not self._edit_finish():
+            return
         if self.process is not None:
             return
         try:
@@ -1171,6 +1215,8 @@ class ScopeLauncher:
             self.dirty = True
             return
         self.process = process
+        self.active_settings = dict(self.settings)
+        self.restart_requested = False
         self.active_video_transport = (
             self.settings.get("run_mode") == "live" and
             self.settings.get("live_source") == "video")
@@ -1179,7 +1225,7 @@ class ScopeLauncher:
         self.dropdown = None
         self.stop_requested = False
         self.lines = []
-        self.page = "live"
+        self.page = "live" if self.active_video_transport else "setup"
         self.notice = "Starting scope…"
         self.reader = threading.Thread(target=self._read_process,
                                        args=(process,), daemon=True,
@@ -1201,11 +1247,35 @@ class ScopeLauncher:
         return self.active_video_transport and self.process is not None
 
     def _has_video_selection(self):
-        return (self.settings.get("run_mode") == "live" and
-                self.settings.get("live_source") == "video" and
-                bool(str(self.settings.get("video_file", "")).strip()))
+        settings = self.active_settings or self.settings
+        return (settings.get("run_mode") == "live" and
+                settings.get("live_source") == "video" and
+                bool(str(settings.get("video_file", "")).strip()))
+
+    def _settings_pending(self):
+        return (self.process is not None and self.active_settings is not None
+                and self.settings != self.active_settings)
+
+    def _apply_settings(self):
+        if self.editing and not self._edit_finish():
+            return
+        if self.process is None:
+            self._start()
+            return
+        if self.stop_requested or not self._settings_pending():
+            return
+        try:
+            self._build_command()
+        except (ValueError, TypeError, OSError) as exc:
+            self.notice = str(exc)
+            self.dirty = True
+            return
+        self._stop()
+        self.restart_requested = True
+        self.notice = "Applying settings: restarting scope…"
 
     def _stop(self):
+        self.restart_requested = False
         process = self.process
         if process is None or process.poll() is not None or self.stop_requested:
             return
@@ -1329,12 +1399,18 @@ class ScopeLauncher:
                         self.notice = value
             elif kind == "exit":
                 if self.process is not None:
+                    self._remember_playback(persist=True)
                     self.process = None
+                    self.active_settings = None
+                    self.playback = None
+                    self.seek_preview = None
                     self.active_video_transport = False
                     self.stop_requested = False
-                    self._remember_playback(persist=True)
                     if self.close_when_stopped:
                         self.closed = True
+                    elif self.restart_requested:
+                        self.restart_requested = False
+                        self._start()
                     else:
                         self.notice = ("Scope stopped." if value == 0 else
                                        f"Scope exited with status {value}.")
@@ -1372,14 +1448,14 @@ class ScopeLauncher:
         self.hits = {}
         toolbar_height = self.TOOLBAR_HEIGHT
         draw.rectangle((0, 0, width, toolbar_height), fill=(10, 18, 25, 255))
-        toolbar = (("setup", "Setup", "Setup"),
-                   ("live", "Live", "Live"),
-                   ("start", "Stop" if self.process else "Start",
-                    "Stop" if self.process else "Start"),
-                   ("defaults", "Defaults", "Default"),
-                   ("refresh", "Refresh devices", "Devices"),
+        toolbar = (("start", "Stop scope" if self.process else "Start scope",
+                    "Stop scope" if self.process else "Start scope"),
+                   ("defaults", "Defaults", "Defaults"),
+                   ("refresh", "Devices", "Devices"),
                    ("fullscreen", "Restore" if self.fullscreen else "Fullscreen",
                     "Restore" if self.fullscreen else "Full"))
+        if self._settings_pending():
+            toolbar = (("apply", "Apply & restart", "Apply"),) + toolbar
         compact = width < 980
         right = width - unit(12)
         compact_gutter = unit(5)
@@ -1389,7 +1465,7 @@ class ScopeLauncher:
             text_width = int(self.small.getlength(label))
             button_width = max(unit(48), text_width + unit(24))
             x = right - button_width
-            rect = (x, unit(9), right, toolbar_height - unit(9))
+            rect = (x, 10, right, 44)
             active = ((key == self.page) or (key == "start" and self.process))
             color = ((42, 85, 108) if key == "start" and self.process else
                      (43, 94, 123) if key == "start" else
@@ -1398,22 +1474,44 @@ class ScopeLauncher:
             draw.rounded_rectangle(rect, radius=unit(5), fill=color,
                                    outline=(67, 100, 122))
             draw.text((x + (button_width - text_width) / 2,
-                       unit(20)), label, font=self.small,
+                        18), label, font=self.small,
                       fill=(246, 240, 235) if key == "start" else (236, 242, 247))
             self.hits[key] = rect
             right = x - (compact_gutter if compact else full_gutter)
-        title = "SCOPE  ·  SETUP / LIVE"
+        title = "Scope"
         title_width = max(unit(54), right - unit(24))
         shown_title = self._fit(title, self.font, title_width)
-        draw.text((unit(18), unit(18)), shown_title, font=self.font,
-                  fill=(239, 245, 249))
+        draw.text((unit(18), 15), shown_title, font=self.font,
+                   fill=(239, 245, 249))
+        tabs = (("source", "Source"), ("drawing", "Drawing"),
+                ("output", "Output"), ("preview", "Preview"), ("live", "Playback"))
+        left = unit(18)
+        for key, label in tabs:
+            button_width = max(76, round(self.small.getlength(label)) + 24)
+            rect = (left, 58, left + button_width, 90)
+            active = (self.page == "live" if key == "live" else
+                      self.page == "setup" and self.settings_tab == key)
+            draw.rounded_rectangle(rect, radius=6,
+                                   fill=(38, 86, 108) if active else (20, 32, 43))
+            draw.text((left + 12, 65), label, font=self.small,
+                      fill=(232, 242, 248) if active else (162, 183, 198))
+            self.hits["live" if key == "live" else f"tab:{key}"] = rect
+            left += button_width + 6
+        if self.page == "setup" and self.settings_tab in ("drawing", "output"):
+            rect = (left + 8, 58, min(width - 18, left + 138), 90)
+            draw.rounded_rectangle(rect, radius=6, fill=(20, 32, 43))
+            draw.text((rect[0] + 10, 65),
+                      "Less options" if self.show_advanced else "More options",
+                      font=self.small, fill=(128, 204, 212))
+            self.hits["advanced"] = rect
         if self.page == "setup":
             self._draw_setup(draw, width, height)
         else:
             self._draw_live(draw, width, height)
         footer_top = height - self.FOOTER_HEIGHT
         draw.rectangle((0, footer_top, width, height), fill=(9, 15, 20, 255))
-        help_text = (self.notice or
+        help_text = ((self.notice or "Settings changed") + " · Pending edits: Apply & restart."
+                     if self._settings_pending() and not self.stop_requested else self.notice or
                      "Scroll or ↑/↓ settings · Enter edit · ←/→ choose · "
                      "Space start/stop · F11 fullscreen · Esc stop/close")
         draw.text((unit(14), footer_top + unit(13)),
@@ -1483,7 +1581,8 @@ class ScopeLauncher:
                                     field_right - value_left - unit(18)),
                           font=self.small, fill=(243, 208, 146) if selected else
                           (237, 242, 246))
-                if self._is_dropdown_field(value):
+                if self._is_dropdown_field(value) and not (
+                        value == "render_mode" and self.settings.get("run_mode") == "live"):
                     draw.text((field_right - unit(12), top + unit(6)),
                               "▾", font=self.small,
                               fill=(134, 169, 188))
@@ -1493,7 +1592,8 @@ class ScopeLauncher:
                               state, font=self.small,
                               fill=(160, 212, 180) if self.settings.get(value)
                               else (133, 159, 177))
-                self.hits[f"field:{value}"] = rect
+                if not (value == "render_mode" and self.settings.get("run_mode") == "live"):
+                    self.hits[f"field:{value}"] = rect
             y += self.ROW_HEIGHT
         all_items = self._items()
         limit = self._visible_item_limit()
@@ -1535,9 +1635,11 @@ class ScopeLauncher:
         if top + visible * item_height > height - self.FOOTER_HEIGHT:
             top = max(self.TOOLBAR_HEIGHT, rect[1] - visible * item_height)
         current = str(self.settings.get(key, ""))
-        for index, (label, value) in enumerate(choices[:visible]):
-            item = (left, top + index * item_height,
-                    left + menu_width, top + (index + 1) * item_height)
+        start = min(self.dropdown_scroll, max(0, len(choices) - visible))
+        for row, (label, value) in enumerate(choices[start:start + visible]):
+            index = start + row
+            item = (left, top + row * item_height,
+                    left + menu_width, top + (row + 1) * item_height)
             selected = str(value) == current
             draw.rectangle(item, fill=(39, 67, 86) if selected else (18, 30, 39),
                            outline=(54, 77, 92))
@@ -1549,6 +1651,14 @@ class ScopeLauncher:
     def _draw_live(self, draw, width, height):
         unit = self._u
         top = self.TOOLBAR_HEIGHT + unit(14)
+        settings = self.active_settings or self.settings
+        mode = settings.get("render_mode", "raster") if settings.get("run_mode") == "app" else "raster"
+        summary = (f"{'Running' if self.process else 'Selected'} drawing mode: {mode.title()} · "
+                   + ("Live screen/video supports Raster only" if settings.get("run_mode") == "live"
+                      else "Change drawing mode in Settings; Apply & restart"))
+        draw.text((unit(20), top), self._fit(summary, self.small, width - unit(40)),
+                  font=self.small, fill=(203, 219, 228))
+        top += unit(30)
         is_video = self._has_video_selection()
         if is_video:
             position, duration, paused = self._playback_state()
@@ -1597,6 +1707,8 @@ class ScopeLauncher:
 
     def _display_value(self, key):
         value = self.settings.get(key, "")
+        if key == "render_mode" and self.settings.get("run_mode") == "live":
+            return "Raster only · live screen / video"
         if key == "device":
             choices = self._choices(key)
             return next((label for label, choice in choices
@@ -1679,8 +1791,14 @@ class ScopeLauncher:
             return
         if action != self.glfw.PRESS:
             return
-        if self.editing:
-            self._edit_finish()
+        stop_rect = self.hits.get("start")
+        if (self.process is not None and stop_rect is not None
+                and stop_rect[0] <= x <= stop_rect[2]
+                and stop_rect[1] <= y <= stop_rect[3]):
+            self._stop()
+            return
+        if self.editing and not self._edit_finish():
+            return
         hit_items = list(self.hits.items())
         if self.dropdown:
             hit_items.sort(key=lambda item: 0 if item[0].startswith("option:") else 1)
@@ -1693,16 +1811,8 @@ class ScopeLauncher:
                 if index < len(options):
                     self._assign(self.dropdown, options[index][1])
             elif key.startswith("browse:"):
-                if self.process is not None:
-                    self.notice = "Stop scope before changing source paths or settings."
-                    self.dirty = True
-                    return
                 self._browse(key.split(":", 1)[1])
             elif key.startswith("field:"):
-                if self.process is not None:
-                    self.notice = "Stop scope before changing its settings."
-                    self.dirty = True
-                    return
                 field = key.split(":", 1)[1]
                 self.selected = field
                 if self.dropdown:
@@ -1715,18 +1825,27 @@ class ScopeLauncher:
                     self._edit_start(field)
             elif key == "setup":
                 self.page = "setup"
+            elif key.startswith("tab:"):
+                self.settings_tab = key.split(":", 1)[1]
+                self.page = "setup"
+                self.dropdown = None
+                self.scroll = 0
+                self._ensure_selection()
+            elif key == "advanced":
+                self.show_advanced = not self.show_advanced
+                self.scroll = 0
+                self._ensure_selection()
             elif key == "live":
                 self.page = "live"
             elif key == "start":
                 self._stop() if self.process else self._start()
+            elif key == "apply":
+                self._apply_settings()
             elif key == "fullscreen":
                 self._toggle_fullscreen()
             elif key == "defaults":
-                if self.process is not None:
-                    self.notice = "Stop scope before resetting settings."
-                    self.dirty = True
-                    return
                 self.settings = dict(DEFAULT_SETTINGS)
+                self._ensure_selection()
                 self._persist()
                 self.notice = "Settings reset to application defaults."
             elif key == "refresh":
@@ -1753,9 +1872,6 @@ class ScopeLauncher:
             return
 
     def _browse(self, key):
-        if self.process is not None:
-            self.notice = "Stop scope before changing source paths."
-            return
         try:
             path = _file_picker(self.settings.get(key, ""), directory=key in DIR_FIELDS)
         except (OSError, RuntimeError) as exc:
@@ -1763,8 +1879,9 @@ class ScopeLauncher:
             return
         if path:
             if key == "video_file" and str(self.settings.get(key, "")) != path:
-                self.playback = None
-                self.seek_preview = None
+                if self.process is None:
+                    self.playback = None
+                    self.seek_preview = None
             self.settings[key] = path
             self.selected = key
             if key == "video_file":
@@ -1777,6 +1894,12 @@ class ScopeLauncher:
         self.dirty = True
 
     def _on_scroll(self, _window, _x, y):
+        if self.dropdown:
+            count = len(self._choices(self.dropdown))
+            self.dropdown_scroll = max(0, min(max(0, count - 1),
+                                             self.dropdown_scroll - round(y)))
+            self.dirty = True
+            return
         if self.page == "setup":
             items = self._items()
             limit = self._visible_item_limit()
@@ -1787,7 +1910,7 @@ class ScopeLauncher:
             self.dirty = True
 
     def _on_drop(self, _window, paths):
-        if not paths or self.process is not None:
+        if not paths:
             return
         path = Path(paths[0]).expanduser()
         if path.is_dir():
@@ -1800,8 +1923,9 @@ class ScopeLauncher:
             self.notice = f"Selected image folder: {path.name}"
         else:
             if str(self.settings.get("video_file", "")) != str(path):
-                self.playback = None
-                self.seek_preview = None
+                if self.process is None:
+                    self.playback = None
+                    self.seek_preview = None
             self.settings["run_mode"] = "live"
             self.settings["live_source"] = "video"
             self.settings["video_file"] = str(path)
@@ -1843,10 +1967,6 @@ class ScopeLauncher:
                     pass
             self.dirty = True
             return
-        if self.process is not None and key not in (
-                self.glfw.KEY_ESCAPE, self.glfw.KEY_SPACE, self.glfw.KEY_TAB,
-                self.glfw.KEY_F11):
-            return
         if key == self.glfw.KEY_ESCAPE:
             if self.dropdown:
                 self.dropdown = None
@@ -1883,6 +2003,8 @@ class ScopeLauncher:
                     self.selected = fields[index]
                     self._scroll_selection()
         elif key in (self.glfw.KEY_LEFT, self.glfw.KEY_RIGHT):
+            if self.selected == "render_mode" and self.settings.get("run_mode") == "live":
+                return
             if self.selected in BOOL_FIELDS:
                 self._toggle(self.selected)
             elif self._is_dropdown_field(self.selected):
@@ -1899,6 +2021,8 @@ class ScopeLauncher:
                 else:
                     self._open_dropdown(self.selected)
         elif key in (self.glfw.KEY_ENTER, self.glfw.KEY_KP_ENTER):
+            if self.selected == "render_mode" and self.settings.get("run_mode") == "live":
+                return
             if self.selected in BOOL_FIELDS:
                 self._toggle(self.selected)
             elif self._is_dropdown_field(self.selected):
