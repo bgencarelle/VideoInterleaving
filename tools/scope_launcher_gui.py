@@ -67,6 +67,7 @@ def _enumerate_camera_sources():
 
 
 SELECT_CHOICES = {
+    "live_render_mode": IMAGE_RENDER_CHOICES,
     "run_mode": RUN_CHOICES,
     "app_source": APP_SOURCE_CHOICES,
     "render_mode": RENDER_CHOICES,
@@ -144,6 +145,7 @@ def _settings_defaults():
         "scope_gui_image_only": bool(value("SCOPE_GUI_IMAGE_ONLY", False)),
         "scope_gui_fullscreen": bool(value("SCOPE_GUI_FULLSCREEN", False)),
         "live_source": "video",
+        "live_render_mode": "raster",
         "video_file": "",
         "ffmpeg_input": "",
         "display": "",
@@ -176,7 +178,7 @@ FIELD_GROUPS = (
     ("Source and drawing mode", ("run_mode", "app_source", "render_mode",
                                  "live_source", "scope_gui", "device")),
     ("Image source", ("image_dir", "xy_dir", "live_size")),
-    ("Live source", ("video_file", "ffmpeg_input", "display", "region")),
+    ("Live source", ("live_render_mode", "video_file", "ffmpeg_input", "display", "region")),
     ("Output and trigger", ("channels", "x_only", "trigger",
                               "trigger_shape", "trigger_us", "lowpass", "physical_dwell",
                              "rotation", "mirror")),
@@ -202,6 +204,7 @@ FIELD_GROUPS = (
 )
 
 FIELD_LABELS = {
+    "live_render_mode": "Live drawing mode",
     "run_mode": "Source type", "device": "Audio output device",
     "channels": "PortAudio channels · X,Y", "x_only": "X-only mono · Y-T",
     "trigger": "X trigger marker", "trigger_shape": "Trigger shape",
@@ -393,6 +396,15 @@ def validate_settings(settings, outputs=(), root=ROOT):
                 "min_channels": min_channels, "device": device}
 
     source = settings.get("live_source", "test")
+    live_mode = settings.get("live_render_mode", "raster")
+    if live_mode not in dict(IMAGE_RENDER_CHOICES).values():
+        raise ValueError("Live capture supports raster, stochastic, or stipple")
+    if live_mode != "raster" and (
+            settings.get("stream") or _number(settings, "live_fields", integer=True) != 1
+            or str(settings.get("geometry_samples", "")).strip()
+            or str(settings.get("traversal_hz", "")).strip()):
+        raise ValueError("Live stochastic/stipple require whole traces, one field, "
+                         "and no raster geometry/traversal override")
     if source not in dict(LIVE_SOURCE_CHOICES).values():
         raise ValueError("Choose a supported live source")
     if settings.get("trigger_shape", "ramp") not in dict(TRIGGER_SHAPES).values():
@@ -466,6 +478,8 @@ def build_command(settings, outputs=(), *, python=sys.executable, root=ROOT,
     if settings.get("run_mode", "app") == "app":
         command.extend((str(Path(root) / "main.py"), "--mode", "scope"))
         for key, flag in (("image_dir", "--dir"), ("xy_dir", "--xy-dir")):
+            if key == "xy_dir" and settings.get("app_source", "bake") != "bake":
+                continue
             value = str(settings.get(key, "")).strip()
             if value:
                 command.extend((flag, str(Path(value).expanduser())))
@@ -591,6 +605,7 @@ def build_command(settings, outputs=(), *, python=sys.executable, root=ROOT,
         spec = str(settings.get("ffmpeg_input", "")).strip()
         if spec:
             command.extend(("--ffmpeg-input", spec))
+    command.extend(("--render-mode", settings.get("live_render_mode", "raster")))
     if str(settings.get("display", "")).strip():
         command.extend(("--display", str(settings["display"]).strip()))
     if str(settings.get("region", "")).strip():
@@ -706,6 +721,7 @@ class ScopeLauncher:
         self.device_error = device_error
         self._device_cache = {}
         self._camera_cache = None
+        self._camera_pending = False
         self.preference_path = Path(preference_path or preferences_path())
         self.settings = dict(DEFAULT_SETTINGS)
         self.resume = {}
@@ -935,17 +951,26 @@ class ScopeLauncher:
         return tuple(choices), devices
 
     def _camera_choices(self, refresh=False):
-        if refresh or self._camera_cache is None:
-            try:
-                choices = tuple(_enumerate_camera_sources())
-                error = "" if choices else "No camera devices were found."
-            except Exception as exc:
-                choices, error = (), str(exc)
-            self._camera_cache = (choices, error)
-        return self._camera_cache
+        if (refresh or self._camera_cache is None) and not self._camera_pending:
+            self._camera_pending = True
+            self.notice = "Looking for cameras… You can keep using the launcher."
+            self.dirty = True
+            threading.Thread(target=self._discover_cameras, daemon=True,
+                             name="scope-camera-discovery").start()
+        return self._camera_cache or ((), "Looking for cameras…")
+
+    def _discover_cameras(self):
+        try:
+            choices = tuple(_enumerate_camera_sources())
+            error = "" if choices else "No camera devices were found."
+        except Exception as exc:
+            choices, error = (), str(exc)
+        self.events.put(("cameras", (choices, error)))
 
     def _camera_notice(self):
         _choices, error = self._camera_choices()
+        if self._camera_pending:
+            return "Looking for cameras… You can keep using the launcher."
         if "No camera devices" in error:
             return ("No camera devices found. Check connection and permissions, "
                     "or use Screen / FFmpeg input.")
@@ -1001,6 +1026,8 @@ class ScopeLauncher:
                     continue
             visible = []
             for key in keys:
+                if key == "render_mode" and run_mode != "app":
+                    continue
                 if key == "app_source" and run_mode != "app":
                     continue
                 if key == "live_source" and run_mode != "live":
@@ -1035,7 +1062,7 @@ class ScopeLauncher:
                 visible.append(key)
             if visible:
                 groups.append((title, visible))
-        source = {"run_mode", "app_source", "live_source", "render_mode",
+        source = {"run_mode", "app_source", "live_source", "render_mode", "live_render_mode",
                   "image_dir", "xy_dir", "video_file", "ffmpeg_input",
                   "display", "region", "scope_gui"}
         output = {"device", "channels", "x_only", "trigger", "trigger_shape",
@@ -1381,7 +1408,13 @@ class ScopeLauncher:
                 kind, value = self.events.get_nowait()
             except queue.Empty:
                 break
-            if kind == "line":
+            if kind == "cameras":
+                self._camera_cache = value
+                self._camera_pending = False
+                if self.settings.get("live_source") == "camera":
+                    self.notice = (self._camera_notice() if value[1] else
+                                   f"Found {len(value[0])} camera(s). Choose a camera device.")
+            elif kind == "line":
                 try:
                     record = json.loads(value)
                 except (TypeError, ValueError):
@@ -1853,7 +1886,7 @@ class ScopeLauncher:
                 cameras, camera_error = self._camera_choices(refresh=True)
                 if (self.settings.get("run_mode") == "live" and
                         self.settings.get("live_source") == "camera"):
-                    self.notice = (self._camera_notice() if camera_error else
+                    self.notice = (self._camera_notice() if camera_error or self._camera_pending else
                                    f"Refreshed {len(cameras)} camera device(s).")
                 else:
                     self.notice = "Audio and video device lists refreshed."

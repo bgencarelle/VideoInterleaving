@@ -1,4 +1,6 @@
 import copy
+import queue
+import threading
 from pathlib import Path
 import tempfile
 import time
@@ -50,6 +52,21 @@ class ScopeLauncherCommandTests(unittest.TestCase):
         live = build_command(self.settings, root=self.root, python="python")
         self.assertEqual(live[live.index("--geometry-samples") + 1], "2400")
         self.assertEqual(live[live.index("--traversal-hz") + 1], "60")
+
+    def test_runtime_images_ignore_saved_baked_folder(self):
+        self.settings.update({"run_mode": "app", "app_source": "images",
+                              "render_mode": "raster",
+                              "xy_dir": str(self.root / "missing_xy")})
+        command = build_command(self.settings, root=self.root, python="python")
+        self.assertNotIn("--xy-dir", command)
+        self.assertEqual(command[command.index("--scope-source") + 1], "images")
+        self.assertEqual(command[command.index("--dir") + 1], str(self.root))
+
+    def test_baked_source_keeps_selected_baked_folder(self):
+        self.settings.update({"run_mode": "app", "app_source": "bake",
+                              "render_mode": "raster", "xy_dir": str(self.root)})
+        command = build_command(self.settings, root=self.root, python="python")
+        self.assertEqual(command[command.index("--xy-dir") + 1], str(self.root))
 
     def test_trajectory_controls_reject_unsupported_combinations(self):
         self.settings.update({"run_mode": "app", "app_source": "bake",
@@ -136,6 +153,18 @@ class ScopeLauncherCommandTests(unittest.TestCase):
         self.assertEqual(command[command.index("--ffmpeg-input") + 1],
                          "v4l2:/dev/video0")
 
+    def test_camera_commands_forward_all_supported_drawing_modes(self):
+        self.settings.update(run_mode="live", live_source="camera",
+                             ffmpeg_input="v4l2:/dev/video0")
+        for mode in ("raster", "stochastic", "stipple"):
+            with self.subTest(mode=mode):
+                self.settings["live_render_mode"] = mode
+                command = build_command(self.settings, root=self.root)
+                self.assertEqual(command[command.index("--render-mode") + 1], mode)
+        self.settings.update(live_render_mode="stipple", stream=True)
+        with self.assertRaisesRegex(ValueError, "whole traces"):
+            build_command(self.settings, root=self.root)
+
     def test_whole_trace_mix_cannot_be_combined_with_explicit_samples(self):
         self.settings.update({"run_mode": "app", "app_source": "bake",
                               "render_mode": "vector", "mix": "120",
@@ -187,6 +216,8 @@ class CameraDevicePickerTests(unittest.TestCase):
         gui = ScopeLauncher.__new__(ScopeLauncher)
         gui.settings = {"live_source": "camera", "ffmpeg_input": ""}
         gui._camera_cache = None
+        gui._camera_pending = False
+        gui.events = queue.Queue()
         gui.dropdown = None
         gui.notice = ""
         gui.dirty = False
@@ -197,7 +228,15 @@ class CameraDevicePickerTests(unittest.TestCase):
         devices = (("USB camera · /dev/video0", "v4l2:/dev/video0"),)
 
         with patch("tools.scope_launcher_gui._enumerate_camera_sources",
-                   return_value=devices) as enumerate_devices:
+                   return_value=devices) as enumerate_devices, \
+                patch("tools.scope_launcher_gui.threading.Thread") as worker:
+            gui._open_dropdown("ffmpeg_input")
+            self.assertIsNone(gui.dropdown)
+            self.assertTrue(gui._camera_pending)
+            enumerate_devices.assert_not_called()
+            worker.assert_called_once()
+            gui._discover_cameras()
+            gui._drain_events()
             gui._open_dropdown("ffmpeg_input")
             self.assertEqual(gui.dropdown, "ffmpeg_input")
             self.assertEqual(gui._choices("ffmpeg_input"), devices)
@@ -210,12 +249,41 @@ class CameraDevicePickerTests(unittest.TestCase):
         gui = self.launcher()
 
         with patch("tools.scope_launcher_gui._enumerate_camera_sources",
-                   return_value=()):
+                   return_value=()), \
+                patch("tools.scope_launcher_gui.threading.Thread"):
             gui._open_dropdown("ffmpeg_input")
+            gui._discover_cameras()
+            gui._drain_events()
 
         self.assertIsNone(gui.dropdown)
         self.assertIn("No camera devices found", gui.notice)
         self.assertIn("Screen / FFmpeg input", gui.notice)
+
+    def test_slow_discovery_does_not_block_or_launch_duplicate_workers(self):
+        gui = self.launcher()
+        entered, release = threading.Event(), threading.Event()
+
+        def discover():
+            entered.set()
+            release.wait(2)
+            return (("Camera", "v4l2:/dev/video0"),)
+
+        with patch("tools.scope_launcher_gui._enumerate_camera_sources",
+                   side_effect=discover) as probe:
+            try:
+                gui._open_dropdown("ffmpeg_input")
+                self.assertTrue(entered.wait(1))
+                self.assertTrue(gui._camera_pending)
+                gui._camera_choices(refresh=True)
+                self.assertEqual(probe.call_count, 1)
+                self.assertIn("Looking for cameras", gui.notice)
+            finally:
+                release.set()
+            event = gui.events.get(timeout=2)
+            gui.events.put(event)
+            gui._drain_events()
+        self.assertFalse(gui._camera_pending)
+        self.assertEqual(gui._choices("ffmpeg_input")[0][1], "v4l2:/dev/video0")
 
     def test_manual_ffmpeg_input_remains_a_text_field(self):
         gui = self.launcher()
@@ -345,10 +413,12 @@ class RunningSettingsTests(unittest.TestCase):
         self.assertEqual(gui.resume[old_key]["position"], 12.5)
         self.assertEqual(gui._current_resume(), 0.0)
 
-    def test_live_source_explains_its_fixed_renderer(self):
+    def test_live_source_offers_captured_image_renderers(self):
         gui = self.gui
-        self.assertIn("render_mode", gui._visible_fields())
-        self.assertIn("Raster only", gui._display_value("render_mode"))
+        self.assertIn("live_render_mode", gui._visible_fields())
+        self.assertNotIn("render_mode", gui._visible_fields())
+        self.assertEqual([value for _label, value in gui._choices("live_render_mode")],
+                         ["raster", "stochastic", "stipple"])
         gui._assign("run_mode", "app")
         gui._assign("app_source", "images")
         self.assertEqual([value for _label, value in gui._choices("render_mode")],

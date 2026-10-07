@@ -5668,3 +5668,94 @@ with native interaction evidence. Browser source checks are complete, but deskto
 browser visual/interaction acceptance requires a connected bridge. No universal
 usability, physical-quality or new performance claim is made. S7/S8 remain closed;
 this pass does not restart transport validation.
+
+---
+
+## Appendix A068 — Runtime-image launcher bake error — 2026-10-07
+
+**Issue:** the user reported that normal images failed with a request to bake
+them. The launcher emitted the saved `--xy-dir` even for `--scope-source images`.
+`main.py` validates an explicit XY directory before selecting the runtime-image
+path, so a stale/missing bake folder caused a spurious bake-required error.
+
+**Fix:** the launcher emits `--xy-dir` only for the baked source. Runtime images
+retain `--dir` and `--scope-source images`, independent of saved bake-folder
+preferences. Baked-source behavior and output defaults are preserved.
+
+**Verification:** regression tests cover runtime images with a nonexistent saved
+XY folder and retention of the selected folder for baked sources. The selected
+launcher/live-source/native-GUI/presentation suites passed: 74 tests. No physical
+audio output or new transport/performance sweep was run.
+
+**Handoff:** choose Runtime images under Source and select the image folder;
+Start or Apply & restart uses runtime decoding without requiring an XY bake.
+S7/S8 closeout remains unchanged.
+
+---
+
+## Appendix A069 — Camera discovery and startup stalls — 2026-10-07
+
+**Issue:** the user reported a stall after picking Camera. Inspection found
+synchronous device discovery on the launcher GUI thread and an unbounded first
+FFmpeg frame read during live capture initialization. FFmpeg stderr was discarded,
+and early EOF returned an initial empty image rather than a startup error.
+
+**Fix:** discovery runs in a daemon worker and publishes results through the
+launcher event queue. The GUI displays discovery progress and remains usable;
+repeated requests do not launch duplicate pending probes. Camera startup has a
+15-second first-frame watchdog that kills a stuck FFmpeg process and reports a
+permissions/device/frame-rate diagnostic. Early EOF reports failure. FFmpeg stderr
+is inherited into the launcher's existing subprocess log stream.
+
+**Verification:** 79 selected scope launcher/capture-startup/live-source/native
+live-control/scheduler tests passed. Regression coverage includes delayed camera
+discovery, duplicate-probe suppression, successful/empty device lists, early
+capture EOF, stderr visibility and watchdog termination/unblocking. Capture tests
+use mocked processes; no physical camera or audio device was opened. This fixes
+the identified blocking/error-hiding paths but does not establish compatibility
+with the user's particular camera or driver.
+
+**Handoff:** reopen the launcher to load these changes. If capture fails, inspect
+Playback logs for the FFmpeg driver error; the launcher should remain responsive
+during discovery and report a first-frame timeout rather than waiting indefinitely.
+S7/S8 closeout remains unchanged.
+
+---
+
+## Appendix A070 — Live camera drawing-mode selection — 2026-10-07
+
+**Request:** the user reported being able to select only raster for Camera.
+This was a pipeline restriction, not merely a missing GUI button: standalone
+capture had only a TraceEmitter raster path and advertised a locked raster mode.
+
+**Implemented:** captured screen/camera/video/test frames can now use raster,
+stochastic or stipple through the existing compiled emitters. The launcher has a
+separate Live drawing mode selection and forwards `--render-mode` to the live
+pipeline. Native Drawing mode buttons switch the active emitter under the render
+lock without restarting capture. Changing mode resets the field latch and chains
+the selected emitter from the last accepted output endpoint. Rejected candidate
+traces restore stochastic/stipple trajectory and random state. Tone controls
+update all prepared emitters, and source identities include the selected mode.
+Stochastic buffers are not reported as complete pictures.
+
+Modes that can be selected through the native GUI are constructed/warmed before
+output starts. Headless default raster does not construct unused image emitters.
+Streaming, interlaced fields and explicit raster geometry/traversal overrides
+remain raster-only and reject incompatible startup modes. Vector and fusion are
+not advertised for raw capture. Adaptive raster level mapping remains a raster
+feature; stochastic/stipple use their existing luminance gamma/trim preparation.
+
+**Verification:** 360 scope-only tests and 39 subtests passed, covering live
+launcher mode arguments, supported configuration restrictions, deterministic
+rejection/retry parity, source identity and the existing numerical/trajectory
+regressions. Under Xvfb/software GL, real native mode-button clicks switched
+stochastic -> stipple -> raster while the same capture/output loop continued;
+each transition was followed by accepted output traces. That run used simulated
+camera frames and `--device null`, not a physical camera or DAC. Harness and
+results: `tmp/scope_camera_mode_check.py`, `tmp/scope-camera-mode-check.json`.
+No new performance or physical-camera compatibility claim is made.
+
+**Handoff:** Camera -> Live drawing mode selects startup rendering; native
+Drawing buttons switch it during playback for whole-trace, one-field output
+without raster trajectory overrides. A068–A070 changes are local follow-ups;
+S7/S8 transport closeout remains unchanged.
