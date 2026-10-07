@@ -5029,3 +5029,298 @@ whitespace checks. The full modem suite passed **948 tests** after the fixture
 corrections above; the reverse nested live-receiver test also passed in that
 run. The pre-pull backup and named stash retain the original dirty
 worktree for recovery; generated source-list manifests remain local artifacts.
+
+---
+
+## Appendix A058 — S7 software mode matrix and final matched D0/P0 — 2026-10-07
+
+**Status:** supported software mode/settings startup checks and a post-integration
+matched D0/P0 moving-video comparison are complete. S7 remains active; this
+appendix does not claim PortAudio/device, physical-scope, analog/tape, or
+interactive-browser validation. No defaults or tracked runtime settings changed.
+
+### 48/96-kHz supported-mode and settings matrix
+
+Ran **30/30** short application-mode cases: the same 15 configurations at virtual
+48 kHz and 96 kHz, each held for four seconds and shut down with Ctrl+C. The two
+source fixtures were `tmp/scope-s5-smoke-images` (one face and one float PNG,
+SHA256s `1765bbea07fd148e6bc8b9702dd03e70de8aca985ea3c53f3217378dfe2585b5` and
+`5f05b16be0068d9440c9f8977f5861891daf677da15750cc1584e2213910cc4b`) and a
+temporary full tiny-profile XY bake at
+`tmp/scope-s7-software-audit/full-smoke-xy`. The bake was made without
+`--thumbs-only`, since vector and vector-fusion modes require contour geometry.
+
+At both rates, clean startup and resolved settings were confirmed for:
+
+- Baked vector, raster, stochastic, stipple, and all four fusion component sets
+  (`vrs`, `vr`, `sv`, `sr`).
+- Runtime-image raster, stochastic, and stipple.
+- Raster interlace at two fields: 60 traces/s with 30 pictures/s.
+- Raster with a 2,400-sample picture budget, 2x oversampling, 3-kHz low-pass,
+  30-Hz AC compensation, 90-degree rotation, and mirror.
+- Raster realtime ring path (resolved as six 256-sample blocks).
+- X-only vector with a 2,400-sample picture budget and the step trigger.
+
+The matrix used the shipped ramp trigger default; interlace and X-only cases
+explicitly selected the step shape. The 48-kHz runs used a
+temporary `sitecustomize` hook that injects `Scope.samplerate=48000` into each
+child process; no project settings were changed. All cases used `--device null`
+and NullStream, so the logs prove configuration resolution and runtime entry,
+not sustained cadence, output quality, or hardware behavior. The moving-video
+baseline comparison below and the A055/A056 sweep and soak carry the sustained
+null-output evidence.
+
+### Final matched D0/P0 moving-video comparison
+
+This post-integration rerun compares the saved unchanged D0 worktree with
+integrated HEAD `b1479220744968f2c85ddc04f92ec2f3a9ce0224`. The standalone live
+video P0 was matched across both variants: fixture
+`modem_tests/fixtures/v7_pixel_motion_16x9.mp4` (SHA256
+`7542e4b0287b3f9485f1d4ad7c1d7ccbe330e9272c8bce7f7c61a7f0c6f37864`), three
+runs per variant, 10-second warmup, 60-second measurement, 30-Hz capture and
+trace targets, 96-kHz/3,200-sample traces, 512-frame blocks, channels 24/25,
+trigger off, null output, and pause/seek-to-7.25-s/resume at 8/11/14 seconds.
+All six processes exited successfully and acknowledged all three controls.
+
+| Metric (median over three runs) | D0 | Integrated | Meaning |
+|---|---:|---:|---|
+| Output trace rate | 30.00 Hz | 30.00 Hz | Completed output traces; not fresh-picture cadence |
+| Output trace interval p99 | 37.377 ms | 37.383 ms | NullStream software timing |
+| Fresh source transitions during active playback | 28.25 Hz | 29.62 Hz | Distinct adopted moving-video frames, excluding paused intervals |
+| Fresh-adoption gap p95 | 63.98 ms | 37.35 ms | Gap between distinct source-frame adoptions |
+| Media-lag p50 / p95 | 67.0 / 70.3 ms | 69.0 / 99.7 ms | D0 reconstructed from playback/adoption; integrated application-reported |
+| Selection-to-adoption p95 | 31.42 ms | 29.69 ms | Active source-selection handoff latency |
+| Capture-to-submission age p95 | 35.06 ms | 65.22 ms | Video source freshness at producer submission |
+| Callback duration p99 / median of per-run maxima | 0.055 / 0.463 ms | 0.070 / 0.200 ms | Instrumented software callback, not PortAudio |
+| Process CPU | 18.08% | 17.47% | One-core fraction during the measured window |
+| Main-process VmRSS p95 | 179.4 MiB | 358.3 MiB | Median of per-run p95 samples at status updates (~3 Hz) |
+
+The integrated run delivered a higher active fresh-frame transition rate and a
+shorter p95 selection-to-adoption interval, while its p95 media lag was about
+29.5 ms higher and its sampled main-process RSS about 178.9 MiB (99.7%) higher.
+The callback p99 remained below 0.1 ms in both variants, but software callback
+timing cannot establish DAC deadlines. Both variants produced 30 traces/s;
+that count must not be read as 30 fresh pictures/s. The ready-to-adoption p95
+(1.53 s D0, 1.59 s integrated) spans pause/control intervals and is not an
+active-playback latency estimate. These are software-path results only.
+
+### Artifacts and handoff
+
+- `tmp/scope-s7-software-audit/S7_SOFTWARE_MODE_MATRIX.json`, SHA256
+  `b61409a79af91a55499c83c24809fc57f88e84700b808701539c2dc3e0c507ea`;
+  per-case logs and the temporary bake are beside it. Harness:
+  `tmp/scope_s7_software_matrix.py`.
+- `tmp/scope-s7-final-matched/S7_FINAL_MATCHED.json`, SHA256
+  `8853de824961692d5eff9a28e553bf6010a736d4f8f2e1e2098c67df189c9c24`;
+  raw run JSONs, summaries, logs, and callback/adoption audit traces are in the
+  same directory. Harness: `tmp/scope_s7_final_matched.py`.
+- The D0 source is `/tmp/opencode/scope-d0-runtime` at
+  `7ff4902ce424c272a612f0b50ea940811e2ecc25`; the integrated source hashes for
+  scope runtime files are embedded in the final comparison report.
+
+**Handoff:** Last completed work is S7 software mode/settings and matched P0
+validation. S7 remains active pending an explicitly verified PortAudio/loopback
+route, device changes, real camera/screen capture, interactive-browser runtime,
+and physical-scope quality/sync checks. Keep defaults frozen; the 96-kHz,
+512-frame, depth-2 configuration remains a null-output soak candidate only.
+
+---
+
+## Appendix A059 — S7 verified Pulse null-sink loopback — 2026-10-07
+
+The advertised PortAudio `pulse` output was routed through a verified safe
+software loopback. Immediately before the sustained runs, `pactl info` showed
+default sink `loop` and default source `loop.monitor`; `pactl list short sinks`
+showed only `loop`, implemented by `module-null-sink.c`, and the only listed
+source was its monitor. The sink is stereo at 44.1 kHz. No physical sink was
+listed or selected. PortAudio opened device `pulse` (stream device value `0`),
+and the runner captured nonzero output from `loop.monitor` using `parec`.
+
+The 60-second cases used the baked app-raster path, ramp trigger, 30-Hz target,
+10-second warmup, no PCM-copy instrumentation, and the same stereo Pulse null
+sink. The virtual sink accepts two output channels, so the loopback checks used
+PortAudio channels **1/2**, not the earlier 24/25 channel-pair request. The
+48-kHz stream used 512-frame blocks; the 96-kHz stream used 1,024-frame blocks
+to keep the nominal callback period matched at 10.667 ms. Scope's per-picture
+budgets were 1,600 and 3,200 samples respectively. The temporary runner sets
+the sample rate and optional block size by wrapping `Scope.__init__`; tracked
+defaults and project settings were not modified.
+
+The reports pin integrated HEAD `b1479220744968f2c85ddc04f92ec2f3a9ce0224`
+and scope runtime file hashes at both run boundaries. These are integrated-only
+screening trials, not a D0/P0 comparison. The trigger adds 12/24 samples to the
+1,600/3,200-sample picture budgets, making the nominal waveform-pass rate
+29.7767 Hz rather than exactly 30 Hz. Both streams reported 21.333-ms output
+latency; this is a PortAudio estimate, not measured output-to-monitor delay.
+CPU and callback timing include the runtime observer, with the separate
+`parec` process excluded from reported process CPU. Disabling PCM copies did
+not disable callback instrumentation or monitor statistics collection.
+
+| Measure | 48 kHz / 512 frames | 96 kHz / 1,024 frames |
+|---|---:|---:|
+| Measured callback interval | 60.0066 s | 60.0037 s |
+| PortAudio output underflow statuses | 1 | 1 |
+| Scope dropout-counter increments | 1 | 1 |
+| Source/ring underruns | Not applicable (frame mode, no source ring) | Not applicable (frame mode, no source ring) |
+| Callback gaps over 50 ms | 0 | 0 |
+| Callback-start interval p50 / p99 | 10.062 / 20.185 ms | 10.053 / 20.171 ms |
+| Callback execution p50 / p99 / max | 0.064 / 0.180 / 41.669 ms | 0.069 / 0.212 / 1.537 ms |
+| DAC interval p50 / p99 | 10.666 / 10.684 ms | 10.666 / 10.675 ms |
+| DAC-timestamp sample-rate estimate | 47,997.98 Hz | 96,007.01 Hz |
+| DAC/monotonic clock-fit residual p95 / p99 | 0.051 / 0.127 ms | 0.057 / 0.149 ms |
+| Sample-count-derived completed traces | 29.7768 Hz | 29.7749 Hz |
+| Process CPU during measurement | 9.40% of one core | 10.03% of one core |
+| Process RSS / fresh-source-picture cadence | Not sampled / not measured | Not sampled / not measured |
+| `loop.monitor` captured PCM | 2,647,197 samples, 44.1 kHz | 2,646,930 samples, 44.1 kHz |
+| Monitor RMS L/R | 0.6366 / 0.6395 | 0.6365 / 0.6393 |
+
+Each long run therefore had one reported PortAudio underflow and matching Scope
+dropout-counter event, despite no callback gap over 50 ms. The Scope counter
+increments from the same PortAudio underflow flag; it is not independent
+evidence of signal damage. These frame-mode cases did not exercise a source
+ring. The 48-kHz run also had one callback execution over its 10.667-ms block
+period (41.669-ms maximum); the 96-kHz/1,024-frame run had none. These data do
+not support a zero-underflow claim for either sustained configuration. A
+separate 10-second 96-kHz/512-frame no-copy screening run reported 556 PortAudio
+underflows and 556 Scope dropout-counter increments, so that smaller block was
+not carried into the 60-second comparison. The nonzero monitor signal confirms
+PCM reached the null-sink monitor; its 44.1-kHz software capture is not a
+physical DAC measurement or a physical presentation/synchronization test.
+
+The complete-trace counters measure output waveform passes, not distinct fresh
+source pictures. The two long-run reports have no source-frame identity
+accounting, and the monitor level/capture does not establish visible image
+quality. The clock-fit residual is PortAudio-to-monotonic clock mapping error,
+not output-to-monitor latency; no absolute loopback delay/synchronization value
+or process RSS was collected in these no-copy trials. The result is real
+PortAudio stream/callback behavior against this PulseAudio software sink only.
+It does not validate a hardware DAC, the 24/25-channel output path, external
+loopback latency, or a physical scope.
+
+Artifacts and SHA256:
+
+- Runner: `tmp/scope_s7_pa_route_case.py`,
+  `40fe60be8acdbaed9d16721590549e696b4d8fca5dfe5980c9f6a0b147ccb2ae`.
+- 48-kHz/512-frame report:
+  `tmp/scope-s7-software-audit/PA_LOOPBACK_48000_NOCOPY.json`,
+  `5b15a245c0e22c996c13932a2e92cfe6b8002873259c2968ed1b4323d787f0cc`.
+- 96-kHz/1,024-frame report:
+  `tmp/scope-s7-software-audit/PA_LOOPBACK_96000_BS1024_NOCOPY.json`,
+  `5cca6c0016946a6f0251b6d98ae6fa0a18027ffb83732b95210c05f67a100632`.
+- 96-kHz/512-frame screening report:
+  `tmp/scope-s7-software-audit/PA_LOOPBACK_96000_NOCOPY.json`,
+  `b4f4c54d87712b007f0279ba24ba30ccdfbc160b41b6af554b7e04672d0da3af`.
+- Full stdout logs for the 60-second runs are in the same audit directory as
+  `PA_LOOPBACK_48000_60S.log` and `PA_LOOPBACK_96000_BS1024_60S.log`.
+
+**Handoff at A059:** The Pulse `module-null-sink` route is verified safe and
+has PortAudio loopback evidence. The matched moving-video comparison is
+recorded in A060 below.
+
+---
+
+## Appendix A060 — S7 matched D0/integrated PortAudio moving-video pair — 2026-10-07
+
+The bounded D0/integrated PortAudio comparison completed on the verified
+PulseAudio null-sink route. It was one sequential 60-second measured trial per
+build, with a 10-second warmup; the runs are screening evidence, not a
+multi-replicate significance claim. Run order was D0 followed by integrated.
+D0 was the saved unchanged tree at
+`7ff4902ce424c272a612f0b50ea940811e2ecc25`; integrated was
+`b1479220744968f2c85ddc04f92ec2f3a9ce0224`. The same local harness and case
+runner bytes were installed under the D0 tree's ignored `tmp/` for the run.
+Start/end scope-source hashes matched within each process.
+
+### Matched setup
+
+- Fixture: `modem_tests/fixtures/v7_pixel_motion_16x9.mp4`, SHA256
+  `7542e4b0287b3f9485f1d4ad7c1d7ccbe330e9272c8bce7f7c61a7f0c6f37864` in
+  both trees.
+- PortAudio `pulse` to PulseAudio `module-null-sink` `loop`, with monitor
+  `loop.monitor`; two output channels, X/Y channels 1/2. The sink/monitor ran
+  at 44.1 kHz; no physical sink was listed or selected.
+- Both runs explicitly set 96 kHz, 1,024-frame blocks, 30-Hz trace target,
+  3,200 picture samples / 3,224 trace samples including the 24-sample ramp
+  trigger, one field, 12-Hz capture, 160-pixel source downscale, and no
+  low-pass. The nominal trace rate is 29.7767 Hz because the trigger samples
+  are included in each waveform pass.
+- The source ran in whole-trace frame mode (not the buffered `--stream` path).
+  Video capture and output were observed by the common runtime harness;
+  `parec` sampled the monitor without saving/copying callback PCM. Main-process
+  RSS was sampled externally from `/proc/<pid>/status` about five times/s.
+  Process CPU includes callback instrumentation and excludes the separate
+  `parec` process. RSS samples span startup, warmup, and measurement, and
+  exclude `parec` and the parent sampler.
+  Callback timing also includes the observer wrappers; no uninstrumented
+  observer A/B was performed.
+
+A short setup smoke showed that the old observation shim did not forward the
+integrated renderer's `identity=` keyword and did not observe its newer
+`VideoFileSource.read_latest_due()` entry point. The shim was corrected to
+forward frame identity and instrument both video-read entry points. Both
+corrected smoke runs then showed frame adoption and zero underflows; only the
+corrected common harness was used for the 60-second pair below.
+
+### Results
+
+| Measure | D0 | Integrated |
+|---|---:|---:|
+| Completed output traces | 1,792 / 29.781 Hz | 1,789 / 29.774 Hz |
+| Fresh source-frame adoption rate | 11.982 Hz | 11.983 Hz |
+| Capture worker rate | 11.999 Hz | 11.996 Hz |
+| Source age at adoption p50 / p95 / p99 | 62.72 / 105.02 / 117.06 ms | 58.33 / 98.15 / 105.54 ms |
+| Video media advancement / wall time | 0.3994 | 1.0002 |
+| PortAudio underflow flags | 0 | 1 |
+| Callback gaps over 50 ms | 0 | 0 |
+| Callback-start interval p50 / p99 | 10.055 / 20.178 ms | 10.055 / 20.178 ms |
+| Callback execution p50 / p95 / p99 / max | 0.073 / 0.138 / 0.207 / 2.199 ms | 0.074 / 0.158 / 0.210 / 1.758 ms |
+| DAC interval p50 / p99 | 10.666 / 10.675 ms | 10.666 / 10.675 ms |
+| PortAudio-to-monotonic clock-fit residual p95 / p99 | 0.069 / 0.361 ms | 0.050 / 0.138 ms |
+| Process CPU | 14.88% of one core | 19.97% of one core |
+| Main-process RSS p50 / p95 / max | 191.25 / 206.61 / 212.75 MiB | 373.28 / 397.11 / 413.38 MiB |
+| `loop.monitor` RMS L/R | 0.5133 / 0.2840 | 0.5128 / 0.2862 |
+
+The source-frame adoption rate is effectively the same in this pair and is
+limited by the matched 12-Hz capture target, not the approximately 30-Hz output
+trace rate. Integrated source age p95 was 6.87 ms lower. Its file-media
+position advanced at approximately wall-clock rate, while D0 advanced at about
+0.40x; this is fixture media-clock behavior, not a measured physical display
+sync or output-to-monitor latency. PortAudio reported the same estimated
+21.333-ms stream latency in both cases, also not an end-to-end latency measure.
+
+The integrated trial had one PortAudio output-underflow flag (and the matching
+Scope counter increment); D0 had none. The counter mirrors that flag and is not
+independent evidence of damage. A single run per build cannot attribute the
+one-event difference to the code change. Trace rate and callback p99 were
+similar; integrated CPU was 5.08 percentage points higher and sampled RSS p95
+was 190.50 MiB higher. These costs warrant attention if repeated under the same
+conditions, but this bounded pair does not justify an open-ended tuning cycle
+or a default change. The monitor was nonzero in both runs. Clock-fit residuals,
+media-clock advancement, and monitor RMS do not establish physical presentation
+latency, visible image quality, hardware-DAC timing, or 24/25-channel behavior.
+
+### Artifacts and software handoff
+
+- `tmp/scope-s7-pa-matched/S7_PA_MATCHED_SUMMARY.json`, SHA256
+  `b55a5c8736d81cfefb33388d11f6086fd3354a886aa483b8485a4044d7fd8b82`.
+- D0 report `tmp/scope-s7-pa-matched/D0-96k-bs1024-60s.json`, SHA256
+  `6303f99379710a4579f7870b2a38ecaa96a2e243a364432cc1de565e0fb215c0`.
+- Integrated report `tmp/scope-s7-pa-matched/integrated-96k-bs1024-60s.json`,
+  SHA256 `fa358737215e8ea57a2c8638703867e579935156cee5a07d9a814b0e5c28969c`.
+- Reproduction tools: `tmp/scope_s7_pa_matched_run.py`, SHA256
+  `81765fbc4b9de7aca8ba4335db92707f22e9af03dab81d011b82943ddabd50ca`;
+  `tmp/scope_s7_pa_video_case.py`, SHA256
+  `8269c635327e21c916779a629ad9760c6e64ea24adbd6814be5dc2772929db2d`;
+  common observer `tmp/scope_s0_harness_v3.py`, SHA256
+  `acce98eaf5ba92525b7e59837214787ffce4f3fa784b3687229cbc0c631ebad9`.
+- Full logs: `D0-96k-bs1024-60s.log` and
+  `integrated-96k-bs1024-60s.log` in `tmp/scope-s7-pa-matched/`.
+
+**Handoff:** The bounded software closeout is complete for this workspace:
+supported-mode/null-output checks, matched D0/integrated moving-video results,
+and PortAudio operation through the safe software loopback are recorded.
+Defaults remain unchanged. S7's overall hardware-facing acceptance remains
+open; device-change with actual devices, real camera/screen capture,
+interactive-browser execution, and physical-scope quality/synchronization are
+separate follow-up work requiring their respective environments. No additional
+software-only performance sweep is needed to close this handoff.

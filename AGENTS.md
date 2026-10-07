@@ -42,6 +42,47 @@
   with `modem.json`. Use `utilities/convert_to_xy.py` and
   `utilities/convert_to_modem_dct.py` for the respective bakes.
 
+## Existing audio validation tooling
+
+- Verified in this workspace on 2026-10-07: `.venv/bin/python` imports
+  `sounddevice` 0.5.6 and loads PortAudio V19.6. The ALSA host API exposes
+  `pulse` (then index 0) and `default` (then index 1). PortAudio is available;
+  hardware scope/DAC access is a separate question. An underflow or stream
+  failure is not evidence that PortAudio is missing.
+- Reuse the existing route: PortAudio `pulse` -> PulseAudio null sink `loop`
+  -> `loop.monitor`. The verified default sink/source are `loop` and
+  `loop.monitor`; the sole sink is `module-null-sink`, stereo, 44.1 kHz.
+  Refresh these observations with `pactl info`, `pactl list short sinks`, and
+  `pactl list short sources` before output. Prefer the device name `pulse`
+  over a remembered numeric index. If routing differs, investigate the
+  existing route before proceeding.
+- Opening/reopening a test stream on this existing route is normal. Do not
+  create additional sinks/devices, load loopback modules, change defaults, or
+  reinstall audio tooling merely to run the next validation. Device-change
+  experiments need their own explicit task scope; routine tests reuse `loop`.
+- `pactl` inspects routing and `parec` captures `loop.monitor`; both are
+  installed. Reuse `parec` monitor capture rather than adding a concurrent
+  PortAudio input stream by default. The existing harness documents scheduling
+  problems observed with a second PortAudio stream.
+- Use channels 1/2 for this stereo monitor. PortAudio advertising 32 channels
+  does not establish a 24/25 monitor path. Explicit 48/96-kHz output streams
+  have run through this route, while monitor capture is 44.1 kHz. NullStream
+  (`--device null`), PortAudio-to-null-sink, and physical output are distinct
+  validation paths; label evidence accordingly.
+- Existing local harnesses: `tmp/scope_s0_harness_v3.py` (callback observation
+  and `parec` capture), `tmp/scope_s7_pa_route_case.py` (rate/block screening),
+  `tmp/scope_s7_pa_video_case.py` with `tmp/scope_s7_pa_matched_run.py`
+  (D0/integrated video through the PortAudio null-sink route),
+  `tmp/scope_s7_final_matched.py` (NullStream D0/integrated moving-video
+  comparison), and `tmp/scope_s7_software_matrix.py` (mode/settings checks).
+  Inspect and reuse them when present; they are gitignored local artifacts, not
+  guaranteed in a fresh checkout. Results and limitations are in
+  `docs/SCOPE_UPGRADE.md`, especially Appendices A059/A060. The rate-case runner
+  reuses output filenames, so preserve prior evidence or assign unique filenames
+  before repeat runs.
+- `xvfb-run`, `ffmpeg`, and `ffprobe` are also installed. Check tooling with
+  imports, enumeration, and `command -v` before declaring it unavailable.
+
 ## Modem invariants
 
 - V7 timing acquisition is edge/pulse-counted through
