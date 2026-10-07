@@ -22,7 +22,9 @@ of this is tape validation.
 | 7 | Mono and slices wires carry less chroma than `aspect-fold-500` | Open, by design of the base wires |
 | 8 | Cold start when the signature is unreadable | Open, minor |
 | 9 | GUI kernel defaults ignored for nested profiles | **Fixed** |
-| 10 | Body sent 1.5 dB lower since `b147922` (all profiles) | Open, a level-budget decision |
+| 10 | Body sent 1.5 dB lower since `b147922` (all profiles) | By design: the auto-leveller keeps header and end marker loudest |
+| 12 | Through the real display the folds do not beat stock | **Open, the main finding** |
+| 13 | False colour in every mode | Diagnosed: too little chroma is sent |
 | 11 | Sender GUI could start the sender on the wrong output device | **Fixed** |
 
 ## 1. Reverse resolution (fixed)
@@ -291,7 +293,61 @@ chelsea, coffee, rocket and the reference face):
 the GUI and the CLI. Kernel parameters were left at their defaults; none
 was tuned for the folds.
 
-## 10. Body level since `b147922` (open)
+## 12. Through the real display the folds do not beat stock (open, the main finding)
+
+Everything above was judged on the decoded 96x80 grid or on coefficient
+error. The receiver does not show that grid: `tools/v7_gl_viewer.py` puts it
+through 4x DCT reconstruction, edge reconstruction at 75% and luma-guided
+colour. Edge reconstruction already does what "decoding inside the bounds"
+does for unsent coefficients (it keeps every received coefficient exactly
+and fills the rest by total variation), and it treats every non-zero
+coefficient as received. So it rebuilds detail from stock's clean
+coefficients, and it keeps the folds' stair-noisy ones exactly.
+
+`tools/v7_nested_display_eval.py` scores through that path (SSIMULACRA2,
+higher is better; astronaut, chelsea, coffee and the reference face, none of
+them used to build tables; 3:4 layout):
+
+| Mode, tables | Clean | Hiss -45 | Hiss -35 |
+|---|---|---|---|
+| aspect-mono-500 (stock) | -38.8 | -47.5 | -54.9 |
+| mono nested, shipped tables | -38.2 | -53.1 | -60.4 |
+| mono nested, shipped, smoothing off | -39.1 | -51.8 | -59.9 |
+| mono nested, rebuilt on photo samples | -39.0 | -52.3 | -60.2 |
+| stereo-slices (stock) | -19.9 | -26.2 | -42.7 |
+| stereo nested, shipped tables | -26.3 | -38.3 | -53.4 |
+| stereo nested, rebuilt on photo samples | -21.3 | -36.8 | -50.3 |
+| stereo nested, rebuilt, 900 of 1,020 slots plain | -20.7 | -29.7 | -46.2 |
+
+- Mono nested equals stock when clean and is 5 to 6 points worse under hiss.
+- Stereo nested is worse than stock in every condition.
+- A sweep of the step size (kappa 6 to 28) and of the number of plain slots
+  went one way only: coarser steps and fewer folded slots score better, that
+  is, the nearer a table is to stock the better it looks. Finer steps score
+  worse, because the guest gets less room. The table rebuild that parts A
+  and B call for does not fix this.
+- By eye the folds are sharper than stock and noisier; the metric prefers
+  clean and soft. That judgement needs a person.
+- The training pictures matter: the photo samples
+  (`tools/v7_nested_corpus.py`) give better stereo tables than the shipped
+  Kodak ones here; adding textures and the test charts made them worse.
+  The shipped tables are unchanged: with the rebuilt set one reverse test
+  fails, and no table beats stock anyway.
+
+## 13. False colour is the chroma budget (diagnosed, open)
+
+Green and purple on black-and-white detail, pink on white, colour bars
+smearing upward, in every mode. On the mono wire 76 Cb and 136 Cr
+coefficients are sent of 1,920 each. Swapped in through the display: the
+sent chroma arriving exactly looks the same as the decode; the full chroma
+is clean. So it is neither coding error nor the display's colour step, it
+is how little chroma is sent, and anti-ringing cannot repair that. A
+receiver-side rebuild that lets colour change only at luma edges confines
+the bars a little on the chart (CIEDE2000 18.4 to 17.5) and makes the
+astronaut blotchy (SSIMULACRA2 -53.6 to -57.3): not adopted. The fix is
+more chroma on the wire.
+
+## 10. Body level since `b147922` (by design)
 
 `encode_pulse_frame_coeffs` now fits the body 1.5 dB under the lower of the
 header and end-marker peaks, measured after the timing tones are mixed. The

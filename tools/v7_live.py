@@ -1100,6 +1100,26 @@ def _mix_mono_video_audio(modem, frames, source, delay, video_side,
     return output
 
 
+# Sender profiles on offer.  mono-fold-500, fold-500, mono-colour-500 and
+# stereo-slices are deprecated: no longer valid choices, though their wires
+# stay (the nested folds ride on them and the receiver still reads them).
+SEND_PROFILES = ('aspect-fold-500', 'aspect-mono-500',
+                 'aspect-mono-nested', 'stereo-nested')
+DEPRECATED_SEND_PROFILES = ('mono-fold-500', 'fold-500', 'mono-colour-500',
+                            'stereo-slices')
+
+
+def deprecated_profiles_allowed():
+    """The deprecated profiles are refused unless V7_ALLOW_DEPRECATED_PROFILES
+    is set.  The test suite sets it: those wires are still what the nested
+    folds ride on and what the receiver must keep reading, so their tests
+    stay."""
+    return os.environ.get('V7_ALLOW_DEPRECATED_PROFILES', '') not in ('', '0')
+
+
+def selectable_send_profiles():
+    return SEND_PROFILES+(DEPRECATED_SEND_PROFILES
+                          if deprecated_profiles_allowed() else ())
 NESTED_BASE_PROFILES = {'aspect-mono-nested': 'aspect-mono-500',
                         'stereo-nested': 'stereo-slices'}
 
@@ -2831,7 +2851,11 @@ class _AdaptiveProfileDecoder:
         if result is not None:
             result.diag['slices_shown'] = '+'.join(sorted(
                 half.kind for half in used))
-        return wire.values(halves)
+        values = wire.values(halves)
+        if result is not None:
+            # A nested fold's account of its coefficients, for the display.
+            result.diag['luma_room'] = getattr(wire, 'last_room', None)
+        return values
 
     def values(self, model, result):
         mode = result.diag.get('profile_mode')
@@ -4270,7 +4294,8 @@ def _run_receive_session(args, fold, mono_wire=None, adaptive_profile=None,
                     previous_values = latest.copy()
                 display_frames.publish(
                     latest, model.coder.grids, meter['aspect'],
-                    pixel_shapes=result.diag.get('pixel_shapes'))
+                    pixel_shapes=result.diag.get('pixel_shapes'),
+                    luma_room=result.diag.get('luma_room'))
                 shown_times.append(time.monotonic())
                 meter['shown_index'] = result.diag.get('source_index')
                 meter['shown_direction'] = result.diag.get('direction')
@@ -4590,19 +4615,12 @@ def parser():
     _add_aspect_arguments(send)
     send_profile = send.add_mutually_exclusive_group()
     send_profile.add_argument(
-        '--profile', choices=('mono-fold-500', 'fold-500', 'mono-colour-500',
-                              'aspect-fold-500',
-                              'aspect-mono-500', 'stereo-slices',
-                              'aspect-mono-nested', 'stereo-nested'),
+        '--profile', choices=selectable_send_profiles(),
         default=None,
-        help=('wire profile: mono video with Fold 500 (recommended), '
-              'stereo Fold 500 (default), '
-              'mono video with colour-weighted Fold 500 (experimental), '
-              'stereo Fold 500 with an aspect-matched coefficient layout '
-              '(experimental; set the receiver\'s --aspect-layout and '
-              '--aspect-tail to match), or mono video colour Fold 500 with '
-              'an aspect-matched layout (experimental; set the receiver\'s '
-              '--aspect-layout to match)'))
+        help=('wire profile: aspect-fold-500 (stereo), aspect-mono-500 (mono '
+              'video), or the nested fold under test against each: '
+              'stereo-nested and aspect-mono-nested. The receiver reads all '
+              'of them without a setting.'))
     send_profile.add_argument('--experimental-mono-fold', action='store_true',
                               help=argparse.SUPPRESS)
     send_profile.add_argument('--experimental-fold', type=int, default=None,

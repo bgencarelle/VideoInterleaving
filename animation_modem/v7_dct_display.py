@@ -179,13 +179,15 @@ def _divergence(px, py, out):
 
 @njit(cache=True, fastmath=True, nogil=True)
 def _edge_rounds(x, values, known, analysis, synthesis_rows, rounds, inner,
-                 weight, trust=1.0):
+                 weight, trust, room):
     """In place: ``rounds`` of TV prox + clip + data consistency on ``x``.
 
     ``analysis`` is H x r (orthonormal DCT basis columns), ``synthesis_rows``
     c x W; ``values``/``known`` are the r x c received block (scaled to the
-    working grid) and its mask. Single thread; inner loops run over
-    contiguous rows so they vectorise.
+    working grid) and its mask. ``room`` (r x c) is how far each received
+    coefficient may lie from its value: 0 puts it back exactly, more lets
+    the picture keep any value within that distance. Single thread; inner
+    loops run over contiguous rows so they vectorise.
     """
     height, width = x.shape
     rows, cols = values.shape
@@ -243,9 +245,15 @@ def _edge_rounds(x, values, known, analysis, synthesis_rows, rounds, inner,
                     coefficients[u, v] += a*partial[i, v]
         for u in range(rows):
             for v in range(cols):
-                coefficients[u, v] = np.float32(trust)*(
-                    values[u, v]-coefficients[u, v]) if known[u, v] \
-                    else np.float32(0)
+                if known[u, v]:
+                    # Back inside what was received: exactly the value, or
+                    # the nearest point of its bounds.
+                    seen = coefficients[u, v]
+                    target = min(max(seen, values[u, v]-room[u, v]),
+                                 values[u, v]+room[u, v])
+                    coefficients[u, v] = np.float32(trust)*(target-seen)
+                else:
+                    coefficients[u, v] = np.float32(0)
         partial[:, :] = 0
         for i in range(height):
             for u in range(rows):
@@ -264,14 +272,21 @@ def _edge_rounds(x, values, known, analysis, synthesis_rows, rounds, inner,
 
 def edge_consistent_plane(plane, factor=EDGE_FACTOR, rounds=EDGE_ROUNDS,
                           inner=EDGE_INNER, weight=EDGE_WEIGHT, trust=1.0,
-                          strength=1.0):
+                          strength=1.0, room=None):
     """A decoded plane rebuilt ``factor`` times larger by consistent
     reconstruction (see above). The received coefficients are those of the
     plane's spectral support above the rounding floor; their values are kept
     exactly. ``strength`` (0 to 1) mixes the result with the plain
     reconstruction: both hold the received coefficients, so every mix does
     too; lower values keep more of the natural texture and more of the
-    ripple. Returns float32, ``factor`` x the plane's shape."""
+    ripple. Returns float32, ``factor`` x the plane's shape.
+
+    ``room`` is what the decoder knows about the plane's coefficients, when
+    it says: a plane-shaped array, infinite where a coefficient was not
+    sent and otherwise how far the true value may lie from the decoded one
+    (0: exact; half a stair for a nested-fold host). Which coefficients
+    were received is then taken from it instead of guessed from the values,
+    and each is held within its bounds instead of at its value."""
     plane = np.asarray(plane, dtype=np.float64)
     if plane.ndim != 2 or min(plane.shape) <= 0:
         raise ValueError('edge reconstruction needs a non-empty 2-D plane')
@@ -281,10 +296,23 @@ def edge_consistent_plane(plane, factor=EDGE_FACTOR, rounds=EDGE_ROUNDS,
     source_height, source_width = plane.shape
     height, width = source_height*factor, source_width*factor
     coefficients = dctn(plane, norm='ortho')
-    rows, cols = spectral_support(coefficients)
-    block = coefficients[:rows, :cols]
-    peak = float(np.abs(coefficients).max(initial=0.0))
-    known = np.abs(block) > peak*SUPPORT_RELATIVE_FLOOR
+    if room is not None:
+        room = np.asarray(room, dtype=np.float64)
+        if room.shape != plane.shape:
+            raise ValueError('coefficient room must have the plane\'s shape')
+        sent = np.isfinite(room)
+        rows = int(np.nonzero(sent.any(axis=1))[0][-1])+1 if sent.any() else 1
+        cols = int(np.nonzero(sent.any(axis=0))[0][-1])+1 if sent.any() else 1
+        block = coefficients[:rows, :cols]
+        known = np.ascontiguousarray(sent[:rows, :cols])
+        bounds = np.ascontiguousarray(
+            np.where(known, room[:rows, :cols], 0.0)*factor, dtype=np.float32)
+    else:
+        rows, cols = spectral_support(coefficients)
+        block = coefficients[:rows, :cols]
+        peak = float(np.abs(coefficients).max(initial=0.0))
+        known = np.abs(block) > peak*SUPPORT_RELATIVE_FLOOR
+        bounds = np.zeros((rows, cols), dtype=np.float32)
     values = np.ascontiguousarray(block*factor, dtype=np.float32)
     analysis = _basis(height, rows)
     synthesis_rows = _basis_rows(width, cols)
@@ -298,7 +326,7 @@ def edge_consistent_plane(plane, factor=EDGE_FACTOR, rounds=EDGE_ROUNDS,
     plain = x.copy() if strength < 1.0 else None
     x = _edge_rounds(x, values, np.ascontiguousarray(known), analysis,
                      synthesis_rows, int(rounds), int(inner), float(weight),
-                     float(trust))
+                     float(trust), bounds)
     if plain is not None:
         x *= np.float32(strength)
         plain *= np.float32(1.0-strength)

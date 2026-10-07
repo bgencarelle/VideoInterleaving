@@ -188,18 +188,21 @@ class FrozenFold:
         return sk.soft_decode_frame(_f8(values), self.level, self.step, self.scale,
                                     self.alpha, _f8(sigma), density, self.inverse)
 
-    def room(self, level, sigma, count=1, joined=True):
+    def room(self, level, sigma, count=1, joined=True, share=None):
         """How far each luma coefficient (flat 7,680) may lie from its
         decoded value: infinite where nothing was sent, half a stair for a
         folded host (less once ``count`` dithered packets are averaged),
         the noise for a plain host, nothing for a guest.  None when the
         bounds are not known per coefficient (one channel, or a mono sum, of
-        a two-channel table: only base plus or minus detail is bounded)."""
+        a two-channel table: only base plus or minus detail is bounded).
+        ``share``: the share of the half stair counted (default SMOOTH_ROOM,
+        what the decoder's own smoothing uses; 1 is the whole of it)."""
         if self.paired and not joined:
             return None
         return sk.coefficient_room(
             LUMA, self.host_position, self.level, self.step, self.host_sd, self.scale,
-            _f8(sigma), RATIO**level, SMOOTH_ROOM, int(count), self.guest_position,
+            _f8(sigma), RATIO**level, SMOOTH_ROOM if share is None else float(share),
+            int(count), self.guest_position,
             self.ride, self.detail_position, self.paired)
 
     def clean(self, luma, room, passes=None):
@@ -422,6 +425,9 @@ SMOOTH_PASSES = int(os.environ.get('NESTED_FOLD_SMOOTH', 16))
 # flattest picture; half of it gave the lowest error on the fixtures and
 # costs dense texture less.
 SMOOTH_ROOM = float(os.environ.get('NESTED_FOLD_SMOOTH_ROOM', .5))
+# The share of the half stair the display is told a folded host may move
+# (NESTED_FOLD_DISPLAY_ROOM).
+DISPLAY_ROOM = float(os.environ.get('NESTED_FOLD_DISPLAY_ROOM', 1.0))
 SMOOTH_EDGE = .01              # pixel difference (of -1..1) that counts as flat
 SMOOTH_RATE = .25              # descent step, as a share of SMOOTH_EDGE
 
@@ -542,6 +548,19 @@ def packet_noise(residual, design, own=None):
                                  _NONE if own is None else _f8(own), SLOT_NOISE_SHARE))
 
 
+def display_room(fold, level, sigma, count, joined):
+    """What the display is told about a decoded picture's luma coefficients
+    (animation_modem.v7_dct_display.edge_consistent_plane): a luma-grid
+    array, infinite where nothing was sent, else how far the value may lie
+    from the decoded one.  None when the decoder has already smoothed the
+    picture itself (then every coefficient is as final as it will get), or
+    when the bounds are not known per coefficient."""
+    if SMOOTH_PASSES > 0:
+        return None
+    room = fold.room(level, sigma, count, joined, share=DISPLAY_ROOM)
+    return None if room is None else room.reshape(96, -1)
+
+
 _SENDING = threading.local()   # sender: counter of the packet being built
 
 
@@ -580,7 +599,10 @@ class NestedMonoCodec:
         self.recognition = Recognition()
         self.held = Held()
         self.tail_slice = None          # receiver: tail slice of the packet in hand
+        self.last_room = None           # receiver: display_room of the last picture
         self._level_plane, self._level = _NONE, 0   # sender: last picture and its level
+
+    _display_room = staticmethod(lambda *args: display_room(*args))
 
     def _unit(self, xhat, conf):
         seen, confidence = sk.unshrink(_f8(xhat), _f8(conf), 1e-3)
@@ -632,6 +654,7 @@ class NestedMonoCodec:
         self.last_nested, level = self.recognition.decide(
             score, level, stock_score, dithered)
         tail_slice, self.tail_slice = self.tail_slice, None
+        self.last_room = None
         if not self.last_nested:
             self.held.reset()
             return self.stock.decode(coeffs, xhat, conf, fallback=fallback,
@@ -648,6 +671,7 @@ class NestedMonoCodec:
                                    sigma)}, level, phase),
             level, phase, sigma)
         full[:LUMA] = fold.clean(luma, fold.room(level, sigma, self.held.last_count))
+        self.last_room = self._display_room(fold, level, sigma, self.held.last_count, True)
         self.stock.last_score = self.last_score = score
         self.stock.last_noise = self.last_noise = relative
         self.stock.last_unfolded_slots = self.last_unfolded_slots = self.folded_slots
@@ -676,6 +700,7 @@ def enable_mono(wire, send=False, path=None):
             nested.held.reset()
 
     wire._codec = codec
+    wire.nested_codecs = lambda: tuple(wrapped.values())
     wire.nested_fold = 'send' if send else 'receive'
     wire.reset_nested = forget          # a new stream: forget what the last one carried
     if send:
@@ -712,6 +737,7 @@ def _slice_wire_class():
             self._level = (None, None)
             self._counter = None
             self._prepared = {}
+            self.last_room = None
             self.nested_fold = 'send' if send else 'receive'
             self.last_nested = False
             self.recognition = Recognition()
@@ -837,6 +863,7 @@ def _slice_wire_class():
                 best = max(signed, key=lambda s: max(s[0], s[3]))
                 self.last_nested, level = self.recognition.decide(
                     best[0], best[1], best[3], best[4])
+            self.last_room = None
             if not self.last_nested:
                 self.held.reset()
                 return super().values(halves)
@@ -871,6 +898,8 @@ def _slice_wire_class():
                 worst = sigma if worst is None else sk.larger(worst, sigma)
             luma = fold.clean(luma, fold.room(level, worst, self.held.last_count,
                                               joined=len(readings) == 2))
+            self.last_room = display_room(fold, level, worst, self.held.last_count,
+                                          len(readings) == 2)
             out = np.empty(ready.pixels)
             start = 0
             for plane, ((base, _), (rows, cols)) in enumerate(

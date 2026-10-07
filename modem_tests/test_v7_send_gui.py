@@ -105,12 +105,29 @@ class SenderGuiTests(unittest.TestCase):
         self.sd = Mock()
         self.sd.check_output_settings.return_value = None
 
-    def test_colour_mono_profile_is_available_in_primary_picker(self):
+    def test_the_picker_offers_the_aspect_profiles_and_their_nested_folds_only(self):
         self.assertEqual(
             tuple(value for _label, value in PRIMARY_PROFILE_CHOICES),
-            ('aspect-fold-500', 'fold-500', 'aspect-mono-500',
-             'mono-colour-500', 'stereo-slices', 'aspect-mono-nested',
+            ('aspect-fold-500', 'aspect-mono-500', 'aspect-mono-nested',
              'stereo-nested'))
+
+    def test_deprecated_profiles_are_refused_outside_the_test_switch(self):
+        from tools import v7_send_gui as gui
+        deprecated = ('fold-500', 'mono-fold-500', 'mono-colour-500', 'stereo-slices')
+        self.assertEqual(gui.DEPRECATED_PROFILES, deprecated)
+        self.assertEqual(set(v7_live.DEPRECATED_SEND_PROFILES), set(deprecated))
+        with patch.dict('os.environ', {'V7_ALLOW_DEPRECATED_PROFILES': ''}):
+            self.assertEqual(gui.valid_profiles(), ('aspect-fold-500', 'aspect-mono-500',
+                                                    'aspect-mono-nested', 'stereo-nested'))
+            self.assertEqual(v7_live.selectable_send_profiles(), v7_live.SEND_PROFILES)
+            for profile in deprecated:
+                with self.assertRaises(SystemExit), \
+                        patch('sys.stderr'):
+                    v7_live.parser().parse_args(
+                        ['send', '--device', 'null', '--source', 'test',
+                         '--profile', profile])
+        with patch.dict('os.environ', {'V7_ALLOW_DEPRECATED_PROFILES': '1'}):
+            self.assertIn('fold-500', gui.valid_profiles())
 
     def test_device_list_contains_only_output_devices_and_does_not_default(self):
         sd = Mock()
@@ -1213,8 +1230,7 @@ class SenderGuiTests(unittest.TestCase):
         self.assertEqual(gui.settings['profile'], 'aspect-fold-500')
         self.assertTrue(gui.settings['dct_encode'])
         self.assertFalse(hasattr(gui, 'advanced'))
-        expected = ('aspect-fold-500', 'fold-500', 'aspect-mono-500',
-                    'mono-colour-500', 'stereo-slices', 'aspect-mono-nested',
+        expected = ('aspect-fold-500', 'aspect-mono-500', 'aspect-mono-nested',
                     'stereo-nested')
         self.assertEqual(tuple(value for _label, value in
                                gui._choices('profile')), expected)
