@@ -79,12 +79,16 @@ def main():
     print("\ninterlace: fields partition the rows exactly")
     for fields in (2, 4):
         gr, gc = plan_grid(lum, N, trim=0.10)
+        # Test row partitioning independently of alternating-sweep endpoint
+        # anchoring, which can shift/resample a field's Y coordinates. Chaining
+        # is checked above; use the same unanchored sweep for both references.
         e3 = TraceEmitter(RATE, N // fields, trim=0.10, fields=fields,
-                          grid=(gr, gc))
+                          grid=(gr, gc), sweep="retrace")
         seen = set()
         for _ in range(fields):
             seen |= set(np.round(e3.emit(lum)[:, 1], 6).tolist())
-        one = TraceEmitter(RATE, N, trim=0.10, grid=(gr, gc)).emit(lum)
+        one = TraceEmitter(RATE, N, trim=0.10, grid=(gr, gc),
+                           sweep="retrace").emit(lum)
         base = len(set(np.round(one[:, 1], 6).tolist()))
         ok &= check(f"fields={fields} covers every scanline",
                     len(seen) >= base - 1, f"{len(seen)} vs {base} progressive")

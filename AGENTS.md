@@ -23,6 +23,9 @@
   read `docs/SCOPE_UPGRADE.md` and start from its latest Handoff. Treat current
   defaults as D0; keep its charter/stages frozen and append evidence/check-ins,
   following its Numba, realtime/headless, baseline and stage requirements.
+- Scope delivery status: S7 software validation and the user-requested S8
+  verification/release handoff are closed in `docs/SCOPE_UPGRADE.md` A062.
+  Do not restart validation sweeps or physical-device work without a new task.
 
 ## Environment and artifacts
 

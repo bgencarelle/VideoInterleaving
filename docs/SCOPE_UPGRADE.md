@@ -5361,3 +5361,93 @@ and visualizers; do not introduce physical-device prerequisites or another
 performance sweep. Native/CPU image inspection and browser-renderer parity
 have current evidence; desktop-browser interaction has the specific tool
 connection limitation above.
+
+---
+
+## Appendix A062 — S7 completion and S8 verification/release handoff — 2026-10-07
+
+**Disposition: S7 is closed for the user-directed software scope; S8 final
+verification/release handoff is complete.** The user requested completion of
+"s7 + s8 now" after reiterating use of the existing tools and visualizers.
+The frozen implementation plan ends at S7; S8 here names this final
+verification/release handoff, not an invented additional implementation stage.
+The software disposition in A043/A061 applies. Physical/offline tests remain
+the user's separate work and are not delivery prerequisites.
+
+### Final verification
+
+- **340 selected scope regression tests passed, plus 30 subtests.** The initial
+  targeted pytest run passed 338 tests and failed two imports of the inspection
+  helper `test_scope_pair`. Both passed when rerun with `PYTHONPATH=.:tests`.
+  The inspection tool itself was not launched and no physical audio was opened.
+  Coverage includes scheduling/cache, source timing, numerical kernels,
+  preview/native UI, render modes/trajectories, trigger/channel behavior, and
+  launcher/CLI controls. Logs: `final-scope-tests.log` and
+  `final-scope-recheck.log` under `tmp/scope-s7-visual-closeout/`.
+- **26 application/integration/lazy-import/ASCII tests passed** via
+  `python -m unittest tests.test_modem_integration tests.test_lazy_imports
+  tests.test_ascii_converter_adjustments tests.test_ascii_scaling -q`.
+  Log: `tmp/scope-s7-visual-closeout/final-app-tests.log`.
+- **Pipeline parity passed.** The standalone parity check previously combined
+  interlace row coverage with alternating-sweep endpoint anchoring; the latter
+  intentionally shifts/resamples field coordinates. It now uses the same
+  unanchored retrace sweep for progressive/field row coverage, retaining the
+  separate chain-continuity check. First-trace parity, chain continuity,
+  two-/four-field coverage, tuning-knob reachability, and shared-driver
+  rendering checks pass. Log: `final-pipeline-parity.log`.
+- **Browser-renderer parity and native visualization passed** as recorded in
+  A061. Additionally exercised the native GL window's real input handlers for
+  rotation/mirror/invert action dispatch, image-only/escape, fullscreen/restore,
+  gamma slider dispatch, exposure and spot-width preview updates, and quit.
+  The preview continued rendering without errors after control changes and was
+  visually inspected. The check invokes native event callbacks under Xvfb;
+  it is not a human mouse-input session or an end-to-end live-driver control test.
+  Artifacts: `native_controls.py`, `native-controls.json`, and
+  `native-controls-preview.png` in `tmp/scope-s7-visual-closeout/`.
+- Syntax and Git diff-whitespace checks passed. Only the parity inspection
+  check and documentation changed during this final pass; runtime defaults and
+  implementation remain at the integrated snapshot measured in A058–A060.
+
+### Final result and limitations
+
+Evidence now includes the 48/96-kHz mode/settings matrix, buffer sweep and
+ten-minute null-output soak, repeated matched null-output moving-video results,
+verified existing PortAudio loopback operation, a bounded matched PortAudio
+video pair, and CPU/native/browser-renderer visualization checks.
+
+Retain the measured limitations: approximately 30 output traces/s is not proof
+of 30 fresh pictures/s; A060 used a matched 12-Hz capture setting. Integrated
+had one underflow in its 60-second PortAudio trial and higher CPU/RSS than D0;
+96-kHz/512-frame screening underflowed repeatedly on this Pulse route. No
+zero-underflow universal claim, new buffer default, or physical latency claim
+is made. Desktop-browser user interaction remains unverified because the
+session's browser tool was disconnected; Node renderer parity and native
+visualizer checks were performed with the tools available. These limitations
+are disclosed at closeout, not an instruction to start another validation cycle.
+
+### Operational handoff
+
+Run from the repository root:
+
+```bash
+# Existing launcher for application/live visualizers.
+./vi.scope-gui
+
+# Native application visualizer, software output, using the existing XY bake.
+.venv/bin/python main.py --mode scope --scope-gui --device null
+
+# Standalone moving-video visualizer; software output and playback controls.
+.venv/bin/python tools/scope_screen.py --source video \
+  --file modem_tests/fixtures/v7_pixel_motion_16x9.mp4 \
+  --device null --scope-gui --capture-fps 30 --control
+```
+
+For PortAudio validation, reuse the verified `pulse -> loop -> loop.monitor`
+route and channels 1/2 as documented in AGENTS.md. Generated reports/images and
+temporary reproduction harnesses stay in ignored `tmp/`; no generated bake
+or source-list manifest is part of the release commit. Defaults stay frozen.
+
+**Final handoff:** S7 software delivery and S8 closeout are finished. No active
+upgrade stage remains in this agent's scope. Continue only on a new explicit
+user task; do not reopen hardware acquisition, performance sweeps, or the
+disclosed validation limitations as automatic next steps.
