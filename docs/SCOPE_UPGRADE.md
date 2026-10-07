@@ -5451,3 +5451,27 @@ or source-list manifest is part of the release commit. Defaults stay frozen.
 upgrade stage remains in this agent's scope. Continue only on a new explicit
 user task; do not reopen hardware acquisition, performance sweeps, or the
 disclosed validation limitations as automatic next steps.
+
+---
+
+## Appendix A063 — Incoming V7 build integration verified — 2026-10-07
+
+Merged the incoming V7 build and repair/evaluation handoff while preserving
+the local S7/S8 closeout, visualizer scope instructions, and parity inspection
+fix. The incoming table archive was initially empty; the upstream correction
+`3480de3279011f321a4a52d380dbb81287c398fa` restored the original Kodak archive
+and matching metadata. Both files were checked against the known-good
+`b1479220` versions, including all 14 table hashes/dimensions and finite array
+values, before merging. No substitute or locally rebuilt tables were adopted.
+
+The resulting integration merge is `ac6209769`. Verification on that combined
+tree passed **963 modem tests**, **26 application/integration/lazy-import/ASCII
+tests**, modem dependency imports, and whitespace checks. Syntax checks passed
+for the changed Python files during the integration. Scope runtime files were
+not changed by the incoming commits. Logs are in
+`tmp/build-integration-20261007/modem-tests-restored.log` and
+`tmp/build-integration-20261007/app-tests-restored.log`.
+
+**Handoff:** Incoming V7 integration is verified. S7/S8 remain closed as in
+A062; the V7 repair plan is separate future work, not part of this merge.
+Generated local source-list manifests remain outside the commits.
