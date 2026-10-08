@@ -43,7 +43,7 @@ def _luma(rgb):
 
 def _stream(base, grid, layout, code, scale=10, packets=6, start=1):
     """(audio, sent luma picture) of ``packets`` pixel-encoded packets."""
-    wire = AspectFoldWire('auto', 'fixed', pixel=grid)
+    wire = AspectFoldWire('auto', pixel=grid)
     rows, cols = PIXEL_GRIDS[grid][layout]
     small = _art(rows, cols)
     frame = np.repeat(np.repeat(small, scale, 0), scale, 1)
@@ -112,25 +112,21 @@ class PixelGridTests(unittest.TestCase):
         self.assertEqual(PIXEL_GRIDS['large']['16:9'], (36, 64))
         self.assertEqual(PIXEL_GRIDS['large']['3:2'], (40, 60))
 
-    def test_tables_are_pinned_and_only_two_tails_exist(self):
+    def test_tables_are_pinned_and_carry_the_fixed_tail(self):
         self.assertEqual(aspect_fold.PIXEL_TABLES_SHA256,
                          'f5f1f8b76d52e653d477ba1fe2092aa3560ab6354f7a5d116a100e9a7b436f4f')
-        tables = layout_tables('16:9', 'fixed', 'robust')
+        tables = layout_tables('16:9', 'robust')
         self.assertEqual(len(tables['positions']), v7.BODY_END+v7.TAIL_PER)
         plane = aspect_fold._plane_of(tables['positions'])
         self.assertEqual(int((plane == 0).sum()), 1920)
         with self.assertRaises(ValueError):
-            layout_tables('16:9', 'luma', 'robust')
-        with self.assertRaises(ValueError):
-            AspectFoldWire('auto', 'split', pixel='large')
-        with self.assertRaises(ValueError):
-            AspectFoldWire('auto', 'fixed', pixel='huge')
+            AspectFoldWire('auto', pixel='huge')
 
     def test_models_send_the_nearest_bit_and_grids_have_opposed_signatures(self):
         base = v7.load_model(TARGET, 'box')
         codecs = {}
         for grid in PIXEL_GRID_NAMES:
-            wire = AspectFoldWire('auto', 'fixed', pixel=grid)
+            wire = AspectFoldWire('auto', pixel=grid)
             model = wire.model_for(base, '3:2')
             self.assertEqual(int(model.encoding_type),
                              v7.ENCODING_FILTER_CODES['nearest'])
@@ -142,10 +138,10 @@ class PixelGridTests(unittest.TestCase):
         # A nearest base model (what a live receiver loads for that bit)
         # gives the same wire.
         nearest = v7.load_model(TARGET, 'nearest')
-        other = AspectFoldWire('auto', 'fixed', pixel='robust')
+        other = AspectFoldWire('auto', pixel='robust')
         np.testing.assert_allclose(
             other.model_for(nearest, '3:2').scale,
-            AspectFoldWire('auto', 'fixed', pixel='robust').model_for(
+            AspectFoldWire('auto', pixel='robust').model_for(
                 base, '3:2').scale, rtol=1e-12)
 
     def test_live_receiver_follows_either_grid_pixel_for_pixel(self):
@@ -185,7 +181,7 @@ class PixelGridTests(unittest.TestCase):
         base = v7.load_model(TARGET, 'box')
         frame = np.repeat(np.repeat(_art(36, 64), 10, 0), 10, 1)
         values = v7_live._values(base, frame, 'box', brightness=1.0)[0]
-        wire = AspectFoldWire('auto', 'fixed')
+        wire = AspectFoldWire('auto')
         model, coeffs = wire.encode_coefficients(base, values, 3)
         audio = np.concatenate([tone_code.add_tone_code(
             v7.encode_pulse_frame_coeffs(

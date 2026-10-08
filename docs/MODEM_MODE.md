@@ -201,8 +201,8 @@ DCT encode and the encoder filter, which start at the new defaults once. Under *
   until the pixel's linear luminance matches the source (six safeguarded
   Newton steps per pixel in numba, with an sRGB lookup table; about 3 ms per
   1080p frame including the luminance target; no receiver change). It
-  assumes the receiver holds the profile's full colour set, including the
-  rotating tail. Grey content is unchanged.
+  assumes the receiver holds the colour the profile sends in one packet.
+  Grey content is unchanged.
 - **Clip-aware encode** (`--clip-aware-encode`, opt-in) re-fits the sent luma
   coefficients so ringing around bright and dark edges falls into the
   receiver's black/white clip, where it is invisible (about 2 ms per frame at
@@ -394,25 +394,18 @@ EOF markers.
   `auto`, the receiver holds the last good picture until it has valid
   metadata.
 
-One setting is not signalled and must match on both ends:
+The 96 tail slots are part of the profile, not a setting: every packet
+carries the 96 strongest tail colour values, so nothing shown is older than
+the current packet. The rotating tails (`chroma`, `split`, `luma`) were
+removed (fixes list item 19): rotating colour was up to 7 packets old and
+showed as ghost bands on moving pictures, and the luma tail aliased.
 
-- `--aspect-tail` (default `fixed`; the sender GUI resets an earlier saved
-  tail to it once): what the 96 tail slots carry. `chroma`
-  is V7's rotating chroma tail (the lowest-ranked 656 coefficients are all
-  chroma); `split` sends 48 extra luma frequencies in every packet plus 48
-  rotating chroma; `luma` sends 96 extra luma frequencies in every packet and
-  drops the 96 weakest chroma ones; `fixed` sends the 96 strongest tail
-  colour values in every packet with no rotation, so nothing shown is older
-  than the current packet. Use `fixed` for moving pictures: with one new
-  picture per packet through the real modem it scores +1 to +16 SSIMULACRA2
-  over `chroma` (whose rotating colour is up to 7 packets old and shows as
-  dark ghost bands in saturated areas); a held still on a clean channel loses
-  2–4.
-
-The sender GUI shows both under **Advanced** when the profile is selected; the
-receiver GUI shows them under advanced options. Tables are frozen in
-`test_modem_v7/aspect_tables.npz` (hash-pinned; rebuild with
-`python test_modem_v7/aspect_fold.py build`, then update `TABLES_SHA256`).
+The sender GUI shows the layout under **Advanced** when the profile is
+selected; the receiver GUI shows it under advanced options. Tables are frozen
+in `test_modem_v7/aspect_tables.npz` (hash-pinned; the file also holds the
+retired rotating tails' tables, left in place because its hash is part of
+every fold signature; `python test_modem_v7/aspect_fold.py build` writes the
+base tables only and needs a new `TABLES_SHA256`).
 
 `--profile aspect-mono-500` is the mono-video counterpart: mono colour Fold 500
 (the same 1,264 M-only slots in every packet on one output leg, chroma ranked

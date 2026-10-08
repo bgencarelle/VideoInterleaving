@@ -202,7 +202,7 @@ class ComponentFold(FoldCodec):
 
 class ComponentAspect(AspectFoldWire):
     def __init__(self, model, codec, layout):
-        super().__init__(layout, 'fixed')
+        super().__init__(layout)
         self.model, self._codecs = model, {id(model): codec}
 
     def model_for(self, base_model, layout):
@@ -214,7 +214,6 @@ class ComponentAspect(AspectFoldWire):
 class ComponentMono(AspectMonoWire):
     def __init__(self, base, model, codec, layout):
         self.layout, self.model, self.fold_codec = layout, model, codec
-        self._aspect = ComponentAspect(model, codec, layout)
         MonoFreshFoldWire.__init__(self, base, side='left')
 
     def model_for(self, model, layout=None):
@@ -248,7 +247,7 @@ class AnalogFrameWire(ColorWire):
         end = 1264 if profile == 'aspect-mono-500' else v7.BODY_END
         gain /= np.sqrt(np.mean((gain*gain*lam)[order[:end]]))
         tables = {'positions': kept, 'mu': mean[kept], 'lam': lam, 'gain': gain,
-                  'order': order, 'tail_luma_slots': np.int64(96), 'unit_rms': np.float64(1)}
+                  'order': order, 'unit_rms': np.float64(1)}
         model = _assemble(tables, self.base.phase, 1., template=self.base)
         shapes = []
         for i, shape in enumerate(self.grids):

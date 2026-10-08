@@ -24,24 +24,21 @@ follow derive_tables(). All of it is frozen in aspect_tables.npz, whose
 SHA-256 is pinned below, so both ends hold identical tables.
 
 Signalling: coded status and pulse preamble ID 0 (the fold-off code, which
-the live senders no longer emit). The tail mode is a receiver setting that
-must match the sender. The layout is signalled: layout ``auto`` follows the
-aspect code in each packet's metadata, and a sender with a fixed layout sends
-that layout's code with the metadata screen bit (the picture boxed into it).
+the live senders no longer emit). The layout is signalled: layout ``auto``
+follows the aspect code in each packet's metadata, and a sender with a fixed
+layout sends that layout's code with the metadata screen bit (the picture
+boxed into it).
 
-Tail modes (the 96 tail slots of each packet):
-- chroma: V7's tail. The 656 lowest-ranked coefficients, all fine chroma,
-  rotate 96 per packet over 7 packets; still pictures keep full 4:2:0
-  chroma (480 per plane), moving pictures effectively about 304.
-- split: 48 extra luma frequencies (beyond the fold guests) in every packet,
-  48 chroma slots rotating (336 over 7 packets).
-- luma: 96 extra luma frequencies in every packet; chroma is only what the
-  head and body carry (~304 in all).
-- fixed: the 96 strongest of the chroma tail's 656 coefficients in every
-  packet, no rotation; the other 560 are not sent. Everything shown is from
-  the current packet, so moving pictures have no stale colour (real modem,
-  one new picture per packet, SSIMULACRA2 against chroma: +1 to +16; a held
-  still on a clean channel loses 2-4). Derived from the frozen chroma tables.
+The tail (the 96 tail slots of each packet) is fixed: the 96 strongest of the
+base tables' 656 tail coefficients, all fine chroma, ride in every packet;
+the other 560 are not sent. Everything shown is from the current packet, so
+moving pictures have no stale colour. Rotating tails (chroma, split, luma)
+were removed (fixes list item 19): they lowered quality in earlier profiles,
+and the luma tail aliased. The base tables (key ``chroma`` in
+aspect_tables.npz) hold all 2,880 coefficients; the wire's tables are cut
+from them, and aspect-mono-500 builds on them directly. The frozen file still
+holds the retired ``split`` and ``luma`` tables: its SHA-256 is part of every
+fold signature, so it is left byte for byte as it was.
 
     python test_modem_v7/aspect_fold.py build     # rebuild and print the pin
     python test_modem_v7/aspect_fold.py build-pixel   # the pixel grids' tables
@@ -68,13 +65,11 @@ PULSE_PROFILE_CODE = STATUS_MODE
 FOLD_SLOTS = 500
 SIGNATURE_SLOTS = 16
 TABLE_FORMAT = 'v7-aspect-fold-1'
-# Tail mode -> luma slots fixed in every packet's 96 tail slots.
-TAIL_LUMA_SLOTS = {'chroma': 0, 'split': 48, 'luma': 96, 'fixed': 0}
-TAIL_MODES = tuple(TAIL_LUMA_SLOTS)
-FROZEN_TAIL_MODES = ('chroma', 'split', 'luma')
-# Tail mode -> tail slots that carry the same coefficients in every packet.
-TAIL_FIXED_SLOTS = {'chroma': 0, 'split': 48, 'luma': 96, 'fixed': 96}
-EXTRA_LUMA = max(TAIL_LUMA_SLOTS.values())
+# The one tail: the same 96 coefficients in every packet. The name is part of
+# the fold table's identity (and so of its signature).
+TAIL = 'fixed'
+# Key of the base tables (all 2,880 coefficients) in the frozen files.
+BASE_TABLES = 'chroma'
 # (name, width, height). Names are the CLI/GUI values.
 LAYOUTS = (('1:1', 1, 1), ('4:3', 4, 3), ('3:2', 3, 2), ('16:9', 16, 9),
            ('3:4', 3, 4), ('2:3', 2, 3), ('9:16', 9, 16))
@@ -107,7 +102,6 @@ PIXEL_GRID_NAMES = tuple(PIXEL_GRIDS)
 PIXEL_TABLES = Path(__file__).resolve().with_name('pixel_tables.npz')
 PIXEL_TABLES_SHA256 = 'f5f1f8b76d52e653d477ba1fe2092aa3560ab6354f7a5d116a100e9a7b436f4f'
 PIXEL_TABLE_FORMAT = 'v7-pixel-fold-1'
-PIXEL_TAIL_MODES = ('chroma', 'fixed')
 PIXEL_ENCODING_TYPE = v7.ENCODING_FILTER_CODES['nearest']
 
 
@@ -178,21 +172,20 @@ def layout_for_aspect_code(code):
 
 
 def layout_positions(layout):
-    """(kept, guests, extra): flattened V7_GRIDS indices in radius order.
+    """(kept, guests): flattened V7_GRIDS indices in radius order.
 
-    kept: 1,920 luma, 480 Cb, 480 Cr; guests: the next 500 luma (fold);
-    extra: the 96 luma after those (tail luma slots).
+    kept: 1,920 luma, 480 Cb, 480 Cr; guests: the next 500 luma (fold).
     """
     width, height = layout_size(layout)
     offsets = np.cumsum([0] + [rows*cols for rows, cols in v7.V7_GRIDS])
-    kept, guests, extra = [], None, None
+    kept, guests = [], None
     for plane, ((rows, cols), count) in enumerate(
             zip(v7.V7_GRIDS, PLANE_COUNTS)):
         u, v = (axis.ravel().astype(np.int64)
                 for axis in np.mgrid[:rows, :cols])
         key = u*u*width*width + v*v*height*height
         ordered = np.lexsort((v, u, key))
-        need = count + (FOLD_SLOTS+EXTRA_LUMA if plane == 0 else 0)
+        need = count + (FOLD_SLOTS if plane == 0 else 0)
         chosen = ordered[:need]
         if need > rows*cols or key[chosen].max() >= min(
                 key.reshape(rows, cols)[-1].min(),
@@ -200,10 +193,8 @@ def layout_positions(layout):
             raise ValueError(f'layout {layout} does not fit the {rows}x{cols} grid')
         kept.append(offsets[plane]+chosen[:count])
         if plane == 0:
-            guests = offsets[0]+chosen[count:count+FOLD_SLOTS]
-            extra = offsets[0]+chosen[count+FOLD_SLOTS:need]
-    return (np.concatenate(kept).astype(np.int64), guests.astype(np.int64),
-            extra.astype(np.int64))
+            guests = offsets[0]+chosen[count:need]
+    return np.concatenate(kept).astype(np.int64), guests.astype(np.int64)
 
 
 # ------------------------------------------------------------------- build
@@ -256,30 +247,14 @@ def _plane_of(positions):
     return (np.searchsorted(offsets, positions, side='right')-1).astype(int)
 
 
-def _mode_tables(layout, tail, curves, phase):
-    """Coefficient vector, statistics and ranking for one layout and tail."""
-    luma_slots = TAIL_LUMA_SLOTS[tail]
+def _base_tables(layout, curves, phase):
+    """Coefficient vector, statistics and ranking of one layout's base
+    tables: all 2,880 coefficients, strongest first."""
     variance = _variance_fn(curves, layout)
-    kept, guests, extra = layout_positions(layout)
-    luma = kept[:PLANE_COUNTS[0]]
-    chroma = kept[PLANE_COUNTS[0]:]
-    chroma_lam = variance(chroma)
-    # Drop the weakest chroma to make room for the extra luma (count 2,880).
-    if luma_slots:
-        keep = np.sort(np.argsort(-chroma_lam, kind='stable')[:len(chroma)-luma_slots])
-        chroma = chroma[keep]
-    extra = extra[:luma_slots]
-    positions = np.concatenate((luma, extra, chroma))
+    positions, guests = layout_positions(layout)
     lam = variance(positions)
     plane = _plane_of(positions)
-    is_extra = np.zeros(len(positions), bool)
-    is_extra[len(luma):len(luma)+len(extra)] = True
-    # Head and body: the strongest 2,224 of the ordinary coefficients. Tail:
-    # the extra luma first (fixed slots), then the rest by variance.
-    ordinary = np.flatnonzero(~is_extra)
-    ordinary = ordinary[np.argsort(-lam[ordinary], kind='stable')]
-    order = np.concatenate((ordinary[:v7.BODY_END], np.flatnonzero(is_extra),
-                            ordinary[v7.BODY_END:]))
+    order = np.argsort(-lam, kind='stable')
     mu = np.zeros(len(positions))
     offsets = np.cumsum([0] + [rows*cols for rows, cols in v7.V7_GRIDS])
     for index, position in enumerate(positions):
@@ -289,7 +264,6 @@ def _mode_tables(layout, tail, curves, phase):
     gain /= np.sqrt(np.mean((gain*gain*lam)[order[:v7.BODY_END]]))
     tables = {'positions': positions, 'mu': mu, 'lam': lam, 'order': order,
               'gain': gain, 'guests': guests, 'guest_lam': variance(guests),
-              'tail_luma_slots': np.int64(luma_slots),
               'unit_rms': np.float64(1.0)}
     probe_model = _assemble(tables, phase, 1.0)
     synth = (np.random.default_rng(v7.LEVEL_SEED).standard_normal(len(lam)) *
@@ -300,8 +274,8 @@ def _mode_tables(layout, tail, curves, phase):
 
 
 def _pixel_tables(layout, grid, curves, phase):
-    """Coefficient vector, statistics and ranking of one pixel grid (the
-    chroma tail; the fixed tail is cut from it like the ordinary layouts')."""
+    """Coefficient vector, statistics and ranking of one pixel grid (its
+    base tables; the wire's are cut from them like the ordinary layouts')."""
     variance = _variance_fn(curves, layout)
     positions, guests = pixel_positions(layout, grid)
     lam = variance(positions)
@@ -331,7 +305,7 @@ def _pixel_tables(layout, grid, curves, phase):
     gain /= np.sqrt(np.mean((gain*gain*lam)[order[:v7.BODY_END]]))
     tables = {'positions': positions, 'mu': mu, 'lam': lam, 'order': order,
               'gain': gain, 'guests': guests, 'guest_lam': variance(guests),
-              'tail_luma_slots': np.int64(0), 'unit_rms': np.float64(1.0)}
+              'unit_rms': np.float64(1.0)}
     probe_model = _assemble(tables, phase, 1.0)
     synth = (np.random.default_rng(v7.LEVEL_SEED).standard_normal(len(lam)) *
              np.sqrt(lam) + mu)
@@ -348,7 +322,7 @@ def build_pixel(_args=None):
     for grid in PIXEL_GRID_NAMES:
         for layout in LAYOUT_NAMES:
             for key, value in _pixel_tables(layout, grid, curves, phase).items():
-                arrays[f'{grid}/{_slug(layout)}/chroma/{key}'] = np.asarray(value)
+                arrays[f'{grid}/{_slug(layout)}/{BASE_TABLES}/{key}'] = np.asarray(value)
     buffer = io.BytesIO()
     np.savez(buffer, **arrays)
     blob = buffer.getvalue()
@@ -359,20 +333,22 @@ def build_pixel(_args=None):
 
 
 def build(_args=None):
+    """Write the base tables. (The pinned file was built with this recipe's
+    numerics at the time and also holds the retired rotating-tail tables;
+    a rebuild writes a different file and needs a new pin.)"""
     import io
     curves = _canonical_curves()
     phase = v7._frozen_tables()['phase']
     arrays = {}
     for layout in LAYOUT_NAMES:
-        for tail in FROZEN_TAIL_MODES:
-            for key, value in _mode_tables(layout, tail, curves, phase).items():
-                arrays[f'{_slug(layout)}/{tail}/{key}'] = np.asarray(value)
+        for key, value in _base_tables(layout, curves, phase).items():
+            arrays[f'{_slug(layout)}/{BASE_TABLES}/{key}'] = np.asarray(value)
     buffer = io.BytesIO()
     np.savez(buffer, **arrays)
     blob = buffer.getvalue()
     TABLES.write_bytes(blob)
     digest = hashlib.sha256(blob).hexdigest()
-    print(f"{TABLES.name}: {len(LAYOUT_NAMES)} layouts x {len(FROZEN_TAIL_MODES)} tails; pin TABLES_SHA256 = '{digest}'")
+    print(f"{TABLES.name}: {len(LAYOUT_NAMES)} layouts; pin TABLES_SHA256 = '{digest}'")
     return digest
 
 
@@ -391,8 +367,8 @@ def _frozen(pixel=False):
 
 
 def _fixed_tail_tables(tables):
-    """The chroma-tail tables cut to what one packet carries: head, body and
-    the 96 strongest tail coefficients, which then ride in every packet."""
+    """Base tables cut to what one packet carries: head, body and the 96
+    strongest tail coefficients, which then ride in every packet."""
     order = np.asarray(tables['order'])
     sent = order[:v7.BODY_END+v7.TAIL_PER]
     keep = np.sort(sent)
@@ -401,27 +377,35 @@ def _fixed_tail_tables(tables):
     out = {key: np.asarray(tables[key])[keep]
            for key in ('positions', 'mu', 'lam', 'gain')}
     out.update(order=index[sent], guests=tables['guests'],
-               guest_lam=tables['guest_lam'],
-               tail_luma_slots=np.int64(v7.TAIL_PER),
-               unit_rms=tables['unit_rms'])
+               guest_lam=tables['guest_lam'], unit_rms=tables['unit_rms'])
     return out
 
 
-def layout_tables(layout, tail, pixel=None):
-    """One layout's tables; ``pixel`` names a pixel grid (PIXEL_GRIDS)."""
+def base_tables(layout, pixel=None):
+    """One layout's base tables (all 2,880 coefficients, or the pixel
+    grid's); ``pixel`` names a pixel grid (PIXEL_GRIDS)."""
     if pixel and pixel not in PIXEL_GRIDS:
         raise ValueError(f'unknown pixel grid {pixel!r}; choose {PIXEL_GRID_NAMES}')
-    if pixel and tail not in PIXEL_TAIL_MODES:
-        raise ValueError(f'pixel grids have no {tail!r} tail; choose {PIXEL_TAIL_MODES}')
-    if tail == 'fixed':
-        return _fixed_tail_tables(layout_tables(layout, 'chroma', pixel))
     frozen = _frozen(bool(pixel))
-    prefix = (f'{pixel}/' if pixel else '')+f'{_slug(layout)}/{tail}/'
+    prefix = (f'{pixel}/' if pixel else '')+f'{_slug(layout)}/{BASE_TABLES}/'
     tables = {key[len(prefix):]: value for key, value in frozen.items()
               if key.startswith(prefix)}
     if not tables:
-        raise ValueError(f'no frozen tables for layout {layout!r}, tail {tail!r}')
+        raise ValueError(f'no frozen tables for layout {layout!r}')
     return tables
+
+
+def layout_tables(layout, pixel=None):
+    """The tables the wire uses for one layout (fixed tail)."""
+    return _fixed_tail_tables(base_tables(layout, pixel))
+
+
+def assemble_model(base_model, tables):
+    """A V7 model over ``tables`` at the base model's level and phase."""
+    name = v7.ENCODING_FILTERS[int(base_model.encoding_type)]
+    canonical = float(v7._frozen_tables()[f'{name}/unit_rms'])
+    return _assemble(tables, base_model.phase,
+                     float(base_model.scale)*canonical, template=base_model)
 
 
 class AspectCoder:
@@ -449,26 +433,13 @@ class AspectCoder:
         return self._grid.inverse(full)
 
 
-def _rank_tables(order, luma_slots):
-    """Per tail phase: head/body as V7, then the tail slots' contents.
-
-    The first ``luma_slots`` tail ranks are in every packet; the remaining
-    tail slots rotate through the rest over the 7 tail phases.
-    """
-    order = np.asarray(order)
-    head_body = order[:v7.BODY_END]
-    fixed = order[v7.BODY_END:v7.BODY_END+luma_slots]
-    pool = order[v7.BODY_END+luma_slots:]
-    rotating = v7.TAIL_PER-luma_slots
-    tables = []
-    for phase in range(v7.TAIL_PHASES):
-        part = pool[rotating*phase:rotating*(phase+1)] if rotating else pool[:0]
-        tail = np.concatenate((fixed, part))
-        tail = np.pad(tail, (0, v7.TAIL_PER-len(tail)), constant_values=-1)
-        # frame_ranks(order, 0) takes phase 0's 96 tail entries from index
-        # BODY_END, which is exactly this phase's tail.
-        tables.append(v7.frame_ranks(np.concatenate((head_body, tail)), 0))
-    return tuple(tables)
+def _rank_tables(order):
+    """Head/body as V7, then the 96 tail slots: the same in every packet
+    (one table repeated for each of the 7 tail phases)."""
+    order = np.asarray(order)[:v7.BODY_END+v7.TAIL_PER]
+    # frame_ranks(order, 0) takes the 96 tail entries from index BODY_END.
+    ranks = v7.frame_ranks(order, 0)
+    return (ranks,)*v7.TAIL_PHASES
 
 
 def _assemble(tables, phase, target_rms, template=None):
@@ -478,7 +449,7 @@ def _assemble(tables, phase, target_rms, template=None):
     mu = np.asarray(tables['mu'])
     head = np.zeros(len(lam), bool)
     head[order[:v7.HEAD]] = True
-    ranks = _rank_tables(order, int(tables['tail_luma_slots']))
+    ranks = _rank_tables(order)
     priors = tuple(v7.block_priors(gain, lam, idx) for idx in ranks)
     mu32 = np.asarray(mu, dtype=np.float32)
     lam32 = np.asarray(lam, dtype=np.float32)
@@ -503,9 +474,9 @@ def _assemble(tables, phase, target_rms, template=None):
 class AspectFoldCodec(FoldCodec):
     """Fold 500's host/guest split over an aspect layout's coefficients."""
 
-    def __init__(self, model, layout, tail, tables, step, pixel=None):
+    def __init__(self, model, layout, tables, step, pixel=None):
         self.model, self.M = model, len(tables['guests'])
-        self.layout, self.tail, self.pixel = layout, tail, pixel
+        self.layout, self.tail, self.pixel = layout, TAIL, pixel
         self.filter, self.conf_min = 'box', .9
         self.design_db, self.fitted_on = 30.0, f'aspect layout {layout} (analytic)'
         self.signature, self.noise_max = SIGNATURE_SLOTS, .3
@@ -533,7 +504,7 @@ class AspectFoldCodec(FoldCodec):
             # layout, with every other sign flipped for each later grid
             # (exactly uncorrelated, so the wrong grid scores zero).
             seed = int(hashlib.sha256(
-                f'{PIXEL_TABLES_SHA256}/{layout}/{tail}'.encode()).hexdigest()[:16], 16)
+                f'{PIXEL_TABLES_SHA256}/{layout}/{TAIL}'.encode()).hexdigest()[:16], 16)
             self.pattern = np.random.default_rng(seed).choice(
                 [-1.0, 1.0], self.signature)
             flip = PIXEL_GRID_NAMES.index(self.pixel)
@@ -570,20 +541,17 @@ class AspectFoldWire:
     fold_slots = FOLD_SLOTS
     wire_profile = PROFILE
 
-    def __init__(self, layout='auto', tail='chroma', pixel=None):
+    tail = TAIL
+
+    def __init__(self, layout='auto', *, pixel=None):
         if layout not in LAYOUT_CHOICES:
             raise ValueError(f'unknown aspect layout {layout!r}; choose {LAYOUT_CHOICES}')
-        if tail not in TAIL_MODES:
-            raise ValueError(f'unknown aspect tail mode {tail!r}; choose {TAIL_MODES}')
         if pixel and pixel not in PIXEL_GRIDS:
             raise ValueError(f'unknown pixel grid {pixel!r}; choose {PIXEL_GRID_NAMES}')
-        if pixel and tail not in PIXEL_TAIL_MODES:
-            raise ValueError(f'pixel grids have no {tail!r} tail; choose {PIXEL_TAIL_MODES}')
-        self.layout, self.tail, self.pixel = layout, tail, pixel or None
+        self.layout, self.pixel = layout, pixel or None
         self._inside = {}
         self._models = {}
         self._codecs = {}
-        self._tails = {}
         self._lock = threading.Lock()
 
     def layout_for(self, aspect_code):
@@ -601,18 +569,13 @@ class AspectFoldWire:
         key = (id(base_model), layout)
         with self._lock:
             if key not in self._models:
-                name = v7.ENCODING_FILTERS[int(base_model.encoding_type)]
-                canonical = float(v7._frozen_tables()[f'{name}/unit_rms'])
-                target = float(base_model.scale)*canonical
-                tables = layout_tables(layout, self.tail, self.pixel)
-                model = _assemble(tables, base_model.phase, target,
-                                  template=base_model)
+                tables = layout_tables(layout, self.pixel)
+                model = assemble_model(base_model, tables)
                 if self.pixel:
                     model = replace(model, encoding_type=PIXEL_ENCODING_TYPE)
                 self._models[key] = model
                 self._codecs[id(model)] = AspectFoldCodec(
-                    model, layout, self.tail, tables, _fold500_step(),
-                    pixel=self.pixel)
+                    model, layout, tables, _fold500_step(), pixel=self.pixel)
             return self._models[key]
 
     def pixel_shapes(self, layout):
@@ -644,32 +607,6 @@ class AspectFoldWire:
         return model, self.codec(model).encode_coefficients(values)
 
     # -------------------------------------------------------------- receiver
-    @property
-    def rotates(self):
-        return TAIL_FIXED_SLOTS[self.tail] < v7.TAIL_PER
-
-    def tail_prior(self, model, layout):
-        """Previous-packet coefficients for the rotating tail (own store)."""
-        if not self.rotates:
-            return model.mu
-        store = self._tails.get(layout)
-        if store is None:
-            # One store at a time: a layout change is a discontinuity.
-            self._tails.clear()
-            store = self._tails[layout] = v7.TailStore()
-        return store.prior(model)
-
-    def remember(self, model, layout, result):
-        if not self.rotates or result.status == 'lost':
-            return
-        tail_slice = result.diag.get('tail_slice')
-        store = self._tails.get(layout)
-        if tail_slice is not None and store is not None:
-            store.update(model, result.coeffs, tail_slice)
-
-    def reset(self):
-        self._tails.clear()
-
     def values(self, model, result, metadata_confirmed=True):
         """Grid values for display: unfold the hosts, place the layout."""
         codec = self.codec(model)

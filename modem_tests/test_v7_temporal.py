@@ -194,7 +194,7 @@ class TemporalFusionTests(unittest.TestCase):
     def test_real_aspect_fold_packets_through_noise(self):
         import tone_code
         from aspect_fold import AspectFoldWire
-        wire = AspectFoldWire('auto', 'fixed')
+        wire = AspectFoldWire('auto')
         rng = np.random.default_rng(17)
         values = v7_live._picture_values(
             self.model, _test_frame(), 'box', brightness=1.0)[0]

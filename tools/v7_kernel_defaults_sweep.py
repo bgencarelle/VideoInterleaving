@@ -160,7 +160,7 @@ class AspectStereoBenchmark(AspectMonoBenchmark):
 
         target_rms = .1521 / np.sqrt(1 + 10**(v7.CLOCK_REL_DB/10))
         self.model = v7.load_model(target_rms, encode_filter='box')
-        self.wire = AspectFoldWire(layout='auto', tail='fixed')
+        self.wire = AspectFoldWire(layout='auto')
         self.layouts = {}
         for code in range(8):
             layout = self.wire.layout_for(code)

@@ -18,8 +18,8 @@ from animation_modem import v7                                           # noqa:
 from common import TARGET                                                # noqa: E402
 import aspect_fold                                                       # noqa: E402
 from aspect_fold import (ASPECT_CODE_LAYOUT, LAYOUT_NAMES, PLANE_COUNTS,  # noqa: E402
-                         TAIL_LUMA_SLOTS, TAIL_MODES, AspectFoldWire,
-                         layout_positions, layout_tables)
+                         AspectFoldWire, base_tables, layout_positions,
+                         layout_tables)
 from live_fold import LiveFold                                           # noqa: E402
 import tone_code                                                         # noqa: E402
 from tools import v7_live                                                # noqa: E402
@@ -96,12 +96,12 @@ def _round_trip(base, values, aspect, profile, packets=9):
 class AspectLayoutTests(unittest.TestCase):
     def test_layouts_follow_the_picture_shape_and_fit_the_grid(self):
         for layout in LAYOUT_NAMES:
-            kept, guests, extra = layout_positions(layout)
+            kept, guests = layout_positions(layout)
             with self.subTest(layout=layout):
                 self.assertEqual(len(kept), sum(PLANE_COUNTS))
                 self.assertEqual(len(guests), aspect_fold.FOLD_SLOTS)
                 self.assertEqual(len(np.unique(np.concatenate(
-                    (kept, guests, extra)))), len(kept)+len(guests)+len(extra))
+                    (kept, guests)))), len(kept)+len(guests))
                 luma = [_grid_uv(index) for index in kept[:PLANE_COUNTS[0]]]
                 rows = max(u for _, u, _ in luma)+1
                 cols = max(v for _, _, v in luma)+1
@@ -111,7 +111,7 @@ class AspectLayoutTests(unittest.TestCase):
                 elif width < height:
                     self.assertGreater(rows, cols)
                 self.assertTrue(all(_grid_uv(index)[0] == 0
-                                    for index in np.concatenate((guests, extra))))
+                                    for index in guests))
         wide = {v for _, _, v in map(_grid_uv, layout_positions('16:9')[0][:1920])}
         self.assertEqual(max(wide)+1, 66)       # vs 40 horizontal steps today
 
@@ -128,63 +128,54 @@ class AspectLayoutTests(unittest.TestCase):
     def test_frozen_tables_are_pinned(self):
         self.assertIsNotNone(aspect_fold.TABLES_SHA256)
         for layout in LAYOUT_NAMES:
-            for tail in TAIL_MODES:
-                tables = layout_tables(layout, tail)
-                self.assertEqual(len(tables['positions']),
-                                 v7.BODY_END+v7.TAIL_PER if tail == 'fixed'
-                                 else sum(PLANE_COUNTS))
+            self.assertEqual(len(base_tables(layout)['positions']),
+                             sum(PLANE_COUNTS))
+            self.assertEqual(len(layout_tables(layout)['positions']),
+                             v7.BODY_END+v7.TAIL_PER)
 
-    def test_tail_modes_keep_head_and_body_and_fill_the_tail(self):
-        base = v7.load_model(TARGET, 'box')
-        for tail in TAIL_MODES:
-            wire = AspectFoldWire('16:9', tail)
-            model = wire.model_for(base, '16:9')
-            luma_slots = TAIL_LUMA_SLOTS[tail]
-            plane = np.asarray(model.plane)
-            with self.subTest(tail=tail):
-                self.assertEqual(np.count_nonzero(plane == 0), 1920+luma_slots)
-                self.assertEqual(sorted(model.order.tolist()),
-                                 list(range(len(model.order))))
-                extra = np.arange(1920, 1920+luma_slots)
-                self.assertFalse(np.isin(extra, model.order[:v7.BODY_END]).any())
-                seen = set()
-                for ranks in model.rank_tables:
-                    sent = set(ranks[ranks >= 0].tolist())
-                    self.assertTrue(set(extra.tolist()) <= sent)
-                    seen |= sent
-                pool = len(model.order)-v7.BODY_END-luma_slots
-                expected = (v7.BODY_END+luma_slots +
-                            min(pool, (v7.TAIL_PER-luma_slots)*v7.TAIL_PHASES))
-                self.assertEqual(len(seen), expected)
-                codec = wire.codec(model)
-                self.assertTrue(np.all(plane[codec.hosts] == 0))
+    def test_only_the_fixed_tail_exists(self):
+        # Fixes list item 19: the rotating tails (chroma, split, luma) are
+        # gone; nothing names a tail.
+        for name in ('TAIL_MODES', 'TAIL_LUMA_SLOTS', 'FROZEN_TAIL_MODES',
+                     'PIXEL_TAIL_MODES'):
+            self.assertFalse(hasattr(aspect_fold, name), name)
+        self.assertEqual(AspectFoldWire('16:9').tail, 'fixed')
+        with self.assertRaises(TypeError):
+            AspectFoldWire('16:9', 'chroma')
+        self.assertFalse(hasattr(AspectFoldWire, 'tail_prior'))
 
     def test_fixed_tail_sends_the_same_coefficients_in_every_packet(self):
         base = v7.load_model(TARGET, 'box')
-        wire = AspectFoldWire('16:9', 'fixed')
+        wire = AspectFoldWire('16:9')
         model = wire.model_for(base, '16:9')
-        chroma = AspectFoldWire('16:9', 'chroma')
-        reference = chroma.model_for(base, '16:9')
-        self.assertFalse(wire.rotates)
-        self.assertTrue(chroma.rotates)
+        plane = np.asarray(model.plane)
+        self.assertEqual(np.count_nonzero(plane == 0), 1920)
         self.assertEqual(len(model.order), v7.BODY_END+v7.TAIL_PER)
+        self.assertEqual(sorted(model.order.tolist()),
+                         list(range(len(model.order))))
         for ranks in model.rank_tables[1:]:
             np.testing.assert_array_equal(ranks, model.rank_tables[0])
-        # Exactly what the chroma tail's first packet carries, same statistics.
-        sent = reference.order[:v7.BODY_END+v7.TAIL_PER]
-        positions = np.asarray(reference.coder.positions)[sent]
+        sent = model.rank_tables[0]
+        self.assertEqual(len(set(sent[sent >= 0].tolist())), len(model.order))
+        self.assertTrue(np.all(plane[wire.codec(model).hosts] == 0))
+        # Head, body and the 96 strongest of the base tables' tail, with the
+        # base tables' statistics.
+        reference = base_tables('16:9')
+        kept = np.asarray(reference['order'])[:v7.BODY_END+v7.TAIL_PER]
         np.testing.assert_array_equal(
-            np.asarray(model.coder.positions)[model.order], positions)
+            np.asarray(model.coder.positions)[model.order],
+            np.asarray(reference['positions'])[kept])
         np.testing.assert_array_equal(model.lam[model.order],
-                                      reference.lam[sent])
-        np.testing.assert_array_equal(wire.tail_prior(model, '16:9'), model.mu)
+                                      np.asarray(reference['lam'])[kept])
+        tail = model.order[v7.BODY_END:]
+        self.assertTrue(np.all(plane[tail] > 0))       # the tail is colour
 
-    def test_live_receiver_decodes_every_tail_mode_as_a_stream(self):
+    def test_live_receiver_decodes_the_profile_as_a_stream(self):
         import tone_code
         base = v7.load_model(TARGET, 'box')
         values = v7_live._values(base, _text_frame(), 'box', brightness=1.0)[0]
-        for tail in TAIL_MODES:
-            wire = AspectFoldWire('auto', tail)
+        for layout in ('auto', '16:9'):
+            wire = AspectFoldWire(layout)
             model, coeffs = wire.encode_coefficients(base, values, 3)
             audio = np.concatenate([tone_code.add_tone_code(
                 v7.encode_pulse_frame_coeffs(
@@ -193,8 +184,6 @@ class AspectLayoutTests(unittest.TestCase):
                     pulse_profile_code=wire.pulse_profile_code),
                 counter, tone_code.encode_status(wire.status_mode))
                 for counter in range(1, 6)]).astype(np.float32)
-            # The profile fixes the tail (fixes list item 9); the codec's
-            # other tails are still decoded when its wire is given them.
             profile = v7_live._AdaptiveProfileDecoder(
                 v7_live._experimental_fold(500), base)
             profile.aspect_wire = wire
@@ -210,9 +199,9 @@ class AspectLayoutTests(unittest.TestCase):
             finally:
                 profile.uninstall()
             good = [result for result in results if result.status != 'lost']
-            with self.subTest(tail=tail):
+            with self.subTest(layout=layout):
                 self.assertGreaterEqual(len(good), 3)
-                self.assertEqual(good[-1].diag['aspect_tail'], tail)
+                self.assertNotIn('aspect_tail', good[-1].diag)
                 shown = profile.values(base, good[-1])
                 self.assertEqual(shown.shape, values.shape)
                 self.assertLess(float(np.mean((shown-values)[:96*80]**2)), .02)
@@ -231,7 +220,7 @@ class AspectLayoutTests(unittest.TestCase):
 
     def test_companded_guests_survive_far_past_the_old_clip(self):
         base = v7.load_model(TARGET, 'box')
-        wire = AspectFoldWire('3:4', 'chroma')
+        wire = AspectFoldWire('3:4')
         model = wire.model_for(base, '3:4')
         codec = wire.codec(model)
         self.assertEqual(codec.compand, (12.0, 4.0))
@@ -276,10 +265,9 @@ class AspectLayoutTests(unittest.TestCase):
         base = v7.load_model(TARGET, 'box')
         identities = set()
         for layout in ('16:9', '4:3'):
-            for tail in TAIL_MODES:
-                wire = AspectFoldWire(layout, tail)
-                identities.add(wire.codec(wire.model_for(base, layout)).identity)
-        self.assertEqual(len(identities), 2*len(TAIL_MODES))
+            wire = AspectFoldWire(layout)
+            identities.add(wire.codec(wire.model_for(base, layout)).identity)
+        self.assertEqual(len(identities), 2)
 
 
 class AspectWireTests(unittest.TestCase):
@@ -291,7 +279,7 @@ class AspectWireTests(unittest.TestCase):
         cls.values = v7_live._values(cls.base, cls.frame, 'box', brightness=1.0)[0]
 
     def test_auto_layout_follows_the_packet_aspect_code(self):
-        wire = AspectFoldWire('auto', 'chroma')
+        wire = AspectFoldWire('auto')
         self.assertEqual(wire.layout_for(self.aspect), '16:9')
         self.assertIsNone(wire.layout_for(None))
         self.assertEqual(AspectFoldWire('3:4').layout_for(self.aspect), '3:4')
@@ -302,17 +290,12 @@ class AspectWireTests(unittest.TestCase):
 
         fold_values, fold_ok = _round_trip(self.base, self.values, self.aspect,
                                            'fold-500')
-        errors = {}
-        for tail in TAIL_MODES:
-            values, ok = _round_trip(self.base, self.values, self.aspect,
-                                     ('16:9', tail))
-            self.assertEqual(ok, fold_ok)
-            errors[tail] = luma_error(values)
-        # Vertical strokes need horizontal detail: every 16:9 layout beats
-        # the 5:6 corner, and luma tail slots add a little more.
-        for tail, error in errors.items():
-            self.assertLess(error, .9*luma_error(fold_values), tail)
-        self.assertLessEqual(errors['luma'], errors['chroma'])
+        values, ok = _round_trip(self.base, self.values, self.aspect,
+                                 ('16:9',))
+        self.assertEqual(ok, fold_ok)
+        # Vertical strokes need horizontal detail: the 16:9 layout beats the
+        # 5:6 corner.
+        self.assertLess(luma_error(values), .9*luma_error(fold_values))
 
     def test_sender_cli_and_profile_mapping(self):
         args = v7_live.parser().parse_args([

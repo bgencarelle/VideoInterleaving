@@ -198,7 +198,7 @@ def encode(packets=PACKETS):
     from common import TARGET
     import tone_code
     base = v7.load_model(TARGET, 'box')
-    wire = AspectFoldWire('16:9', 'chroma')
+    wire = AspectFoldWire('16:9')
     from PIL import Image
     with Image.open(v7.REFERENCE_FIXTURE) as image:
         values = v7.image_values(v7.prepare_image(image.convert('RGB'), 'box'),

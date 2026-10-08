@@ -488,12 +488,15 @@ class SenderGuiTests(unittest.TestCase):
         self.assertNotIn('--no-eof-marker', command)
 
     def test_the_tail_is_the_profiles_and_old_saved_tails_are_dropped(self):
-        # Fixes list item 9: no tail setting anywhere; a saved one is ignored.
+        # Fixes list items 9 and 19: no tail setting anywhere (one tail
+        # exists); a saved one is ignored.
         import json
         from tools.v7_send_gui import _load_sender_preferences
         self.assertFalse(hasattr(v7_live.parser().parse_args(
             ['send', '--device', 'null', '--source', 'test']), 'aspect_tail'))
-        self.assertEqual(v7_live.ASPECT_FOLD_TAIL, 'fixed')
+        v7_live._ensure_test_modem_path()
+        import aspect_fold
+        self.assertEqual(aspect_fold.AspectFoldWire().tail, 'fixed')
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp)/'prefs.json'
             for version, saved_kernel, expected_kernel in (

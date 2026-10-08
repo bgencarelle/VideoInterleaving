@@ -67,7 +67,7 @@ class ReverseTortureTests(unittest.TestCase):
             for counter in range(1, PACKETS+1)]).astype(np.float64)
 
     def _aspect_fold(self):
-        wire = AspectFoldWire('auto', v7_live.ASPECT_FOLD_TAIL)
+        wire = AspectFoldWire('auto')
         values, code = self._values(lambda c: v7_live._chroma_sent_masks(
             wire.codec(wire.model_for(self.base, wire.layout_for(c)))))
         model, coefficients = wire.encode_coefficients(self.base, values, code)

@@ -159,7 +159,7 @@ Copy this and fill it in. Leave out what is not known; do not guess lines.
 - Notes: the score lived in the test tool removed with item 11, so nothing uses it now. Open until the owner picks a replacement measure, if any.
 
 ### 19. The rotating tail modes are still in the codec
-- Status: open
+- Status: solved (not yet tested in a second pass)
 - What is wrong: since item 9 the stereo profile always uses the fixed tail,
   but the codec still holds the rotating tails (chroma, split, luma), their
   tail memory and the seven per-slice tail layouts, unreachable from the
@@ -184,9 +184,37 @@ Copy this and fill it in. Leave out what is not known; do not guess lines.
   every packet): vertical lines chart 16.1 → 18.4 dB, visibly finer lines;
   horizontal lines 20.4 → 20.4; slant edge 32.2 → 32.4; face 29.4 → 29.3.
   Colour a little worse: edge width 5.4-5.9 → 5.8-6.4 px, leak 4-8% → 7-10%.
+- No tail (owner's request; same captures as the colour tail, the 96 tail
+  coefficients left out at the receiver): colour edge width 5.8-6.5 px, leak
+  7-10%, the same as the luma tail; lines and face the same as the colour
+  tail. So the colour tail buys about half a pixel of colour edge and 3
+  points of leak; the luma tail buys about 2.3 dB on fine vertical lines.
 - Before removing: aspect-mono-500 builds on the `chroma` tables (no tail of
   its own), so those stay whichever tail wins; the `luma` tables stay if the
   luma tail is chosen.
+- Decision (owner): the colour tail is the one tail; delete the others. The
+  luma tail also aliased on the vertical lines chart (missed in the
+  measurement above).
+- Done: `aspect_fold.py` has one tail (`TAIL = 'fixed'`, no `TAIL_MODES`,
+  `TAIL_LUMA_SLOTS`, `FROZEN_TAIL_MODES`, `PIXEL_TAIL_MODES`); the wire
+  takes no tail argument; the aspect wire's tail memory (`tail_prior`,
+  `remember`) is gone, the receiver uses the model mean as the prior;
+  `ASPECT_FOLD_TAIL` and the `aspect_tail` diagnostic are gone from
+  `tools/v7_live.py`; aspect-mono-500 reads the base tables directly. The
+  frozen `aspect_tables.npz` is unchanged byte for byte (its hash is part of
+  every fold signature), so it still holds the unused `split` and `luma`
+  tables; the build recipe writes base tables only.
+- Not touched: the tail memory in `animation_modem/v7.py` (`TailStore`,
+  `PulseState.tail`, `--no-tail-memory`). It is V7's own rotating tail,
+  still used by the deprecated send profiles (`fold-500` and others).
+- Checked: wire fingerprint identical before and after (pulse audio for all
+  eight aspect codes, pixel grids' tables and signatures, aspect-mono
+  models); live at 96 kHz, the sender's output is sample-identical to
+  captures made before the change (aspect-fold-500 and aspect-mono-500,
+  face), and the receiver's pictures differ from the old receiver's by no
+  more than two runs of the same receiver differ from each other (3 levels
+  in 255). Unit tests pass (two failures are missing packages in this
+  sandbox: `cv2`, `turbojpeg`).
 
 ### 20. Packets on slices 5 and 6 pass a damaged metadata check
 - Status: open

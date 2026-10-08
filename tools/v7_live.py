@@ -1482,7 +1482,6 @@ def _run_send_session(args):
                       if getattr(args, 'dct_encode', False) and
                       dct_options.get('pixel') else None)
         aspect_wire = AspectFoldWire(getattr(args, 'aspect_layout', 'auto'),
-                                     ASPECT_FOLD_TAIL,
                                      pixel=pixel_grid)
         if pixel_grid:
             dct_options = dict(dct_options, pixel_shapes=tuple(
@@ -2426,21 +2425,17 @@ class _AdaptiveProfileDecoder:
         self.mono_channel_profile = mono_channel_profile
         self.mono_status_modes = frozenset(self.mono_wires)
         # Stereo Fold 500 with an aspect-matched coefficient layout; its
-        # layout and tail are receiver settings matching the sender's.
-        self.aspect_wire = AspectFoldWire(
-            aspect_layout, ASPECT_FOLD_TAIL)
+        # layout is a receiver setting matching the sender's.
+        self.aspect_wire = AspectFoldWire(aspect_layout)
         self.aspect_mode = self.aspect_wire.status_mode
         # The same profile on a pixel grid (the sender's Pixel encode); the
         # packet's metadata model bit says which, so nothing is set here.
         # Which pixel grid is not in the metadata: the fold signature
         # (different for every table) tells them apart.
-        from aspect_fold import (PIXEL_ENCODING_TYPE, PIXEL_GRID_NAMES,
-                                 PIXEL_TAIL_MODES)
+        from aspect_fold import PIXEL_ENCODING_TYPE, PIXEL_GRID_NAMES
         self.pixel_encoding_type = PIXEL_ENCODING_TYPE
-        pixel_tail = (self.aspect_wire.tail
-                      if self.aspect_wire.tail in PIXEL_TAIL_MODES else 'fixed')
         self.pixel_wires = {
-            grid: AspectFoldWire(aspect_layout, pixel_tail, pixel=grid)
+            grid: AspectFoldWire(aspect_layout, pixel=grid)
             for grid in PIXEL_GRID_NAMES}
         # Last confirmed grid (None: an ordinary layout), and packets since
         # its signature was last seen.
@@ -2529,11 +2524,9 @@ class _AdaptiveProfileDecoder:
         self._reset_capture_positions()
 
     def _reset_aspect_wires(self):
-        for wire in (getattr(self, 'aspect_wire', None),
-                     getattr(self, 'slice_wire', None),
-                     *getattr(self, 'pixel_wires', {}).values()):
-            if wire is not None:
-                wire.reset()
+        wire = getattr(self, 'slice_wire', None)
+        if wire is not None:
+            wire.reset()
         mono = getattr(self, 'aspect_mono_wire', None)
         if mono is not None and hasattr(mono, 'reset_nested'):
             mono.reset_nested()
@@ -2770,9 +2763,8 @@ class _AdaptiveProfileDecoder:
                 profile_model = aspect_wire.model_for(model, aspect_layout)
             except ValueError:
                 return held('unsupported_model_for_profile', observed_mode)
-            # The shared tail store follows the base model's ranks; this
-            # layout keeps its own.
-            prev_tail = aspect_wire.tail_prior(profile_model, aspect_layout)
+            # The fixed tail arrives whole in every packet: no tail memory.
+            prev_tail = profile_model.mu
         slices = False
         if mode == getattr(self, 'aspect_mono_mode', None):
             slices = hint.get('encoding_type')
@@ -2830,7 +2822,7 @@ class _AdaptiveProfileDecoder:
                         candidate = wire.model_for(model, aspect_layout)
                         other = self._real_decode(
                             candidate, x, tmap, counter,
-                            wire.tail_prior(candidate, aspect_layout),
+                            candidate.mu,
                             *args, **kwargs)
                         if other is not None and signed(wire, candidate, other):
                             aspect_wire, profile_model, result = (
@@ -2872,7 +2864,6 @@ class _AdaptiveProfileDecoder:
             if aspect_layout is not None:
                 result.diag['aspect_layout'] = aspect_layout
                 if mode == self.aspect_mode:
-                    result.diag['aspect_tail'] = aspect_wire.tail
                     result.diag['aspect_pixel'] = aspect_wire.pixel
             if mode in self.mono_status_modes and self._local.equalized is not None:
                 result.diag['mono_fold_eq'] = self._local.equalized
@@ -2910,7 +2901,6 @@ class _AdaptiveProfileDecoder:
             wire = self.pixel_wires.get(result.diag.get('aspect_pixel'),
                                         self.aspect_wire)
             profile_model = wire.model_for(model, layout)
-            wire.remember(profile_model, layout, result)
             return wire.values(profile_model, result)
         if result.diag.get('slices') and result.diag.get('aspect_layout'):
             return self.slice_values([self.slice_half(model, result)], result)
@@ -4533,11 +4523,6 @@ def _run_receive_session(args, fold, mono_wire=None, adaptive_profile=None,
 
 ASPECT_LAYOUT_CHOICES = ('auto', '1:1', '4:3', '3:2', '16:9', '3:4', '2:3',
                          '9:16')
-# aspect-fold-500's tail is part of the profile (fixes list item 9): the 96
-# tail slots carry the strongest tail colour values of the current packet.
-# At 12 pictures a second the eye does not blend successive packets, so the
-# rotating tails' older detail showed as stale colour on anything that moves.
-ASPECT_FOLD_TAIL = 'fixed'
 # Pixel encode on the aspect profile: 'robust' fits the ordinary slots,
 # 'large' adds fold guests (exact on clean links only).
 DEFAULT_PIXEL_GRID = 'robust'

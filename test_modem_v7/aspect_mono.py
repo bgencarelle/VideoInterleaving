@@ -25,8 +25,8 @@ import numpy as np
 from common import Grids, v7
 from folding import FoldCodec
 import tone_code
-from aspect_fold import (LAYOUT_CHOICES, TABLES_SHA256, AspectFoldWire,
-                         layout_for_aspect_code)
+from aspect_fold import (LAYOUT_CHOICES, TABLES_SHA256, assemble_model,
+                         base_tables, layout_for_aspect_code)
 from mono_video import (CHROMA_RANK_WEIGHT, FOLD_SLOTS, FRESH_SLOTS,
                         MONO_COLOUR_COMPAND, MONO_COLOUR_FOLD_D, SIGNATURE_SLOTS, MonoFreshFoldWire,
                         colour_fold_sets, colour_order, fresh_rank_tables)
@@ -34,8 +34,6 @@ from mono_video import (CHROMA_RANK_WEIGHT, FOLD_SLOTS, FRESH_SLOTS,
 PROFILE = 'aspect-mono-500'
 STATUS_MODE = tone_code.MONO_OFF
 TABLE_FORMAT = 'v7-aspect-mono-colour-fold-1'
-# The mono wire has no tail; use the tables with V7's plane split.
-BASE_TAIL = 'chroma'
 
 
 class AspectMonoCodec(FoldCodec):
@@ -85,7 +83,6 @@ class AspectMonoWire(MonoFreshFoldWire):
         if layout not in LAYOUT_CHOICES:
             raise ValueError(f'unknown aspect layout {layout!r}; choose {LAYOUT_CHOICES}')
         self.layout = layout
-        self._aspect = AspectFoldWire(layout, BASE_TAIL)
         super().__init__(model, train_frames=train_frames, side=side)
         # Build every layout this end may use before any audio runs.
         layouts = ((layout,) if layout != 'auto' else tuple(dict.fromkeys(
@@ -94,7 +91,9 @@ class AspectMonoWire(MonoFreshFoldWire):
             self.model_for(model, name)
 
     def layout_for(self, aspect_code):
-        return self._aspect.layout_for(aspect_code)
+        if self.layout != 'auto':
+            return self.layout
+        return layout_for_aspect_code(aspect_code)
 
     def coefficient_order(self, model):
         return colour_order(model)
@@ -108,7 +107,9 @@ class AspectMonoWire(MonoFreshFoldWire):
         layout = layout or self.layout_for(0)
         key = (id(model), layout)
         if key not in self._models:
-            aspect = self._aspect.model_for(model, layout)
+            # The mono wire has no tail: it builds on the aspect layout's
+            # base tables (all 2,880 coefficients) and ranks them itself.
+            aspect = assemble_model(model, base_tables(layout))
             ranks = fresh_rank_tables(aspect, self.coefficient_order(aspect))
             priors = tuple(v7.block_priors(aspect.gain, aspect.lam, rank)
                            for rank in ranks)

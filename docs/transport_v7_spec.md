@@ -963,16 +963,11 @@ follows it. When a packet's metadata fails, the receiver tries the last
 confirmed layout and shows the packet only if that layout's fold signature
 scores at least 0.5.
 
-Tail modes (`--aspect-tail`) say what the 96 tail slots carry:
-
-| Mode | Tail slots |
-|---|---|
-| `fixed` (default) | The 96 strongest of the 656 tail coefficients in every packet; the other 560 are not sent; no tail memory |
-| `chroma` | The 656 lowest-ranked coefficients (all chroma), 96 per packet over seven packets |
-| `split` | 48 further luma coefficients in every packet and 48 rotating chroma |
-| `luma` | 96 further luma coefficients in every packet; the 96 weakest chroma are not sent |
-
-The tail mode is not signalled. Sender and receiver must be set alike.
+The tail is fixed: the 96 tail slots carry the 96 strongest of the 656
+tail coefficients (all chroma) in every packet; the other 560 are not sent,
+and there is no tail memory. It is part of the profile, so nothing about it
+is signalled or set. The rotating tails (`chroma`, `split`, `luma`) were
+removed (fixes list item 19).
 
 ### 14.4 Pixel grids
 
@@ -999,8 +994,7 @@ Portrait layouts are the transposes.
   luma slots. The 16 lowest-ranked luma slots are filler in both grids and
   carry the fold signature, so every rectangle coefficient is carried. The
   receiver zeroes everything outside the rectangle before display.
-- **Tail.** `fixed` or `chroma` only. The receiver uses its aspect tail mode
-  when it is one of those, else `fixed`.
+- **Tail.** The fixed tail, as on the ordinary layouts.
 - **Signalling.** Status 0 with the metadata model bit set to `nearest`, which
   the ordinary layouts never send. The tables are in
   `test_modem_v7/pixel_tables.npz` (hash pinned).
@@ -1107,7 +1101,6 @@ Receiver:
   measured on coefficients drawn from the model; real pictures exceed it.
 - **The unfolded wire is not dispatched automatically.** It needs
   `receive --experimental-fold 0`.
-- **The aspect tail mode is not signalled** (section 14.3).
 - **The loop lock can learn from one packet.** `LoopLock` counts matching
   observations, not distinct packets, and the decoder may submit one packet's
   metadata more than once (splice and tone retries).

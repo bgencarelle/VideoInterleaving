@@ -186,8 +186,7 @@ def fitted_tables(base, layout, split, mean, variance):
     gain /= np.sqrt(np.mean((gain*gain*lam)[order[:v7.BODY_END]]))
     tables = {'positions': positions, 'guests': guests,
               'mu': mean[positions], 'lam': lam, 'order': order, 'gain': gain,
-              'guest_lam': variance[guests], 'tail_luma_slots': np.int64(96),
-              'unit_rms': np.float64(1)}
+              'guest_lam': variance[guests], 'unit_rms': np.float64(1)}
     probe = _assemble(tables, base.phase, 1)
     synth = np.random.default_rng(v7.LEVEL_SEED).standard_normal(2880)*np.sqrt(lam)+tables['mu']
     audio = v7.encode_frame_coeffs(probe, synth, 1)
@@ -197,10 +196,10 @@ def fitted_tables(base, layout, split, mean, variance):
 
 class FittedAspectWire(AspectFoldWire):
     def __init__(self, base, layout, tables):
-        super().__init__(layout, 'fixed')
+        super().__init__(layout)
         model = _assemble(tables, base.phase, TARGET, template=base)
         self.fitted_model = model
-        self._codecs[id(model)] = AspectFoldCodec(model, layout, 'fixed', tables, 1)
+        self._codecs[id(model)] = AspectFoldCodec(model, layout, tables, 1)
 
     def model_for(self, base_model, layout):
         if layout != self.layout:
@@ -211,7 +210,6 @@ class FittedAspectWire(AspectFoldWire):
 class FittedMonoWire(AspectMonoWire):
     def __init__(self, aspect, base):
         self.layout = aspect.layout
-        self._aspect = aspect
         model = aspect.fitted_model
         ranks = fresh_rank_tables(model, colour_order(model))
         priors = tuple(v7.block_priors(model.gain, model.lam, rank) for rank in ranks)
@@ -243,7 +241,7 @@ class ColorWire:
         self.kernel_name, self.split = kernel, split
         self.production = transform.name == 'pillow-ycbcr' and statistics is None and tables is None
         if self.production:
-            self.wire = (AspectFoldWire(layout, 'fixed') if profile == 'aspect-fold-500'
+            self.wire = (AspectFoldWire(layout) if profile == 'aspect-fold-500'
                          else AspectMonoWire(self.base, side='left', layout=layout))
         else:
             tables = tables or fitted_tables(self.base, layout, split, *statistics)

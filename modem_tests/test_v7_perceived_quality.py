@@ -49,7 +49,7 @@ class ClipAwareEncodeTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.base = v7.load_model(TARGET, 'box')
-        wire = AspectFoldWire('16:9', 'chroma')
+        wire = AspectFoldWire('16:9')
         cls.codec = wire.codec(wire.model_for(cls.base, '16:9'))
         cls.sent = cls.codec.sent_luma_mask().reshape(ROWS, COLS)
 
@@ -120,7 +120,7 @@ class LumaAdjustTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.base = v7.load_model(TARGET, 'box')
-        wire = AspectFoldWire('1:1', 'chroma')
+        wire = AspectFoldWire('1:1')
         cls.codec = wire.codec(wire.model_for(cls.base, '1:1'))
         cls.masks = v7_live._chroma_sent_masks(cls.codec)
         cls.grids = v7.V7_GRIDS
@@ -138,7 +138,11 @@ class LumaAdjustTests(unittest.TestCase):
         return float(np.sqrt(np.mean((_shown_luminance(luma, cb, cr)-target)**2)))
 
     def test_chroma_masks_are_the_layouts_sent_colour(self):
-        self.assertEqual([int(mask.sum()) for mask in self.masks], [480, 480])
+        # The fixed tail: head, body and tail colour of one packet.
+        plane = np.asarray(self.codec.model.plane)
+        self.assertEqual([int(mask.sum()) for mask in self.masks],
+                         [int((plane == 1).sum()), int((plane == 2).sum())])
+        self.assertLess(sum(int(mask.sum()) for mask in self.masks), 960)
 
     def test_coloured_edges_keep_the_source_luminance(self):
         values, target = self._encode(_colour_edge_frame())

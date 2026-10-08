@@ -12,7 +12,8 @@ for extra in (ROOT/'test_modem_v7', ROOT/'tools'):
 
 from animation_modem import v7                                           # noqa: E402
 from common import TARGET                                                # noqa: E402
-from aspect_fold import LAYOUT_NAMES, layout_positions                   # noqa: E402
+from aspect_fold import (LAYOUT_NAMES, assemble_model, base_tables,     # noqa: E402
+                         layout_positions)
 from aspect_mono import PROFILE, STATUS_MODE, AspectMonoWire              # noqa: E402
 from mono_video import (FOLD_SLOTS, FRESH_SLOTS, MONO_COLOUR_FOLD_D,     # noqa: E402
                         MONO_COLOUR_FOLD_TABLE_SHA256, MonoColourFoldWire)
@@ -69,9 +70,8 @@ class AspectMonoTests(unittest.TestCase):
                 self.assertTrue(np.isin(codec.hosts, sent).all())
                 self.assertFalse(np.isin(codec.guest_model_indices, sent).any())
                 self.assertEqual(codec.D, MONO_COLOUR_FOLD_D)
-                np.testing.assert_allclose(model.scale,
-                                           self.wire._aspect.model_for(
-                                               self.base, layout).scale*np.sqrt(2))
+                np.testing.assert_allclose(model.scale, assemble_model(
+                    self.base, base_tables(layout)).scale*np.sqrt(2))
                 identities.add(codec.identity)
         self.assertEqual(len(identities), len(LAYOUT_NAMES))
         self.assertNotIn(MONO_COLOUR_FOLD_TABLE_SHA256, identities)
