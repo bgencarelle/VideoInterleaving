@@ -1,8 +1,7 @@
 """How the receiver draws a picture, said once.
 
-The receiver's display defaults (tools/v7_gl_viewer.py) are read from here,
-and a sender kernel that corrects for the viewer (dct_kernels/viewer_solve.py)
-can read the same description instead of assuming one.
+The receiver's display defaults (tools/v7_gl_viewer.py, used by both the
+command-line viewer and the receiver GUI) are read from here.
 """
 
 RECEIVER_DISPLAY = {

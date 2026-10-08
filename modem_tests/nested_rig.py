@@ -1,34 +1,18 @@
-"""Score the nested-fold modes against stock through the live receiver.
+"""The live sender's wires and the live receiver's profile dispatcher, in
+memory, for the nested-fold unit tests.
 
-Everything here uses the code a real link uses: the live sender's values and
-wires build the packets, the receiver's profile dispatcher decodes them, and
-the picture scored is the one the dispatcher would show.  Impairments are the
-repository's torture cases; speed and reverse follow
-``modem_tests/test_v7_reverse_torture.py`` (a waveform is generated, resampled
-or reversed, and decoded as usual).
-
-    .venv/bin/python tools/v7_nested_eval.py torture --pictures a.png b.png
-    .venv/bin/python tools/v7_nested_eval.py playback --pictures a.png
-
-Synthetic channels are not tape validation.
+Not a picture-quality judge: pictures are judged only through the live
+sender and receiver (docs/V7_FIXES.md, testing rules). This used to be part
+of tools/v7_nested_eval.py, which was retired with fixes list items 11-13.
 """
-import argparse
 import io
-import json
-import sys
 from contextlib import redirect_stdout
-from pathlib import Path
-
-ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT))
 
 import numpy as np
 from scipy.signal import resample_poly
 
 from animation_modem import v7
-from tools import v7_live, v7_sk_study as study
-from tools.v7_sk_wire import shipped_plane
-from tools.v7_torture_matrix import CASES, Case, impair
+from tools import v7_live
 
 v7_live._ensure_test_modem_path()
 import nested_fold                                                      # noqa: E402
@@ -37,12 +21,6 @@ from aspect_fold import AspectFoldWire                                  # noqa: 
 from aspect_mono import AspectMonoWire                                  # noqa: E402
 
 TARGET = .1521/np.sqrt(1+10**(v7.CLOCK_REL_DB/10))
-MODES = ('aspect-fold-500', 'aspect-mono-500', 'mono nested', 'stereo-slices', 'stereo nested')
-SPEEDS = {.5: (2, 1), 1.5: (2, 3), 2.0: (1, 2)}
-EXTRA_CASES = (Case('hiss-50', noise_dbfs=-50), Case('hiss-30', noise_dbfs=-30),
-               Case('azimuth-50us', azimuth_us=50), Case('right-minus-12db', right_gain_db=-12),
-               Case('crosstalk-25pct', crosstalk=.25),
-               Case('left-leg-only', one_leg_only=True))
 
 
 class Rig:
@@ -176,110 +154,3 @@ class Rig:
 def wide(audio48):
     """The stock matrix's conversion of the 48 kHz wire to a 96 kHz capture."""
     return resample_poly(audio48, 2, 1, axis=0)
-
-
-class Scorer:
-    def __init__(self, files):
-        self.geometry = study.Geometry('aspect-mono-500')
-        big = study.Analyzer(self.geometry.big)
-        self.rgbs = [study.portrait(f) for f in files]
-        self.references = [big(rgb) for rgb in self.rgbs]
-        self.tail = study.ensemble_tail(self.geometry, study.Statistics(self.references).variance)
-
-    def error(self, picture, values):
-        return study.score(self.geometry, self.references[picture], shipped_plane(values))['error']
-
-    def effective(self, errors):
-        return study.ensemble_equivalent(self.tail, float(np.mean(errors))) if errors else None
-
-
-def run_cases(args, cases, modes, tag):
-    out = Path(args.out)
-    out.mkdir(parents=True, exist_ok=True)
-    rig, scorer = Rig(), Scorer(args.pictures)
-    streams = {(mode, i): wide(rig.audio(mode, rgb, args.frames))
-               for mode in modes for i, rgb in enumerate(scorer.rgbs)}
-    report = {'pictures': [Path(f).name for f in args.pictures], 'frames': args.frames,
-              'tables': str(nested_fold.TABLES), 'cases': {}}
-    for case in cases:
-        row = {}
-        for mode in modes:
-            errors, shown = [], 0
-            for i in range(len(scorer.rgbs)):
-                capture = impair(streams[mode, i], case, seed=args.seed+i)
-                for _, values, _ in rig.shown(mode, capture):
-                    errors.append(scorer.error(i, values))
-                    shown += 1
-            row[mode] = {'shown': shown, 'sent': args.frames*len(scorer.rgbs),
-                         'effective_coefficients': scorer.effective(errors)}
-        report['cases'][case.name] = row
-        print(case.name, json.dumps({m: (row[m]['shown'], row[m]['effective_coefficients'])
-                                     for m in modes}), flush=True)
-        (out/f'{tag}.json').write_text(json.dumps(report, indent=1)+'\n')
-    lines = ['| Case | '+' | '.join(modes)+' |', '|---|'+'---:|'*len(modes)]
-    for name, row in report['cases'].items():
-        lines.append(f'| {name} | '+' | '.join(
-            'none shown' if row[m]['effective_coefficients'] is None else
-            f"{row[m]['effective_coefficients']:,} ({row[m]['shown']}/{row[m]['sent']})"
-            for m in modes)+' |')
-    (out/f'{tag}.md').write_text('\n'.join(lines)+'\n')
-
-
-def playback(args):
-    """Other playback speeds and reverse, each against normal playback."""
-    out = Path(args.out)
-    out.mkdir(parents=True, exist_ok=True)
-    rig, scorer = Rig(), Scorer(args.pictures)
-    modes = args.modes
-    report = {}
-    for mode in modes:
-        rows = {}
-        for i, rgb in enumerate(scorer.rgbs):
-            normal = wide(rig.audio(mode, rgb, args.frames))
-            variants = {'1x forward': (normal, False), '1x reverse': (normal, True)}
-            for speed, (up, down) in SPEEDS.items():
-                capture = resample_poly(normal, up, down, axis=0)
-                variants[f'{speed}x forward'] = (capture, False)
-                variants[f'{speed}x reverse'] = (capture, True)
-            for name, (capture, reverse) in variants.items():
-                shown = rig.shown(mode, capture, reverse=reverse)
-                entry = rows.setdefault(name, {'errors': [], 'shown': 0, 'order_ok': True})
-                order = [index for index, _, _ in shown]
-                entry['order_ok'] &= order == sorted(order, reverse=reverse)
-                entry['shown'] += len(shown)
-                entry['errors'] += [scorer.error(i, values) for _, values, _ in shown]
-        report[mode] = {name: {'shown': e['shown'], 'sent': args.frames*len(scorer.rgbs),
-                               'in_order': bool(e['order_ok']),
-                               'effective_coefficients': scorer.effective(e['errors'])}
-                        for name, e in rows.items()}
-        print(mode, json.dumps({n: (r['shown'], r['effective_coefficients'], r['in_order'])
-                                for n, r in report[mode].items()}), flush=True)
-    (out/'PLAYBACK.json').write_text(json.dumps(report, indent=1)+'\n')
-    names = list(next(iter(report.values())))
-    lines = ['| Playback | '+' | '.join(modes)+' |', '|---|'+'---:|'*len(modes)]
-    for name in names:
-        lines.append(f'| {name} | '+' | '.join(
-            f"{report[m][name]['effective_coefficients']:,} ({report[m][name]['shown']}/{report[m][name]['sent']})"
-            if report[m][name]['effective_coefficients'] is not None else 'none shown'
-            for m in modes)+' |')
-    (out/'PLAYBACK.md').write_text('\n'.join(lines)+'\n')
-
-
-def main(argv=None):
-    parser = argparse.ArgumentParser(description=__doc__.split('\n')[0])
-    parser.add_argument('command', choices=('torture', 'playback'))
-    parser.add_argument('--pictures', nargs='+', required=True)
-    parser.add_argument('--out', default='tmp/sk/nested-eval')
-    parser.add_argument('--frames', type=int, default=9)
-    parser.add_argument('--modes', nargs='+', default=list(MODES))
-    parser.add_argument('--only', nargs='+', default=[])
-    parser.add_argument('--seed', type=int, default=2026)
-    args = parser.parse_args(argv)
-    if args.command == 'playback':
-        return playback(args)
-    cases = [case for case in CASES+EXTRA_CASES if not args.only or case.name in args.only]
-    run_cases(args, cases, args.modes, 'TORTURE')
-
-
-if __name__ == '__main__':
-    main()

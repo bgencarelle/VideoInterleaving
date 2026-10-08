@@ -297,7 +297,8 @@ class V7PilotToneTests(unittest.TestCase):
                 self.assertLessEqual(
                     abs(mean_rmse(plain)-mean_rmse(toned)), .0005)
 
-    def test_raw_tone_speed_matches_pulse_speed_from_half_to_one_and_half_x(self):
+    def test_packet_tone_speed_matches_pulse_speed_from_half_to_one_and_half_x(self):
+        # The tone reading the receiver uses to end a packet without its mark.
         sample_rate = 96_000
         count = 9
         wire = v7.encode_pulse_stream(
@@ -306,25 +307,16 @@ class V7PilotToneTests(unittest.TestCase):
             with self.subTest(speed=speed):
                 audio = v7.speed_pulse_stream(
                     wire, speed, rate=sample_rate)
+                mono = v7._mono(audio)
                 starts = v7.pulse_frame_starts(
                     audio, sample_rate=sample_rate)
                 self.assertEqual(len(starts), count)
-                differences = []
                 for (start, _, _), (following, _, _) in zip(
                         starts, starts[1:]):
                     scale = (following-start)/v7.PULSE_FRAME
-                    estimate = v7.pilot_tone_speed(
-                        audio, sample_rate, start, scale)
-                    self.assertTrue(estimate['detected'], estimate)
-                    differences.append(abs(estimate['difference_pct']))
-                self.assertLess(max(differences), .1)
-                if speed == 1.0:
-                    decoded, _ = v7.decode_pulse_stream(
-                        self.model, audio, sample_rate=sample_rate,
-                        pilot_speed_diagnostics=True)
-                    speed_diag = decoded[0].diag['pilot_tone_speed']
-                    self.assertTrue(speed_diag['detected'], speed_diag)
-                    self.assertLess(abs(speed_diag['difference_pct']), .1)
+                    measured = v7._packet_tone_scale(mono, start, scale)
+                    self.assertIsNotNone(measured)
+                    self.assertLess(abs(measured[0]/scale-1), .001)
 
     def test_live_sender_and_receiver_default_to_eof_tone_seeded(self):
         default_send = v7_live.parser().parse_args([
@@ -363,9 +355,11 @@ class V7PilotToneTests(unittest.TestCase):
         tone_eq_receive = v7_live.parser().parse_args([
             'receive', '--device', 'null', '--tone-equalization', 'm-reference'])
         self.assertEqual(tone_eq_receive.tone_equalization, 'm-reference')
-        pulse_receive = v7_live.parser().parse_args([
-            'receive', '--device', 'null', '--pulse-timing', 'pulse-warp'])
-        self.assertEqual(pulse_receive.pulse_timing, 'pulse-warp')
+        for removed in ('--pulse-timing', '--pilot-speed-diagnostics'):
+            with mock.patch('sys.stderr', io.StringIO()):
+                with self.assertRaises(SystemExit):
+                    v7_live.parser().parse_args([
+                        'receive', '--device', 'null', removed])
 
     def test_application_packet_defaults_to_eof_and_pilot_tones(self):
         import modem_v7_display

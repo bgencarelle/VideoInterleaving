@@ -25,7 +25,7 @@ for path in (ROOT, ROOT/'test_modem_v7'):
 
 from animation_modem import v7                                         # noqa: E402
 from tools import v7_live                                              # noqa: E402
-from tools.v7_nested_eval import Rig, wide                              # noqa: E402
+from modem_tests.nested_rig import Rig, wide                            # noqa: E402
 from tools.v7_torture_matrix import CASES, Case, impair                 # noqa: E402
 import nested_fold                                                     # noqa: E402
 from aspect_fold import LAYOUT_NAMES                                   # noqa: E402

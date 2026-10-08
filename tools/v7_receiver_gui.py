@@ -230,7 +230,6 @@ HIDDEN_DECODE_OPTIONS = frozenset((
     'mono_compatible',
     'mono_video_side', 'profile_ui', 'decode_batch', 'decode_history',
     'no_tail_memory', 'force_float32', 'pilot_timing',
-    'pilot_speed_diagnostics', 'pulse_timing',
     'tone_equalization'))
 
 
@@ -472,8 +471,6 @@ def _field_label(action):
         'no_tail_memory': 'Disable tail memory',
         'force_float32': 'Experimental float32 decoder',
         'pilot_timing': 'Pilot timing',
-        'pilot_speed_diagnostics': 'Pilot speed diagnostics',
-        'pulse_timing': 'Pulse timing',
         'tone_equalization': 'Tone equalization',
         'experimental_fold': 'Fold profile',
         'experimental_mono_fold': 'Experimental mono video fold',

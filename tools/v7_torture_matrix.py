@@ -313,8 +313,7 @@ def paired_frame_quality(reference_rows, candidate_rows):
 
 
 def _decode_pilot_variant(model, reference, values, audio, mode,
-                          force_float32=False, measure_speed=True,
-                          retain_images=False):
+                          force_float32=False, retain_images=False):
     wall_started = time.perf_counter()
     cpu_started = time.process_time()
     results, info = v7.decode_pulse_stream(
@@ -325,8 +324,8 @@ def _decode_pilot_variant(model, reference, values, audio, mode,
     errors, quality_rows, frame_quality = [], [], []
     frame_images = {}
     pilot_residuals, timing_residuals, tone_fit_residuals = [], [], []
-    tone_snrs, tone_speeds = [], []
-    tone_detected = tone_speed_locked = tone_applied = 0
+    tone_snrs = []
+    tone_detected = tone_applied = 0
     metadata_retries = metadata_recovered = 0
     tone_rejection_reasons = {}
     dual_tone_disagreements = []
@@ -383,15 +382,6 @@ def _decode_pilot_variant(model, reference, values, audio, mode,
             tone_fit_residual = timing.get('timing_residual_rms')
         if tone_fit_residual is not None:
             tone_fit_residuals.append(float(tone_fit_residual))
-        if measure_speed and result.diag.get('frame_start') is not None:
-            speed = v7.pilot_tone_speed(
-                audio, RATE, result.diag['frame_start'],
-                result.diag['frame_scale'])
-            tone_snrs.extend(float(snr)
-                             for snr in speed.get('tone_snr_db', []))
-            if speed.get('detected'):
-                tone_speed_locked += 1
-                tone_speeds.append(float(speed['difference_pct']))
     expected_frames = len(results)
     return {
         'frames': expected_frames,
@@ -421,17 +411,12 @@ def _decode_pilot_variant(model, reference, values, audio, mode,
         'mean_tone_fit_residual_samples': (
             float(np.mean(tone_fit_residuals)) if tone_fit_residuals else None),
         'tone_detected_frames': tone_detected,
-        'tone_speed_locked_frames': tone_speed_locked,
         'tone_applied_frames': tone_applied,
+        'mean_tone_snr_db': float(np.mean(tone_snrs)) if tone_snrs else None,
         'tone_rejection_reasons': tone_rejection_reasons,
         'mean_dual_tone_disagreement_samples': (
             float(np.mean(dual_tone_disagreements))
             if dual_tone_disagreements else None),
-        'mean_tone_snr_db': float(np.mean(tone_snrs)) if tone_snrs else None,
-        'mean_tone_speed_difference_pct': (
-            float(np.mean(tone_speeds)) if tone_speeds else None),
-        'max_abs_tone_speed_difference_pct': (
-            float(np.max(np.abs(tone_speeds))) if tone_speeds else None),
         'cpu_elapsed_s': cpu_elapsed,
         'wall_elapsed_s': wall_elapsed,
         'ms_per_frame': 1000*cpu_elapsed/max(expected_frames, 1),
@@ -566,7 +551,6 @@ def main(argv=None):
                 result = _decode_pilot_variant(
                     model, reference, values, damaged_by_wire[key], mode,
                     force_float32=args.force_float32,
-                    measure_speed=key == 'on',
                     retain_images=(args.diffmaps and
                                    case.name in diffmap_cases and
                                    name in ('on/baseline', 'on/tone-joint')))
@@ -666,13 +650,7 @@ def main(argv=None):
                             'tone_rejection_reasons'],
                         'dual_tone_disagreement_samples': result[
                             'mean_dual_tone_disagreement_samples'],
-                        'tone_speed_lock_frames': result[
-                            'tone_speed_locked_frames'],
                         'tone_snr_db': result['mean_tone_snr_db'],
-                        'tone_speed_diff_pct': result[
-                            'mean_tone_speed_difference_pct'],
-                        'max_abs_tone_speed_diff_pct': result[
-                            'max_abs_tone_speed_difference_pct'],
                         'cpu_ms_per_frame': result['ms_per_frame'],
                         'wall_ms_per_frame': result['wall_ms_per_frame'],
                     }

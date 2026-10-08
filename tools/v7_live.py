@@ -4156,8 +4156,6 @@ def _run_receive_session(args, fold, mono_wire=None, adaptive_profile=None,
                 model_factory=model_factory,
                 force_float32=args.force_float32, state=pulse_state,
                 sample_rate=capture_rate, pilot_timing=args.pilot_timing,
-                pilot_speed_diagnostics=args.pilot_speed_diagnostics,
-                pulse_timing=args.pulse_timing,
                 tone_equalization=args.tone_equalization)
             if packet_direction < 0:
                 results, info = P.decode_reverse_packet(
@@ -4198,7 +4196,6 @@ def _run_receive_session(args, fold, mono_wire=None, adaptive_profile=None,
                     force_float32=args.force_float32, state=slice_state,
                     sample_rate=capture_rate,
                     pilot_timing=args.pilot_timing,
-                    pulse_timing=args.pulse_timing,
                     tone_equalization=args.tone_equalization)
                 try:
                     if packet_direction < 0:
@@ -4419,7 +4416,6 @@ def _run_receive_session(args, fold, mono_wire=None, adaptive_profile=None,
                       'timing_delta_ppm': result.diag.get('timing_delta_ppm'),
                       'playback_speed': meter['playback_speed'],
                       'capture_rate_hz': capture_rate,
-                      'pilot_tone_speed': result.diag.get('pilot_tone_speed'),
                       'noise': result.diag.get('noise'),
                       'stereo_erased_symbols': result.diag.get(
                           'stereo_erased_symbols'),
@@ -4810,11 +4806,6 @@ def parser():
                                 'tone-replaced'),
                        default='tone-seeded',
                        help='pilot timing fit (default: tone-seeded)')
-    recv.add_argument('--pilot-speed-diagnostics', action='store_true',
-                      help='compare raw pilot-tone speed with pulse-measured speed')
-    recv.add_argument('--pulse-timing', choices=('baseline', 'pulse-warp'),
-                      default='baseline',
-                      help='experimental within-packet map from neighboring pulse scales')
     recv.add_argument('--tone-equalization',
                       choices=('off', 'm-reference'), default='off',
                       help='use pilot tones as an opt-in M-path gain reference')
@@ -4831,7 +4822,7 @@ def parser():
         'direction', 'fixture', 'profile_ui', 'mono_compatible',
         'mono_video_side', 'decode_batch', 'decode_history',
         'no_tail_memory', 'force_float32', 'pilot_timing',
-        'pilot_speed_diagnostics', 'pulse_timing', 'tone_equalization',
+        'tone_equalization',
         'experimental_mono_fold',
         'experimental_mono_colour',
         'experimental_fold',

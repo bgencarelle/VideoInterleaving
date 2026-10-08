@@ -65,9 +65,6 @@ EOF_SEARCH_FRACTION = .012
 # this reference-sample coordinate within each packet.
 PULSE_PREAMBLE_CENTER = (
     16.0 + float(np.mean(PULSE.NOMINAL_EDGES.astype(float)+.5)))
-PULSE_WARP_STATIC_BIAS_DELTA = 100e-6
-PULSE_WARP_STATIC_BIAS_GATE = 1000e-6
-PULSE_WARP_MIN_SLOPE_DELTA = 500e-6
 # Pulse scale bounds are relative to the 48 kHz reference geometry. A capture
 # at another sample rate observes raw sample scales multiplied by rate/RATE.
 PULSE_MIN_SCALE = .25
@@ -1927,91 +1924,6 @@ def _pilot_tone_timing_joint(Z, model, counter, include_metadata=False):
     return track, {'detected': True, **metrics}
 
 
-def pilot_tone_speed(samples, sample_rate, frame_start, frame_scale,
-                     segments=6):
-    """Measure raw-recording tone speed relative to the pulse header.
-
-    The pulse count supplies the expected frequencies and removes each packet's
-    large nominal phase slope. A short set of windowed in-phase projections
-    then measures the residual phase slope for bins 1 and 3. This operates on
-    the capture-rate samples, before pulse resampling can normalize the speed.
-    """
-    sample_rate = float(sample_rate)
-    frame_scale = float(frame_scale)
-    if (not np.isfinite(sample_rate) or sample_rate <= 0 or
-            not np.isfinite(frame_scale) or frame_scale <= 0 or segments < 3):
-        raise ValueError('invalid pilot speed measurement parameters')
-    audio = np.asarray(samples, dtype=float)
-    if audio.ndim == 1:
-        mono = audio
-    elif audio.ndim == 2 and audio.shape[1]:
-        mono = audio.mean(axis=1)
-    else:
-        raise ValueError('pilot speed samples must be mono or multichannel')
-    start = int(round(frame_start + PULSE.SYNC_LEN*frame_scale))
-    stop = int(round(frame_start + (PULSE.SYNC_LEN+FRAME)*frame_scale))
-    if start < 0 or stop > len(mono) or stop-start < segments*16:
-        return {'detected': False, 'reason': 'body_out_of_window'}
-    body = mono[start:stop]
-    edges = np.linspace(0, len(body), segments+1, dtype=int)
-    pulse_speed = sample_rate/(RATE*frame_scale)
-    rms = float(np.sqrt(np.mean(body*body)))
-    by_bin = []
-    for bin_index in PILOT_TONE_BINS:
-        expected_hz = bin_index*RATE/N*pulse_speed
-        empty_hz = 2*RATE/N*pulse_speed
-        phases, amplitudes, empty_amplitudes, centers = [], [], [], []
-        for lo, hi in zip(edges[:-1], edges[1:]):
-            if hi-lo < 16:
-                continue
-            window = np.hanning(hi-lo)
-            chunk = body[lo:hi]
-            chunk = chunk-float(np.mean(chunk))
-            indexes = start+np.arange(lo, hi, dtype=float)
-            phasor = np.sum(
-                chunk*window*np.exp(-2j*np.pi*expected_hz*indexes/sample_rate))
-            empty_phasor = np.sum(
-                chunk*window*np.exp(-2j*np.pi*empty_hz*indexes/sample_rate))
-            phases.append(float(np.angle(phasor)))
-            amplitudes.append(float(2*np.abs(phasor)/max(np.sum(window), 1e-12)))
-            empty_amplitudes.append(float(
-                2*np.abs(empty_phasor)/max(np.sum(window), 1e-12)))
-            centers.append((lo+hi-1)/(2*sample_rate))
-        if len(phases) < 3:
-            continue
-        phase = np.unwrap(phases)
-        slope = float(np.polyfit(centers, phase, 1)[0])
-        speed = pulse_speed + slope/(2*np.pi*bin_index*RATE/N)
-        amplitude = float(np.median(amplitudes))
-        empty_level = float(np.median(empty_amplitudes))
-        ratio = amplitude/max(np.sqrt(2)*rms, 1e-12)
-        snr_db = float(20*np.log10(amplitude/max(empty_level, 1e-12)))
-        by_bin.append({'bin': int(bin_index), 'speed': float(speed),
-                       'amplitude_ratio': ratio,
-                       'empty_bin_amplitude': empty_level,
-                       'tone_snr_db': snr_db})
-    valid = [entry for entry in by_bin
-             if entry['amplitude_ratio'] >= .03 and
-             entry['tone_snr_db'] >= 6.0]
-    if not valid:
-        return {'detected': False, 'reason': 'tone_level',
-                'pulse_speed': pulse_speed, 'per_bin': by_bin,
-                'tone_snr_db': [entry['tone_snr_db'] for entry in by_bin]}
-    # Bin 3 has the larger timing slope and is the refinement reference. Bin 1
-    # remains a coarse lock/consistency check; if bin 3 is absent, retain the
-    # single-tone fallback.
-    refine = next((entry for entry in valid if entry['bin'] == 3), None)
-    tone_speed = float((refine or valid[0])['speed'])
-    return {
-        'detected': True,
-        'pulse_speed': float(pulse_speed),
-        'tone_speed': tone_speed,
-        'difference_pct': float(100*(tone_speed/pulse_speed-1)),
-        'tone_snr_db': [entry['tone_snr_db'] for entry in by_bin],
-        'per_bin': by_bin,
-    }
-
-
 def _pilot_metadata_offset(body, samples, meta_start, scale, model, counter,
                            force_float32=False, estimator='single',
                            metadata_indexes=None):
@@ -3695,8 +3607,6 @@ def decode_pulse_stream(model, x, diagnostics=None, latest_only=False,
                         input_gain=1.0, models=None, model_factory=None,
                         force_float32=False, state=None, pulse_starts=None,
                         sample_rate=RATE, pilot_timing='baseline',
-                        pilot_speed_diagnostics=False,
-                        pulse_timing='baseline',
                         tone_equalization='off'):
     """Decode V7 bodies located by the existing pulse-counted acquisition.
 
@@ -3720,8 +3630,6 @@ def decode_pulse_stream(model, x, diagnostics=None, latest_only=False,
     ``pilot_timing`` selects the optional low-bin timing reference:
     ``baseline`` (default), ``tone-seeded``, ``tone-joint``, or
     ``tone-replaced``. A packet runs from its header to its EOF marker.
-    ``pulse_timing='pulse-warp'`` optionally uses the neighboring pulse fits
-    as local-slope anchors for a monotone, within-packet Hermite sample map.
     ``tone_equalization='m-reference'`` uses the known low-bin tone magnitudes
     as a packet-relative M-path gain reference in addition to the ordinary
     data-pilot channel fit. Static response, S-path response, and spectral
@@ -3730,8 +3638,6 @@ def decode_pulse_stream(model, x, diagnostics=None, latest_only=False,
     if pilot_timing not in (
             'baseline', 'tone-seeded', 'tone-joint', 'tone-replaced'):
         raise ValueError(f'unknown pilot timing mode {pilot_timing!r}')
-    if pulse_timing not in ('baseline', 'pulse-warp'):
-        raise ValueError(f'unknown pulse timing mode {pulse_timing!r}')
     if tone_equalization not in ('off', 'm-reference'):
         raise ValueError(f'unknown tone equalization mode {tone_equalization!r}')
     # Live capture is float32 and _sample_at returns float32.  Promoting the
@@ -3754,8 +3660,6 @@ def decode_pulse_stream(model, x, diagnostics=None, latest_only=False,
                                           latest_only, models, model_factory,
                                           force_float32, state, pulse_starts,
                                           sample_rate, pilot_timing,
-                                          pilot_speed_diagnostics,
-                                          pulse_timing,
                                           tone_equalization)
     if results or samples.shape[1] != 2:
         return results, info
@@ -3767,8 +3671,7 @@ def decode_pulse_stream(model, x, diagnostics=None, latest_only=False,
     flipped, flipped_info = _decode_pulse_samples(
         model, samples*np.float32([1, -1]), diagnostics, latest_only, models,
         model_factory, force_float32, state, pulse_starts, sample_rate,
-        pilot_timing, pilot_speed_diagnostics, pulse_timing,
-        tone_equalization)
+        pilot_timing, tone_equalization)
     if not flipped:
         return results, info
     for result in flipped:
@@ -4663,110 +4566,10 @@ def _measure_pulse_after_eof_marker(samples, cursor, scale,
     return (hit[0]+search_start-int(cursor), hit[1], hit[2])
 
 
-def _pulse_warp_trusted_scale(local, confidence, average):
-    weight = float(np.clip((confidence-.45)/.55, 0.0, 1.0))
-    return average + weight*(float(local)-average)
-
-
-def _pulse_warp_anchor_conflict(average, scale_start, scale_end,
-                                confidence_start, confidence_end):
-    left = _pulse_warp_trusted_scale(
-        scale_start, confidence_start, average)
-    right = _pulse_warp_trusted_scale(
-        scale_end, confidence_end, average)
-    nearly_equal = abs(left-right) <= PULSE_WARP_STATIC_BIAS_DELTA*average
-    common_bias = abs((left+right)*.5-average) >= \
-        PULSE_WARP_STATIC_BIAS_GATE*average
-    return bool(nearly_equal and common_bias)
-
-
-def _pulse_warp_is_near_linear(average, scale_start, scale_end,
-                               confidence_start, confidence_end):
-    left = _pulse_warp_trusted_scale(
-        scale_start, confidence_start, average)
-    right = _pulse_warp_trusted_scale(
-        scale_end, confidence_end, average)
-    return max(abs(left/average-1), abs(right/average-1)) <= \
-        PULSE_WARP_MIN_SLOPE_DELTA
-
-
-def _pulse_warp_map(frame_start, next_start, scale_start, scale_end,
-                    confidence_start, confidence_end, positions,
-                    endpoint_position=None, endpoint_coordinate=None):
-    """Map reference packet coordinates through a pulse-anchored Hermite warp.
-
-    Each pulse fit estimates local scale around the center of its edge word;
-    the measured packet interval fixes the integrated scale between them.
-    Confidence blends each local slope toward that interval average before the
-    monotone-curve check. The returned pair is (capture positions, derivative
-    values at the curve's extrema).
-    """
-    span = float(PULSE_FRAME)
-    average = (float(endpoint_position if endpoint_position is not None
-                      else next_start)-float(frame_start))/span
-    if (not np.isfinite(average) or average <= 0 or
-            not np.isfinite(scale_start+scale_end) or
-            scale_start <= 0 or scale_end <= 0):
-        return None
-
-    left_scale = _pulse_warp_trusted_scale(
-        scale_start, confidence_start, average)
-    right_scale = _pulse_warp_trusted_scale(
-        scale_end, confidence_end, average)
-    if _pulse_warp_anchor_conflict(
-            average, scale_start, scale_end,
-            confidence_start, confidence_end):
-        return None
-    center = PULSE_PREAMBLE_CENTER
-    t0 = center
-    t1 = (float(endpoint_coordinate) if endpoint_coordinate is not None
-          else span+center)
-    reference_span = t1-t0
-    if reference_span <= 0:
-        return None
-    x0 = float(frame_start)+center*left_scale
-    x1 = (float(endpoint_position) if endpoint_position is not None else
-          float(next_start)+center*right_scale)
-    cubic_a = 2*x0-2*x1+reference_span*(left_scale+right_scale)
-    cubic_b = (-3*x0+3*x1-reference_span*(2*left_scale+right_scale))
-    cubic_c = reference_span*left_scale
-
-    def evaluate(at):
-        z = (at-t0)/reference_span
-        return ((cubic_a*z+cubic_b)*z+cubic_c)*z+x0
-
-    requested = np.asarray(positions, dtype=float)
-    if not np.all(np.isfinite(requested)):
-        return None
-    if (np.min(requested) < t0 or np.max(requested) > t1):
-        return None
-    # The derivative is quadratic in normalized interval position. Checking
-    # both endpoints and its interior extremum is cheaper and more reliable
-    # than allocating a derivative value for every audio sample to be mapped.
-    derivative_a = (6*(x0-x1)/reference_span+
-                    3*(left_scale+right_scale))
-    derivative_b = (6*(x1-x0)/reference_span-
-                    4*left_scale-2*right_scale)
-    extrema = [0.0, 1.0]
-    if abs(derivative_a) > 1e-12:
-        vertex = -derivative_b/(2*derivative_a)
-        if 0 < vertex < 1:
-            extrema.append(float(vertex))
-    local_scales = (derivative_a*np.square(extrema) +
-                    derivative_b*np.asarray(extrema) + left_scale)
-    if (not np.all(np.isfinite(local_scales)) or
-            np.min(local_scales) <= .5*average or
-            np.max(local_scales) >= 1.5*average):
-        return None
-    return evaluate(requested), local_scales
-
-
 def _decode_pulse_samples(model, samples, diagnostics, latest_only, models,
                            model_factory, force_float32, state,
                            pulse_starts=None, sample_rate=RATE,
                            pilot_timing='baseline',
-                           pilot_speed_diagnostics=False,
-                           pulse_timing='baseline',
                            tone_equalization='off'):
     sample_rate = float(sample_rate)
     cursor = 0
@@ -4848,7 +4651,6 @@ def _decode_pulse_samples(model, samples, diagnostics, latest_only, models,
         frame_scale = scale
         frame_length = PULSE_FRAME
         following_scale = None
-        following_confidence = None
         boundary_diag = None
         if selected_marker is not None:
             marker = dict(selected_marker)
@@ -4868,7 +4670,6 @@ def _decode_pulse_samples(model, samples, diagnostics, latest_only, models,
                 next_start = marker['end']
                 frame_scale = candidate_scale
                 following_scale = marker['scale']
-                following_confidence = marker['confidence']
                 if marker.get('witness') == 'tones':
                     tone_witnesses += 1
                 else:
@@ -4896,94 +4697,47 @@ def _decode_pulse_samples(model, samples, diagnostics, latest_only, models,
             cursor, measured = resync
             counter += 1
             continue
-        start = frame_start + PULSE.SYNC_LEN*scale
-        # Consecutive pulse positions provide the packet-average scale. The
-        # optional warp bends that straight-line sample map using the local
-        # scales fitted at both neighboring pulse words.
-        pulse_map = None
-        pulse_timing_diag = None
         metadata_indexes = None
         splice_diag = None
-        if pulse_timing == 'pulse-warp':
-            scale_conflict = _pulse_warp_anchor_conflict(
-                frame_scale, scale, following_scale, confidence,
-                following_confidence)
-            near_linear = _pulse_warp_is_near_linear(
-                frame_scale, scale, following_scale, confidence,
-                following_confidence)
-            if not scale_conflict and not near_linear:
-                body_reference = PULSE.SYNC_LEN + np.arange(FRAME)
-                metadata_reference = (PULSE.SYNC_LEN+FRAME+
-                                     np.arange(META_SYMBOL))
-                reference_positions = np.concatenate((body_reference,
-                                                      metadata_reference))
-                pulse_map = _pulse_warp_map(
-                    frame_start, next_start, scale, following_scale,
-                    confidence, following_confidence, reference_positions,
-                    endpoint_position=next_start,
-                    endpoint_coordinate=PULSE_FRAME)
-            pulse_timing_diag = {
-                'mode_requested': 'pulse-warp',
-                'mode_applied': 'baseline',
-                'average_scale': float(frame_scale),
-                'start_pulse_scale': float(scale),
-                'end_pulse_scale': float(following_scale),
-            }
-            if pulse_map is None:
-                pulse_timing_diag['reason'] = (
-                    'local_scale_interval_mismatch' if scale_conflict else
-                    'pulse_scales_near_average' if near_linear else
-                    'invalid_or_non_monotone_map')
-            else:
-                mapped_indexes, local_scales = pulse_map
-                indexes = mapped_indexes[:FRAME]
-                metadata_indexes = mapped_indexes[FRAME:]
-                pulse_timing_diag.update({
-                    'mode_applied': 'pulse-warp',
-                    'local_scale_min': float(np.min(local_scales)),
-                    'local_scale_max': float(np.max(local_scales)),
-                })
-        if pulse_map is None:
-            # The header origin and measured EOF endpoint define one
-            # packet-wide affine time map. Use its scale for both the
-            # body origin and every metadata sample; mixing the local
-            # preamble scale into either offset breaks that shared clock.
-            indexes = (frame_start +
-                       (PULSE.SYNC_LEN+np.arange(FRAME))*frame_scale)
-            metadata_indexes = (
-                frame_start+(PULSE.SYNC_LEN+FRAME+
-                             np.arange(META_SYMBOL))*frame_scale)
-            spliced = (_splice_map(samples, frame_start, next_start,
-                                   scale, indexes, model=model)
-                       if boundary_diag is not None else None)
-            current_score = (
-                spliced[2]['cp_score'] if spliced is not None else
-                float(np.sum(_cp_scores_at(samples, indexes))))
-            if (boundary_diag is not None and
-                    not boundary_diag.get('splice_search') and
-                    current_score < F*SPLICE_SUSPECT_CP):
-                # The body does not fit the EOF found where the header
-                # predicted it: a splice can move the real mark out of
-                # reach while something else matches there. Ask the next
-                # header, and keep whichever endpoint fits the body.
-                alternate = _spliced_eof_marker(
-                    mono_samples, frame_start, scale, min_scale,
-                    max_scale, exclude_end=next_start)
-                alternate_map = (
-                    _splice_map(samples, frame_start, alternate['end'],
-                                scale, indexes, force=True, model=model)
-                    if alternate is not None else None)
-                if (alternate_map is not None and
-                        alternate_map[2]['cp_score'] >
-                        current_score+SPLICE_MIN_GAIN):
-                    spliced = alternate_map
-                    boundary_diag = alternate
-                    next_start = alternate['end']
-                    frame_scale = alternate['packet_scale']
-                    following_scale = alternate['scale']
-                    following_confidence = alternate['confidence']
-            if spliced is not None:
-                indexes, metadata_indexes, splice_diag = spliced
+        # The header origin and measured EOF endpoint define one
+        # packet-wide affine time map. Use its scale for both the
+        # body origin and every metadata sample; mixing the local
+        # preamble scale into either offset breaks that shared clock.
+        indexes = (frame_start +
+                   (PULSE.SYNC_LEN+np.arange(FRAME))*frame_scale)
+        metadata_indexes = (
+            frame_start+(PULSE.SYNC_LEN+FRAME+
+                         np.arange(META_SYMBOL))*frame_scale)
+        spliced = (_splice_map(samples, frame_start, next_start,
+                               scale, indexes, model=model)
+                   if boundary_diag is not None else None)
+        current_score = (
+            spliced[2]['cp_score'] if spliced is not None else
+            float(np.sum(_cp_scores_at(samples, indexes))))
+        if (boundary_diag is not None and
+                not boundary_diag.get('splice_search') and
+                current_score < F*SPLICE_SUSPECT_CP):
+            # The body does not fit the EOF found where the header
+            # predicted it: a splice can move the real mark out of
+            # reach while something else matches there. Ask the next
+            # header, and keep whichever endpoint fits the body.
+            alternate = _spliced_eof_marker(
+                mono_samples, frame_start, scale, min_scale,
+                max_scale, exclude_end=next_start)
+            alternate_map = (
+                _splice_map(samples, frame_start, alternate['end'],
+                            scale, indexes, force=True, model=model)
+                if alternate is not None else None)
+            if (alternate_map is not None and
+                    alternate_map[2]['cp_score'] >
+                    current_score+SPLICE_MIN_GAIN):
+                spliced = alternate_map
+                boundary_diag = alternate
+                next_start = alternate['end']
+                frame_scale = alternate['packet_scale']
+                following_scale = alternate['scale']
+        if spliced is not None:
+            indexes, metadata_indexes, splice_diag = spliced
         if indexes[-1] >= len(samples)-1:
             break
         if confidence < .45:
@@ -5032,7 +4786,7 @@ def _decode_pulse_samples(model, samples, diagnostics, latest_only, models,
                 meta, metadata_valid, provisional = spliced_meta
                 splice_diag['metadata_anchor'] = 'header'
         if (not metadata_valid and
-                pulse_map is None and boundary_diag is not None and
+                boundary_diag is not None and
                 not boundary_diag.get('splice_search')):
             # The body fitted the EOF found at the predicted place but the
             # metadata did not: a splice near the end can hide the real mark
@@ -5064,7 +4818,6 @@ def _decode_pulse_samples(model, samples, diagnostics, latest_only, models,
                     next_start = alternate['end']
                     frame_scale = alternate['packet_scale']
                     following_scale = alternate['scale']
-                    following_confidence = alternate['confidence']
                     if indexes[-1] >= len(samples)-1:
                         break
                     body = _sample_at(samples, indexes, taps=4).astype(
@@ -5119,26 +4872,10 @@ def _decode_pulse_samples(model, samples, diagnostics, latest_only, models,
                            else 'single'),
                 metadata_indexes=retry_metadata_indexes)
             if shift is not None:
-                if pulse_map is None:
-                    corrected_start = retry_start-shift*retry_scale
-                    retry_candidates = decode_metadata(
-                        model, samples, corrected_start, retry_scale, None,
-                        force_float32, return_candidates=True)
-                else:
-                    corrected_map = _pulse_warp_map(
-                        frame_start, next_start, scale, following_scale,
-                        confidence, following_confidence,
-                        PULSE.SYNC_LEN+FRAME+
-                        np.arange(META_SYMBOL)-shift,
-                        endpoint_position=next_start,
-                        endpoint_coordinate=PULSE_FRAME)
-                    corrected_indexes = (None if corrected_map is None else
-                                         corrected_map[0])
-                    retry_candidates = (decode_metadata(
-                        model, samples, retry_start, retry_scale, None,
-                        force_float32, sample_indexes=corrected_indexes,
-                        return_candidates=True)
-                        if corrected_indexes is not None else None)
+                corrected_start = retry_start-shift*retry_scale
+                retry_candidates = decode_metadata(
+                    model, samples, corrected_start, retry_scale, None,
+                    force_float32, return_candidates=True)
                 retry_meta, retry_valid, retry_provisional = \
                     state.accept_candidates(retry_candidates or [])
                 metadata_retry.update({
@@ -5233,8 +4970,6 @@ def _decode_pulse_samples(model, samples, diagnostics, latest_only, models,
                 result.diag['metadata_pilot_retry'] = metadata_retry
             if metadata_predicted:
                 result.diag['metadata_predicted'] = True
-            if pulse_timing_diag is not None:
-                result.diag['pulse_timing'] = pulse_timing_diag
             if boundary_diag is not None:
                 result.diag['eof_marker'] = boundary_diag
             if splice_diag is not None:
@@ -5249,9 +4984,6 @@ def _decode_pulse_samples(model, samples, diagnostics, latest_only, models,
                 sample_rate/(RATE*max(frame_scale, 1e-9)))
             result.diag['timing_delta_ppm'] = float(
                 (frame_scale/scale-1)*1e6)
-            if pilot_speed_diagnostics:
-                result.diag['pilot_tone_speed'] = pilot_tone_speed(
-                    samples, sample_rate, frame_start, frame_scale)
             results.append(result)
             if (result.status != 'lost' and tail_slice is not None and
                     not (state._require_independent_tail_metadata and
