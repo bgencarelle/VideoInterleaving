@@ -52,7 +52,6 @@ class Case:
     hum_dbfs: float | None = None
     bias_hz: float = 0
     bias_dbfs: float | None = None
-    saturation: float = 0
     dropout_ms: float = 0
     dropout_every: float = 0
     nr_pump: float = 0
@@ -61,6 +60,8 @@ class Case:
     mains_buzz_dbfs: float | None = None
     mono_sum: bool = False
     one_leg_only: bool = False
+    tape: str | None = None          # a deck in tools/v7_tape.DECKS
+    digital_overdrive_db: float | None = None
 
 
 CASES = (
@@ -78,15 +79,24 @@ CASES = (
     Case('right-minus-4db', right_gain_db=-4),
     Case('dc-hum', dc=.025, hum_dbfs=-38),
     Case('bias-leak-30k', bias_hz=30000, bias_dbfs=-30),
-    Case('soft-saturation', saturation=2.0),
+    # Tape chains (tools/v7_tape.py): record EQ, saturation that starts
+    # under the tape's maximum and hits the highs first, playback EQ and
+    # head losses. They replace the old flat soft-saturation curve.
+    Case('cassette-i', tape='cassette-i'),
+    Case('cassette-ii', tape='cassette-ii'),
+    Case('cassette-i-hot', tape='cassette-i-hot'),
+    Case('reel-15ips', tape='reel-15ips'),
+    Case('digital-clip-3db', digital_overdrive_db=3),
     Case('dropouts', dropout_ms=12, dropout_every=.7),
     Case('nr-pumping', nr_pump=.55),
-    Case('type-i', highpass=70, lowpass=12000, noise_dbfs=-39,
+    # Whole worn cassette chains: the tape deck plus its hiss, speed wobble,
+    # head azimuth, crosstalk and channel imbalance.
+    Case('type-i', highpass=70, noise_dbfs=-39,
          wow=.35, flutter=.10, azimuth_us=7, crosstalk=.08,
-         right_gain_db=-2, saturation=1.35),
-    Case('type-ii', highpass=50, lowpass=16000, noise_dbfs=-44,
+         right_gain_db=-2, tape='cassette-i'),
+    Case('type-ii', highpass=50, noise_dbfs=-44,
          wow=.22, flutter=.07, azimuth_us=4, crosstalk=.05,
-         right_gain_db=-1, saturation=1.15),
+         right_gain_db=-1, tape='cassette-ii'),
     Case('fast-flutter', wow=.45, flutter=.12,
          fast_flutter_25=.001, fast_flutter_60=.0005),
     Case('mains-buzz', mains_buzz_dbfs=-26),
@@ -147,9 +157,21 @@ def impair(source, case, seed=2026):
         left, right = x[:, 0].copy(), x[:, 1].copy()
         x[:, 0] = (1-case.crosstalk)*left + case.crosstalk*right
         x[:, 1] = case.crosstalk*left + (1-case.crosstalk)*right
+    deck = None
+    if case.tape:
+        from tools.v7_tape import DECKS, record
+        deck = DECKS[case.tape]
+        x = record(x, deck, RATE)
     x = time_warp(x, case)
     if case.azimuth_us:
         x[:, 1] = delay_channel(x[:, 1], case.azimuth_us * RATE / 1e6)
+    if deck is not None:
+        # Hiss is on the tape: it goes through playback with the signal.
+        from tools.v7_tape import playback
+        hiss = case.noise_dbfs if case.noise_dbfs is not None else deck.hiss_dbfs
+        if hiss is not None:
+            x += tape_noise(len(x), hiss, rng)
+        x = playback(x, deck, RATE)
     filters = []
     if case.highpass:
         filters.append(butter(4, case.highpass, btype='highpass', fs=RATE, output='sos'))
@@ -178,10 +200,11 @@ def impair(source, case, seed=2026):
     if case.bias_hz and case.bias_dbfs is not None:
         x += (10**(case.bias_dbfs / 20) *
               np.sin(2*np.pi*case.bias_hz*t))[:, None]
-    if case.noise_dbfs is not None:
+    if case.noise_dbfs is not None and deck is None:
         x += tape_noise(len(x), case.noise_dbfs, rng)
-    if case.saturation:
-        x = np.tanh(case.saturation*x) / np.tanh(case.saturation)
+    if case.digital_overdrive_db is not None:
+        from tools.v7_tape import digital_clip
+        x = digital_clip(x, case.digital_overdrive_db)
     if case.dropout_ms and case.dropout_every:
         duration = max(1, round(case.dropout_ms * RATE / 1000))
         period = max(duration + 1, round(case.dropout_every * RATE))

@@ -87,7 +87,7 @@ class MonoVideoWireTests(unittest.TestCase):
             np.ascontiguousarray(audio, dtype='<f4').tobytes()).hexdigest()
         self.assertEqual(
             digest,
-            '96e7f10b52d0d4bfc0d51ab6bf1962ac16e7bac3f8a49b71754d9c42c539c436')
+            '9ceb14c4306b9582d5742db71834bda8e19813b4e766dbaa4ca38c1cc495e3d1')
 
     def test_colour_order_keeps_head_and_is_a_permutation(self):
         order = colour_order(self.model)
@@ -781,7 +781,7 @@ class MonoVideoWireTests(unittest.TestCase):
                               AudioSource):
                     args = v7_live.parser().parse_args([
                         'send', '--device', 'memory', '--source', 'test',
-                        '--seconds', '.4', '--no-log', '--profile', profile,
+                        '--seconds', '5', '--no-log', '--profile', profile,
                         '--source-audio', 'device', '--source-audio-device', '7'])
                     v7_live.run_send(args)
                     captured_input = np.concatenate(written)
@@ -856,7 +856,10 @@ class MonoVideoWireTests(unittest.TestCase):
                              side_effect=AssertionError('separate capture')):
             args = v7_live.parser().parse_args([
                 'send', '--device', 'memory', '--source', 'video',
-                '--video-source', 'clip.mkv', '--seconds', '.24', '--no-log',
+                # Direct DCT is now the default. Allow its cold startup to
+                # finish before checking the first two packets; the old .24 s
+                # wall-clock budget could expire before either was written.
+                '--video-source', 'clip.mkv', '--seconds', '5', '--no-log',
                 '--experimental-mono-fold', '--source-audio', 'source'])
             v7_live.run_send(args)
 

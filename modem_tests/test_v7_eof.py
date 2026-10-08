@@ -27,36 +27,6 @@ class V7EOFTests(unittest.TestCase):
     def _packet_starts(self, stream):
         return v7.pulse_frame_starts(stream)
 
-    def test_schmitt_marker_matches_the_fitted_marker(self):
-        # The counted (Schmitt + run counter) marker must find the same EOF,
-        # at the same place, as the earlier least-squares fit -- on clean,
-        # noisy, saturated, polarity-inverted and slowed/sped streams.
-        rng = np.random.default_rng(7)
-        clean = self.eof_wire.astype(np.float32)
-        streams = {
-            'clean': clean,
-            'hiss': clean+rng.normal(0, 10**(-38/20), clean.shape).astype(np.float32),
-            'saturated': (np.tanh(2*clean)/np.tanh(2)).astype(np.float32),
-            'inverted': -clean,
-            'slow': v7.speed_pulse_stream(self.eof_wire, .8),
-            'fast': v7.speed_pulse_stream(self.eof_wire, 1.5),
-        }
-        for name, stream in streams.items():
-            mono = v7._mono(stream)
-            starts = self._packet_starts(stream)
-            self.assertGreaterEqual(len(starts), FRAME_COUNT-1, name)
-            for frame_start, scale, _ in starts:
-                fitted = v7._measure_eof_marker_fit(mono, frame_start, scale)
-                counted = v7._measure_eof_marker(mono, frame_start, scale)
-                with self.subTest(stream=name, frame_start=round(frame_start)):
-                    self.assertEqual(fitted is None, counted is None)
-                    if fitted is None:
-                        continue
-                    for key in ('start', 'end', 'scale', 'packet_scale'):
-                        self.assertAlmostEqual(counted[key], fitted[key],
-                                               places=6)
-                    self.assertEqual(counted['polarity'], fitted['polarity'])
-
     def test_counted_marker_ignores_chatter_inside_the_schmitt_band(self):
         # Small ringing that crosses zero near an edge breaks runs of raw
         # sign changes but never leaves the hysteresis band.
@@ -88,16 +58,15 @@ class V7EOFTests(unittest.TestCase):
 
     def test_marker_sits_in_the_guard_of_every_packet(self):
         self.assertEqual(len(self.eof_wire), FRAME_COUNT*v7.PULSE_FRAME)
-        expected = np.concatenate([
-            np.full(run, level, np.float32)
-            for run, level in zip(v7.EOF_MARKER_RUNS, v7.EOF_MARKER_LEVELS)
-        ])*np.float32(v7.emitted_pulse_level())
-        np.testing.assert_array_equal(
-            self.eof_wire[-v7.EOF_MARKER_LENGTH:, 0], expected)
-        np.testing.assert_array_equal(
-            self.eof_wire[-v7.EOF_MARKER_LENGTH:, 1], expected)
-        self.assertEqual(float(np.max(np.abs(
-            self.eof_wire[-32:-v7.EOF_MARKER_LENGTH]))), 0.0)
+        # The mark is shaped like the header and peaks at the header's level.
+        expected = v7._shaped_eof_marker()[-v7.EOF_MARKER_LENGTH:, 0]
+        for packet in self.eof_wire.reshape(FRAME_COUNT, v7.PULSE_FRAME, 2):
+            for channel in (0, 1):
+                np.testing.assert_allclose(
+                    packet[-v7.EOF_MARKER_LENGTH:, channel], expected,
+                    atol=.02)
+        self.assertAlmostEqual(float(np.max(np.abs(expected))),
+                               v7.emitted_pulse_level(), delta=1e-6)
 
     def test_eof_receiver_commits_final_packet_without_next_header(self):
         eof, info = v7.decode_pulse_stream(
@@ -126,22 +95,51 @@ class V7EOFTests(unittest.TestCase):
         self.assertEqual(len(results), FRAME_COUNT-1)
         self.assertEqual(info['eof_markers_validated'], FRAME_COUNT-1)
 
-    def test_damaged_interior_marker_falls_back_to_the_next_header(self):
-        damaged = self.eof_wire.copy()
+    def _toned_wire(self):
+        return v7.encode_pulse_stream(
+            self.model, [self.values]*FRAME_COUNT, pilot_tones=True)
+
+    def test_a_packet_without_its_mark_ends_where_its_tones_say(self):
+        damaged = self._toned_wire()
         second_end = 2*v7.PULSE_FRAME
         damaged[second_end-v7.EOF_MARKER_LENGTH:second_end] = 0
         results, info = v7.decode_pulse_stream(
-            self.model, damaged)
+            self.model, damaged, pilot_timing='tone-seeded')
 
-        # The mark's end is the next packet's origin, so the intact next
-        # header witnesses the second packet instead.
         self.assertEqual([result.counter for result in results],
                          list(range(1, FRAME_COUNT+1)))
         self.assertEqual(info['eof_markers_validated'], FRAME_COUNT-1)
-        self.assertEqual(info['next_header_witnesses'], 1)
+        self.assertEqual(info['tone_witnesses'], 1)
+        witness = results[1].diag['eof_marker']
+        self.assertEqual(witness['witness'], 'tones')
+        self.assertAlmostEqual(witness['end'], second_end, delta=.5)
         decoded = v7.values_from(self.model, results[1].coeffs)
         self.assertLess(float(np.sqrt(np.mean(
             np.square(decoded-self.values)))), .10)
+
+    def test_the_tone_end_needs_nothing_after_the_packet(self):
+        # One packet, its mark removed, and no audio after its last sample.
+        one = self._toned_wire()[:v7.PULSE_FRAME].copy()
+        one[-v7.EOF_MARKER_LENGTH:] = 0
+        for speed in (1.0, .8, 1.5):
+            stream = one if speed == 1.0 else v7.speed_pulse_stream(one, speed)
+            results, info = v7.decode_pulse_stream(
+                self.model, stream, pilot_timing='tone-seeded')
+            with self.subTest(speed=speed):
+                self.assertEqual(len(results), 1)
+                self.assertEqual(info['tone_witnesses'], 1)
+                self.assertTrue(results[0].diag['metadata_valid'])
+
+    def test_no_mark_and_no_tones_is_no_packet_even_before_a_header(self):
+        # Without tones the next header used to end the packet. It no longer
+        # does: a packet ends at its own mark or by its own tones.
+        damaged = self.eof_wire.copy()
+        second_end = 2*v7.PULSE_FRAME
+        damaged[second_end-v7.EOF_MARKER_LENGTH:second_end] = 0
+        results, info = v7.decode_pulse_stream(self.model, damaged)
+        self.assertEqual(info['tone_witnesses'], 0)
+        self.assertEqual(info['eof_markers_validated'], FRAME_COUNT-1)
+        self.assertEqual(results[1].status, 'lost')
 
     def test_packet_without_any_endpoint_is_held_and_decoding_resumes(self):
         damaged = self.eof_wire.copy()

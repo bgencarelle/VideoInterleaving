@@ -208,6 +208,7 @@ class ExperimentalFoldTests(unittest.TestCase):
         try:
             args = v7_live.parser().parse_args([
                 'send', '--device', 'memory', '--source', 'test',
+                '--experimental-fold', '500', '--no-dct-encode',
                 '--seconds', '0.25', '--no-log'])
             v7_live.run_send(args)
         finally:

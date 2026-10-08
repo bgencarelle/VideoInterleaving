@@ -182,7 +182,9 @@ class TemporalFusionTests(unittest.TestCase):
         values = v7_live._picture_values(
             self.model, _test_frame(), 'box', brightness=1.0)[0]
         audio = profile.encode(self.model, [values]*17)
-        audio = audio+rng.normal(0, 10**(-34/20), audio.shape)
+        # The wire sits about 3 dB higher since fixes list item 28; the noise
+        # follows it so the picture is as noisy as the test intends.
+        audio = audio+rng.normal(0, 10**(-31/20), audio.shape)
         results, _ = profile.decode(self.model, audio)
         plain, fused = self._held_stream_error(
             results, lambda result: profile.values(self.model, result),

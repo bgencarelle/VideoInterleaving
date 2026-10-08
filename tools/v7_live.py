@@ -44,6 +44,8 @@ sys.path.insert(0, str(ROOT))
 from animation_modem.imaging import values_image                         # noqa: E402
 from animation_modem import v7 as P                                       # noqa: E402
 from animation_modem import v7_kernels as K                               # noqa: E402
+from tools.v7_send_defaults import (NESTED_BASE_PROFILES, SENDER_DEFAULTS,  # noqa: E402
+                                    default_kernel_for_profile)
 from animation_modem.v7_live_input import (DirectionStreak, LiveInput,
                                            select_packet_hit,
                                            windowed_rate)                 # noqa: E402
@@ -946,6 +948,7 @@ def _send_profile(args, slots):
     encode_filter = getattr(args, 'encode_filter', None)
     brightness = getattr(args, 'brightness', None)
     perceptual_resize = getattr(args, 'perceptual_resize', 'off')
+    _apply_encode_defaults(args, slots)
     dct_encode = bool(getattr(args, 'dct_encode', False))
     if slots:
         encode_filter = encode_filter or 'box'
@@ -1120,13 +1123,21 @@ def deprecated_profiles_allowed():
 def selectable_send_profiles():
     return SEND_PROFILES+(DEPRECATED_SEND_PROFILES
                           if deprecated_profiles_allowed() else ())
-NESTED_BASE_PROFILES = {'aspect-mono-nested': 'aspect-mono-500',
-                        'stereo-nested': 'stereo-slices'}
 
 
 def _apply_profile_option(args):
-    """Translate the sender GUI/CLI profile name to the wire flags."""
+    """Translate the sender GUI/CLI profile name to the wire flags.
+
+    With no profile and no wire flag given, the sender's default profile
+    (tools/v7_send_defaults.py) is the one sent.
+    """
     profile = getattr(args, 'profile', None)
+    if profile is None and not (
+            getattr(args, 'experimental_mono_fold', False) or
+            getattr(args, 'experimental_fold', None) is not None or
+            getattr(args, 'aspect_fold', False) or
+            getattr(args, 'slices', None)):
+        profile = args.profile = SENDER_DEFAULTS['profile']
     if profile == 'mono-fold-500':
         args.experimental_mono_fold = True
     elif profile == 'mono-colour-500':
@@ -1172,14 +1183,27 @@ def _kernel_defaults_profile(args):
 
 
 def _default_kernel_for_profile(profile):
-    """The quality-tuned active kernel default for Aspect profiles."""
-    if profile in ('aspect-fold-500', 'aspect-mono-500', 'aspect-mono-nested'):
-        return 'viewer_solve'
-    if profile == 'stereo-nested':
-        # Benchmark winner through the live nested chain (see the sender GUI's
-        # PROFILE_DEFAULT_KERNELS, which this mirrors).
-        return 'upscale_precomp'
-    return K.REFERENCE
+    """The quality-tuned active kernel default for a profile."""
+    return default_kernel_for_profile(profile)
+
+
+def _apply_encode_defaults(args, profile_slots):
+    """Fill the picture-encode choices nobody made from the sender defaults.
+
+    Direct DCT is the default wherever the wire can carry it, and the luma
+    re-fit follows it, exactly as the sender GUI starts out.
+    An explicit --dct-encode/--no-dct-encode or --luma-adjust/--no-luma-adjust
+    is left alone (and refused later if the wire cannot do it).
+    """
+    if getattr(args, 'dct_encode', None) is None:
+        args.dct_encode = bool(
+            SENDER_DEFAULTS['dct_encode'] and profile_slots == 500 and
+            (getattr(args, 'encode_filter', None) or 'box') == 'box' and
+            getattr(args, 'perceptual_resize', 'off') == 'off' and
+            P._is_reference(getattr(args, 'fixture', None)))
+    if getattr(args, 'luma_adjust', None) is None:
+        args.luma_adjust = bool(
+            SENDER_DEFAULTS['luma_adjust'] and args.dct_encode)
 
 
 HOST_PARAM_NAMES = ('luma_mix', 'chroma_mix')
@@ -1309,6 +1333,7 @@ def _run_send_session(args):
     if clip_aware and not (fold is not None or mono_fold_profile or
                            aspect_profile or getattr(args, 'slices', None)):
         raise ValueError('--clip-aware-encode requires a folded profile')
+    _apply_encode_defaults(args, profile_slots)
     luma_adjusted = bool(getattr(args, 'luma_adjust', False))
     if luma_adjusted and not getattr(args, 'dct_encode', False):
         raise ValueError('--luma-adjust requires --dct-encode')
@@ -2340,8 +2365,17 @@ class _ProfileStatusProbe:
                 events.append({'position': absolute, 'scale': scale,
                                'side_index': self.side_index, 'mode': None})
                 continue
-            mode = profile_by_position.get(int(round(position)))
             self.last_position = absolute
+            # A packet runs from its header to its end: a header with no end
+            # where its own scale puts it (no mark, no steady timing tone)
+            # is something in the picture data that looked like one.
+            mono = np.asarray(self.audio, np.float32)
+            if mono.ndim == 2:
+                mono = mono.mean(axis=1)
+            if (P._measure_eof_marker(mono, position, scale) is None and
+                    P._tone_eof_marker(mono, position, scale) is None):
+                continue
+            mode = profile_by_position.get(int(round(position)))
             events.append({'position': absolute, 'scale': scale,
                            'side_index': self.side_index, 'mode': mode})
         self.input.decoded()
@@ -4492,8 +4526,8 @@ def parser():
                       default=None,
                       help=argparse.SUPPRESS)
     send.add_argument(
-        '--luma-adjust', action='store_true',
-        help=('with --dct-encode: re-fit luma so each pixel keeps the source '
+        '--luma-adjust', action=argparse.BooleanOptionalAction, default=None,
+        help=('on by default with Direct DCT: re-fit luma so each pixel keeps the source '
               'brightness with the chroma the receiver will have (keeps '
               'coloured edges from darkening or ringing; sender only)'))
     send.add_argument(
@@ -4532,8 +4566,12 @@ def parser():
         help=('re-fit the sent luma coefficients so ringing falls into the '
               'receiver\'s black/white clip (sender only; folded profiles)'))
     source_path = send.add_mutually_exclusive_group()
-    source_path.add_argument('--dct-encode', action='store_true',
-                             help='analyze the unprepared RGB source in the V7 DCT domain')
+    source_path.add_argument('--dct-encode',
+                             action=argparse.BooleanOptionalAction,
+                             default=None,
+                             help='analyze the unprepared RGB source in the '
+                                  'V7 DCT domain (the default; '
+                                  '--no-dct-encode resizes first instead)')
     source_path.add_argument(
         '--perceptual-resize',
         choices=('off', 'linear-box', 'gamma-detail', 'linear-detail'),
@@ -4600,7 +4638,7 @@ def parser():
     send_profile.add_argument(
         '--profile', choices=selectable_send_profiles(),
         default=None,
-        help=('wire profile: aspect-fold-500 (stereo), aspect-mono-500 (mono '
+        help=('wire profile (default: aspect-fold-500): aspect-fold-500 (stereo), aspect-mono-500 (mono '
               'video), or the nested fold under test against each: '
               'stereo-nested and aspect-mono-nested. The receiver reads all '
               'of them without a setting.'))

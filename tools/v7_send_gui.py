@@ -31,6 +31,10 @@ if str(ROOT) not in sys.path:
 
 from tools.v7_preview_protocol import parse_preview_datagram
 from animation_modem import v7_kernels
+# What an untouched GUI sends is what a sender with no switches sends.
+from tools.v7_send_defaults import (DEFAULT_PROFILE, NESTED_BASE_PROFILES,
+                                    PROFILE_DEFAULT_KERNELS, SENDER_DEFAULTS,
+                                    default_kernel_for_profile)
 
 
 # The profiles on offer: the two aspect profiles and the nested fold that is
@@ -54,10 +58,6 @@ def valid_profiles():
     allowed = os.environ.get('V7_ALLOW_DEPRECATED_PROFILES', '') not in ('', '0')
     return tuple(value for _label, value in PROFILE_CHOICES)+(
         DEPRECATED_PROFILES if allowed else ())
-# Nested-fold modes ride on these wires and share their kernel defaults.
-NESTED_BASE_PROFILES = {'aspect-mono-nested': 'aspect-mono-500',
-                        'stereo-nested': 'stereo-slices'}
-DEFAULT_PROFILE = 'aspect-fold-500'
 MONO_PROFILES = ('mono-colour-500', 'aspect-mono-500', 'aspect-mono-nested')
 FOLDED_PROFILES = ('fold-500', 'mono-colour-500', 'aspect-fold-500',
                    'aspect-mono-500', 'stereo-slices', 'aspect-mono-nested',
@@ -319,25 +319,6 @@ DEFAULT_KERNEL_BENCHMARK_WINNERS = {
     'ideal': 'csf_peak',
     'bilinear': 'viewer_solve',
 }
-PROFILE_DEFAULT_KERNELS = {
-    'aspect-mono-500': 'viewer_solve',
-    'aspect-fold-500': 'viewer_solve',
-    # Scored through the live nested sender and receiver at a bilinear
-    # display (docs/V7_NESTED_FOLD_ISSUES.md): the mono fold does best with
-    # its base wire's kernel, the stereo fold with this one.  The stock
-    # stereo-slices wire gains nothing from either and stays on the reference.
-    'stereo-nested': 'upscale_precomp',
-}
-
-
-def default_kernel_for_profile(profile):
-    """Kernel enabled by default for the selected sender wire profile."""
-    if profile in PROFILE_DEFAULT_KERNELS:
-        return PROFILE_DEFAULT_KERNELS[profile]
-    return PROFILE_DEFAULT_KERNELS.get(NESTED_BASE_PROFILES.get(profile, profile),
-                                       ENCODE_DEFAULTS['dct_kernel'])
-
-
 TONE_DEFAULTS = {'brightness': '', 'gamma': '1'}
 TWEAK_FIELDS = tuple(TONE_DEFAULTS) + tuple(ENCODE_DEFAULTS)
 # The sending screen's controls, grouped by what they do.
@@ -1490,8 +1471,11 @@ def build_command(settings, devices, sd_module=None, python=None,
         if checked['perceptual_detail_strength'] != 0.25:
             command.extend(('--perceptual-detail-strength',
                             str(checked['perceptual_detail_strength'])))
-    if checked['dct_encode']:
-        command.append('--dct-encode')
+    if not checked['dct_encode']:
+        # A downscaler already rules Direct DCT out on the command line.
+        if checked['perceptual_resize'] == 'off':
+            command.append('--no-dct-encode')
+    else:
         if checked['dct_sharpen'] != 'off':
             command.extend(('--dct-sharpen', checked['dct_sharpen']))
             if checked['dct_sharpen_strength'] != .25:
@@ -1521,8 +1505,9 @@ def build_command(settings, devices, sd_module=None, python=None,
             if (checked['profile'] == 'aspect-fold-500' and
                     checked['pixel_grid'] != 'robust'):
                 command.extend(('--pixel-grid', checked['pixel_grid']))
-        if checked['luma_adjust']:
-            command.append('--luma-adjust')
+        if not checked['luma_adjust']:
+            command.append('--no-luma-adjust')
+        else:
             if checked['luma_adjust_linear']:
                 command.append('--luma-adjust-linear')
     if checked['clip_aware']:
@@ -1785,9 +1770,9 @@ class SenderGui:
             'capture_filter': 'auto',
             'perceptual_resize': 'off',
             'perceptual_detail_strength': '0.25',
-            'dct_encode': True,
+            'dct_encode': SENDER_DEFAULTS['dct_encode'],
             'clip_aware': False,
-            'luma_adjust': True,
+            'luma_adjust': SENDER_DEFAULTS['luma_adjust'],
             'luma_adjust_linear': False,
             'pixel_encode': False,
             'pixel_detail': 'average',

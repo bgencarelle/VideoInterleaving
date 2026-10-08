@@ -56,7 +56,9 @@ EOF_MARKER_LEVELS = (1, -1, 1, -1)
 EOF_MARKER_EDGES = np.cumsum(EOF_MARKER_RUNS[:-1], dtype=float)-.5
 EOF_MARKER_CENTERS = (np.cumsum((0,)+EOF_MARKER_RUNS[:-1], dtype=float)+
                       np.asarray(EOF_MARKER_RUNS, dtype=float)/2)
-EOF_MARKER_MIN_LEVEL = .08
+# Fractions of the level the packet's header arrived at (_header_level).
+EOF_MARKER_MIN_LEVEL = .6       # every run of the mark must reach this
+EOF_HEADER_PERCENTILE = 90      # of the header word's magnitude: its plateau
 EOF_MARKER_RUNS_ARRAY = np.asarray(EOF_MARKER_RUNS, dtype=np.float64)
 EOF_SEARCH_FRACTION = .012
 # measure_pulses() fits one scale over the preamble edge word, centered near
@@ -1024,6 +1026,39 @@ def encode_frame_coeffs(model, coeffs, counter, return_X=False,
 # Pulse packets are band-limited here (bound_emission in encode_pulse_frame).
 EMISSION_EDGE_HZ = 14000
 
+# Peak reduction (fixes list item 28). The body's rare spikes set the level
+# of the whole packet, so they are clipped at PEAK_CLIP_DB over the body's
+# average and the clipping's spill outside the used carriers is filtered
+# off, PEAK_CLIP_ROUNDS times. What lands on the carriers is a small fixed
+# noise; the packet can then be sent louder. None turns it off: off by
+# default, since live it cost more picture than it gained except under heavy
+# hiss, and dropped packets on one test picture (item 28).
+PEAK_CLIP_DB = None
+PEAK_CLIP_ROUNDS = 3
+
+
+def _reduce_peaks(body, clip_db=None, rounds=None):
+    """Clip and filter an OFDM body, symbol by symbol, keeping each
+    symbol's used bins and cyclic prefix."""
+    clip_db = PEAK_CLIP_DB if clip_db is None else clip_db
+    rounds = PEAK_CLIP_ROUNDS if rounds is None else rounds
+    symbols = np.asarray(body, np.float64).reshape(F, SYM, -1)
+    core = symbols[:, CP:, :]
+    spectrum = np.fft.rfft(core, axis=1)
+    used = np.abs(spectrum) > 1e-9*max(float(np.max(np.abs(spectrum))), 1e-30)
+    level = np.sqrt(np.mean(core*core, axis=(0, 1)))
+    if not np.all(level > 0):
+        return body
+    limit = level*10**(clip_db/20)
+    wave = core
+    for _ in range(int(rounds)):
+        wave = np.clip(wave, -limit, limit)
+        cells = np.fft.rfft(wave, axis=1)
+        cells[~used] = 0
+        wave = np.fft.irfft(cells, n=N, axis=1)
+    out = np.concatenate((wave[:, -CP:, :], wave), axis=1)
+    return out.reshape(np.shape(body)).astype(np.float32)
+
 
 def max_wire_speed(rate):
     """Playback speed below which a `rate` Hz output retains the full band.
@@ -1058,23 +1093,21 @@ def encode_pulse_frame(model, values, counter, aspect_code=0, source_index=None,
 
 
 # Emitted levels. The header's shaped peak is HEADER_PEAK_DB below full scale,
-# and the EOF pulses use the same pulse plateau as the header. EOF-marked
+# and the EOF pulses peak at the same level. EOF-marked
 # packets are measured after tone mixing: the body stays at least
 # 1.5 dB below the lower final header/EOF peak, and metadata stays 0.5 dB below
 # the body.
-# BODY_BELOW_HEADER_DB remains the pre-limiter for legacy no-EOF packets.
-# Timing tones are scaled with body RMS; a header nearer full scale costs lossy
-# codecs frames (MP3 at 192 kbit/s and below).
-HEADER_PEAK_DB = 3.0
-BODY_BELOW_HEADER_DB = 1.5
+# Timing tones are scaled with body RMS. Header and EOF peak 1.75 dB under
+# clipping before the timing tones, 1 to 1.5 dB with them (fixes list
+# item 28).
+HEADER_PEAK_DB = 1.75
 HEADER_PEAK = 10**(-HEADER_PEAK_DB/20)
-BODY_PEAK = HEADER_PEAK*10**(-BODY_BELOW_HEADER_DB/20)
 BODY_BELOW_EOF_DB = 1.5
 METADATA_BELOW_BODY_DB = .5
 
-# Per-packet auto-level, off for the historical wire (where only a loud body
-# is scaled).  Inside ``body_auto_level()`` every packet's body is raised to
-# the ceiling a loud one is held at, by at most BODY_AUTO_LEVEL_MAX_DB.
+# Per-packet auto-level, on for every wire: each packet's body is raised to
+# the ceiling a loud one is held at, by at most BODY_AUTO_LEVEL_MAX_DB
+# (fixes list item 28). ``body_auto_level(False)`` turns it off in a block.
 BODY_AUTO_LEVEL_MAX_DB = 12.0
 _AUTO_LEVEL = threading.local()
 
@@ -1084,7 +1117,7 @@ def body_auto_level(enabled=True):
     """Packets encoded in this block (this thread) use the whole headroom
     under the header.  The pilots rise with the body, so a receiver reads
     the packet exactly as before, at a better signal-to-noise ratio."""
-    previous = getattr(_AUTO_LEVEL, 'on', False)
+    previous = getattr(_AUTO_LEVEL, 'on', True)
     _AUTO_LEVEL.on = bool(enabled)
     try:
         yield
@@ -1105,9 +1138,53 @@ def _shaped_preamble(profile_code):
     return shaped, float(PULSE.PREAMBLE_AMPLITUDE*gain)
 
 
+@lru_cache(maxsize=1)
+def _shaped_eof_marker():
+    """The band-limited EOF mark, alone at the end of an empty packet, its
+    shaped peak at the header's (HEADER_PEAK). Shaped like the header, so it
+    keeps its level through any later rate conversion instead of
+    overshooting (a square mark rang 1.5 dB over at 96 kHz, and the sender's
+    resampler then turned the whole packet down to hold it)."""
+    out = np.zeros((PULSE_FRAME, 2), np.float32)
+    marker = np.concatenate([
+        np.full(run, level, np.float32)
+        for run, level in zip(EOF_MARKER_RUNS, EOF_MARKER_LEVELS)])
+    out[EOF_MARKER_OFFSET:, :] = marker[:, None]
+    shaped = shape_emission(out, EMISSION_EDGE_HZ, RATE)
+    shaped = (shaped*np.float32(HEADER_PEAK/float(np.max(np.abs(shaped)))))
+    shaped = shaped.astype(np.float32)
+    shaped.setflags(write=False)
+    return shaped
+
+
+def _shaped_eof_edges():
+    """Where the shaped mark's three edges cross zero, in samples from the
+    mark's start: the shaping moves them a little off the square mark's run
+    boundaries, and the mark is measured against these."""
+    from scipy.signal import resample_poly
+    fine = 32     # the shaped mark is continuous; find its true crossings
+    wave = resample_poly(np.asarray(_shaped_eof_marker()[:, 0], np.float64),
+                         fine, 1)
+    edges = []
+    for nominal in EOF_MARKER_EDGES:
+        base = (EOF_MARKER_OFFSET+int(np.floor(nominal)))*fine
+        for i in sorted(range(base-3*fine, base+4*fine),
+                        key=lambda i: abs(i-base)):
+            if np.signbit(wave[i]) != np.signbit(wave[i+1]):
+                crossing = i+wave[i]/(wave[i]-wave[i+1])
+                edges.append(crossing/fine-EOF_MARKER_OFFSET)
+                break
+        else:
+            raise RuntimeError('shaped EOF mark lost an edge')
+    return np.asarray(edges, np.float64)
+
+
+SHAPED_EOF_EDGES = _shaped_eof_edges()
+
+
 def emitted_pulse_level(profile_code=1):
-    """The level the header's and the end marker's pulses are sent at."""
-    return _shaped_preamble(int(profile_code))[1]
+    """The level the header's and the end marker's pulses peak at."""
+    return HEADER_PEAK
 
 
 def encode_pulse_frame_coeffs(model, coeffs, counter, aspect_code=0,
@@ -1125,6 +1202,8 @@ def encode_pulse_frame_coeffs(model, coeffs, counter, aspect_code=0,
     body = encode_frame_coeffs(model, coeffs, counter,
                                pilot_values=pilot_values,
                                right_coeffs=right_coeffs)
+    if PEAK_CLIP_DB is not None:
+        body = _reduce_peaks(body)
     out = np.zeros((PULSE_FRAME, 2), np.float32)
     out[PULSE.SYNC_LEN:PULSE.SYNC_LEN+FRAME] = body
     meta = np.zeros((N//2+1, 2), complex)
@@ -1144,17 +1223,17 @@ def encode_pulse_frame_coeffs(model, coeffs, counter, aspect_code=0,
     # header level is fixed per profile. The packet gets a final-mix limiter
     # below, after marker and timing-tone contributions are present.
     shaped = shape_emission(out, EMISSION_EDGE_HZ, RATE)
+    # Start the body at the header's peak; the final-mix limiter below then
+    # brings it to exactly BODY_BELOW_EOF_DB under the lower framing peak.
     peak = float(np.max(np.abs(shaped)))
-    if peak > BODY_PEAK:
-        shaped *= np.float32(BODY_PEAK/peak)
-    elif getattr(_AUTO_LEVEL, 'on', False) and peak > 0:
+    if peak > HEADER_PEAK:
+        shaped *= np.float32(HEADER_PEAK/peak)
+    elif getattr(_AUTO_LEVEL, 'on', True) and peak > 0:
         # Per-packet auto-level (see body_auto_level).
-        shaped *= np.float32(min(BODY_PEAK/peak, 10**(BODY_AUTO_LEVEL_MAX_DB/20)))
-    header, pulse_level = _shaped_preamble(int(pulse_profile_code))
-    marker = np.concatenate([
-        np.full(run, level, np.float32)
-        for run, level in zip(EOF_MARKER_RUNS, EOF_MARKER_LEVELS)
-    ])*np.float32(pulse_level)
+        shaped *= np.float32(min(HEADER_PEAK/peak,
+                                 10**(BODY_AUTO_LEVEL_MAX_DB/20)))
+    header, _ = _shaped_preamble(int(pulse_profile_code))
+    eof_mark = _shaped_eof_marker()
     body_region = slice(PULSE.SYNC_LEN, PULSE.SYNC_LEN+FRAME)
     header_region = slice(0, PULSE.SYNC_LEN)
     metadata_region = slice(meta_start, meta_start+META_SYMBOL)
@@ -1166,7 +1245,7 @@ def encode_pulse_frame_coeffs(model, coeffs, counter, aspect_code=0,
         packet = shaped*np.float32(body_gain)
         packet += header
         packet[metadata_region] += meta_pcm[:, None]*np.float32(metadata_gain)
-        packet[eof_region] += marker[:, None]
+        packet += eof_mark
         return packet
 
     # Both built-in and Fold-500 pilot overlays are body-RMS-scaled, so their
@@ -3916,7 +3995,45 @@ def _remeasure_pulse_starts(samples, anchors, sample_rate=RATE, mono=None):
     return measured
 
 
-EOF_EDGE_HYSTERESIS = .04    # Schmitt band around zero for marker edges
+EOF_EDGE_HYSTERESIS = .35    # Schmitt band, as a fraction of header level
+
+
+def _header_level(mono, frame_start, scale, fallback=None):
+    """The level a packet's header word arrived at: the plateau of its
+    runs. When the header is not in the samples given, ``fallback`` (or the
+    level it is sent at)."""
+    lo = int(np.ceil(frame_start+16*scale))
+    hi = int(np.floor(frame_start+(16+len(PULSE.PREAMBLE))*scale))
+    if lo < 0 or hi > len(mono) or hi-lo < 32:
+        return HEADER_PEAK if fallback is None else float(fallback)
+    return float(np.percentile(np.abs(mono[lo:hi]), EOF_HEADER_PERCENTILE))
+
+
+
+@njit(cache=True)
+def _crossing_fraction(mono, left):
+    """Where a band-limited signal crosses zero between samples left and
+    left+1, from the cubic through the four samples around it (a straight
+    line between the two is biased on a shaped edge)."""
+    y1 = mono[left]
+    y2 = mono[left+1]
+    t = y1/(y1-y2)
+    if left < 1 or left+2 >= mono.shape[0]:
+        return t
+    y0 = mono[left-1]
+    y3 = mono[left+2]
+    a = -.5*y0+1.5*y1-1.5*y2+.5*y3
+    b = y0-2.5*y1+2*y2-.5*y3
+    c = -.5*y0+.5*y2
+    for _ in range(4):
+        value = ((a*t+b)*t+c)*t+y1
+        slope = (3*a*t+2*b)*t+c
+        if slope == 0:
+            break
+        t -= value/slope
+    if not 0.0 <= t <= 1.0:
+        return y1/(y1-y2)
+    return t
 
 
 @njit(cache=True, fastmath=False)
@@ -3952,7 +4069,7 @@ def _eof_marker_kernel(mono, lo, hi, expected_start, radius, start_scale,
         now = 1 if value > hysteresis else (-1 if value < -hysteresis else 0)
         if now != 0 and state != 0 and now != state and last_crossing >= lo:
             left = last_crossing
-            times[edges] = left + mono[left]/(mono[left]-mono[left+1])
+            times[edges] = left + _crossing_fraction(mono, left)
             signs[edges] = now
             peaks[edges] = run_peak
             edges += 1
@@ -4021,15 +4138,13 @@ def _eof_marker_kernel(mono, lo, hi, expected_start, radius, start_scale,
             out[8] = error
 
 
-def _measure_eof_marker(samples, frame_start, start_scale):
+def _measure_eof_marker(samples, frame_start, start_scale, radius=None):
     """Find a packet's EOF mark with a Schmitt trigger and a run counter.
 
     The mark is a known four-run pattern at preamble level, so like the
     header it is counted, not fitted: see _eof_marker_kernel. The search is
     gated around the packet-clock prediction. Returns the marker's measured
     start, end and scale and the packet scale they imply, or None.
-    _measure_eof_marker_fit is the earlier fitted implementation, kept as the
-    reference in tests.
     """
     mono = np.asarray(samples)
     if mono.ndim == 2:
@@ -4039,16 +4154,24 @@ def _measure_eof_marker(samples, frame_start, start_scale):
         return None
     start_scale = float(start_scale)
     expected_start = float(frame_start)+EOF_MARKER_OFFSET*start_scale
-    radius = max(12*start_scale, EOF_SEARCH_FRACTION*PULSE_FRAME*start_scale)
+    if radius is None:
+        radius = max(12*start_scale,
+                     EOF_SEARCH_FRACTION*PULSE_FRAME*start_scale)
     lo = max(0, int(np.floor(expected_start-radius)))
     hi = min(len(mono), int(np.ceil(expected_start+
                                     EOF_MARKER_LENGTH*start_scale+radius)))
     if hi-lo < EOF_MARKER_LENGTH*start_scale:
         return None
+    # The mark is sent at the header's level, so it is judged against the
+    # level this packet's header arrived at, not against fixed numbers.
+    # Without the header, the loudest sample near the mark stands in: the
+    # mark is the loudest thing at the end of a packet.
+    level = _header_level(mono, float(frame_start), start_scale,
+                          fallback=float(np.max(np.abs(mono[lo:hi]))))
     out = np.zeros(9)
     _eof_marker_kernel(mono, lo, hi, expected_start, radius, start_scale,
-                       EOF_EDGE_HYSTERESIS, EOF_MARKER_MIN_LEVEL,
-                       EOF_MARKER_EDGES, EOF_MARKER_RUNS_ARRAY, out)
+                       EOF_EDGE_HYSTERESIS*level, EOF_MARKER_MIN_LEVEL*level,
+                       SHAPED_EOF_EDGES, EOF_MARKER_RUNS_ARRAY, out)
     if not out[0]:
         return None
     marker_start, fitted_scale = float(out[1]), float(out[2])
@@ -4067,126 +4190,6 @@ def _measure_eof_marker(samples, frame_start, start_scale):
     }
 
 
-def _measure_eof_marker_fit(samples, frame_start, start_scale):
-    """Validate the three known transitions in a packet's 32-sample EOF mark.
-
-    The marker is a distinct four-run (+, -, +, -) sequence at the same level
-    as the acquisition preamble. Search is gated around the packet-clock
-    prediction; acceptance then comes from the transition spacing, polarity,
-    plateau levels, and a linear fit to the three zero crossings.
-    """
-    mono = np.asarray(samples, dtype=float)
-    if mono.ndim == 2:
-        mono = mono.mean(axis=1)
-    if mono.ndim != 1 or start_scale <= 0:
-        return None
-
-    expected_start = float(frame_start)+EOF_MARKER_OFFSET*float(start_scale)
-    radius = max(12*float(start_scale),
-                EOF_SEARCH_FRACTION*PULSE_FRAME*float(start_scale))
-    lo = max(0, int(np.floor(expected_start-radius)))
-    hi = min(len(mono), int(np.ceil(expected_start+
-                                    EOF_MARKER_LENGTH*start_scale+radius)))
-    if hi-lo < EOF_MARKER_LENGTH*start_scale:
-        return None
-    window = mono[lo:hi]
-
-    def interpolate(positions):
-        positions = np.asarray(positions, dtype=float)
-        clipped = np.clip(positions, 0, len(mono)-1)
-        left = np.clip(np.floor(clipped).astype(np.intp), 0, len(mono)-2)
-        fraction = clipped-left
-        return mono[left]+fraction*(mono[left+1]-mono[left])
-
-    crossings = np.flatnonzero(np.diff(np.signbit(window)))
-    if len(crossings) < 3:
-        return None
-    left = crossings
-    crossing_values = window[left]
-    edge_positions = (lo+left+crossing_values /
-                      (crossing_values-window[left+1]))
-
-    edge_coordinates = EOF_MARKER_EDGES
-    center_coordinates = EOF_MARKER_CENTERS
-    level_signs = np.asarray(EOF_MARKER_LEVELS, dtype=float)
-    fit_matrix = np.column_stack((np.ones(3), edge_coordinates))
-    nominal_gaps = np.diff(edge_coordinates)
-    candidates = []
-    for index in range(len(edge_positions)-2):
-        observed = edge_positions[index:index+3]
-        gaps = np.diff(observed)
-        marker_scale = float(np.mean(gaps/nominal_gaps))
-        if (not np.isfinite(marker_scale) or marker_scale <= 0 or
-                not .7*start_scale <= marker_scale <= 1.3*start_scale):
-            continue
-        gap_error = float(np.max(np.abs(gaps-nominal_gaps*marker_scale)))
-        if gap_error > max(1.5, .40*np.min(nominal_gaps)*marker_scale):
-            continue
-        offset, fitted_scale = np.linalg.lstsq(
-            fit_matrix, observed, rcond=None)[0]
-        fitted_scale = float(fitted_scale)
-        if (not np.isfinite(offset+fitted_scale) or fitted_scale <= 0 or
-                abs(fitted_scale/marker_scale-1) > .08):
-            continue
-        fit = offset+edge_coordinates*fitted_scale
-        residual = float(np.sqrt(np.mean(np.square(observed-fit))))
-        residual_limit = max(1.5, .45*fitted_scale)
-        confidence = float(np.clip(1-residual/residual_limit, 0, 1))
-        marker_start = float(offset)
-        if abs(marker_start-expected_start) > radius:
-            continue
-        centers = marker_start+center_coordinates[:3]*fitted_scale
-        levels = interpolate(centers)
-        edge_step = max(.75, .75*fitted_scale)
-        before_edges = interpolate(observed-edge_step)
-        after_edges = interpolate(observed+edge_step)
-        marker_polarity = None
-        signed_levels = None
-        for polarity in (1, -1):
-            trial_centers = polarity*level_signs[:3]*levels
-            trial_before = polarity*level_signs[:3]*before_edges
-            trial_after = polarity*level_signs[1:]*after_edges
-            if (float(np.min(trial_centers)) >= EOF_MARKER_MIN_LEVEL and
-                    float(np.min(trial_before)) >= .04 and
-                    float(np.min(trial_after[:2])) >= .04 and
-                    float(trial_after[2]) >= .01):
-                marker_polarity = polarity
-                signed_levels = np.concatenate((trial_centers,
-                                                trial_before, trial_after))
-                break
-        if marker_polarity is None:
-            continue
-        if confidence < .45:
-            continue
-        marker_end = marker_start+EOF_MARKER_LENGTH*fitted_scale
-        packet_scale = (marker_end-float(frame_start))/PULSE_FRAME
-        candidates.append({
-            'start': marker_start,
-            'end': marker_end,
-            'scale': fitted_scale,
-            'packet_scale': packet_scale,
-            'confidence': confidence,
-            'edge_residual': residual,
-            'gap_error': gap_error,
-            'min_level': float(np.min(signed_levels)),
-            'polarity': marker_polarity,
-            'prediction_error': float(marker_start-expected_start),
-        })
-    if not candidates:
-        return None
-    return min(candidates, key=lambda item: (
-        abs(item['prediction_error']),
-        item['edge_residual']+item['gap_error']*.25))
-
-
-# --------------------------------------- splices (transport spec §6, Splices)
-# Digital time-stretching and pitch-shifting (WSOLA-type: ffmpeg atempo, most
-# players' speed controls) keep the waveform's local scale -- which the header
-# edges measure, and which is the pitch -- but cut or repeat whole chunks of a
-# few hundred samples to change the duration. A packet that contains such a
-# splice is longer or shorter than its header scale predicts by the chunk.
-# Both sides of the splice are intact at the header scale; only the symbols
-# the splice falls in are lost.
 SPLICE_MIN_JUMP = 24            # samples at scale 1: below this, affine map
 # A pitch shift that keeps the tempo stretches a packet's header-scale length
 # by the inverse factor: half (pitch down 0.5) to double (pitch up 2). Splices may
@@ -4221,14 +4224,122 @@ def _cp_scores_at(samples, indexes):
     return np.sum(prefix*tail, axis=1)/np.maximum(energy, 1e-12)
 
 
+TONE_END_MAX_STEP = .03         # tone speed this far off the header: no backup
+TONE_END_MIN_STEADINESS = .75   # 1: the tone's phase is one straight line
+TONE_END_MARK_RADIUS = 4.0      # samples either side of the tone-given end
+TONE_END_CONFIDENCE = .5        # stands in for a counted mark's confidence
+_TONE_END_BIN = max(PILOT_TONE_BINS)
+# One symbol-long read per body symbol, started half a cyclic prefix in: the
+# data carriers are whole cycles in it, so they cancel and only the tone is
+# left in its bin.
+_TONE_END_READ = (PULSE.SYNC_LEN+CP//2+np.arange(F)[:, None]*SYM +
+                  np.arange(N)[None, :]).astype(np.float64)
+_TONE_END_PROBE = np.exp(-2j*np.pi*np.arange(N)*_TONE_END_BIN/N)
+_TONE_END_ADVANCE = 2*np.pi*_TONE_END_BIN*SYM/N     # radians per symbol
+
+
+def _packet_tone_scale(mono, frame_start, scale):
+    """Samples per packet sample, measured from a packet's own timing tone.
+
+    The tone runs unbroken through the body, so the phase it gains from one
+    symbol to the next is the playback speed. Each symbol is read on the
+    header's clock, the tone's phase taken, and the clock corrected until
+    the phase advances as sent. Returns (scale, steadiness), or None when
+    the body is not all in or the tone is not there.
+    """
+    scale = float(scale)
+    lo = max(0, int(frame_start)-8)
+    hi = min(len(mono), int(np.ceil(
+        frame_start+PULSE_FRAME*scale*(1+2*TONE_END_MAX_STEP)))+8)
+    segment = np.ascontiguousarray(mono[lo:hi], np.float64)[:, None]
+    # The header's clock drifts off the packet's as the body goes on, and a
+    # read that has slid into the next symbol is no use. So the first few
+    # symbols correct the clock, then more of them, then all.
+    for count in (4, 8, 16, F, F):
+        indexes = (frame_start-lo)+_TONE_END_READ[:count].ravel()*scale
+        if indexes[-1] >= len(segment)-4:
+            return None
+        read = _sample_at(segment, indexes, taps=4)[:, 0].reshape(count, N)
+        tone = read.astype(np.float64) @ _TONE_END_PROBE
+        level = np.abs(tone)
+        if not np.all(np.isfinite(level)) or float(np.sum(level)) <= 0:
+            return None
+        symbols = np.arange(count)
+        # A profile may flip the tone's sign symbol by symbol (coded
+        # pilots); squaring removes the sign and doubles the phase.
+        phase = np.unwrap(np.angle(
+            tone*tone*np.exp(-2j*_TONE_END_ADVANCE*symbols)))
+        slope = .5*float(np.polyfit(symbols, phase, 1, w=level)[0])
+        scale /= 1+slope/_TONE_END_ADVANCE
+    # Is it the tone? Its phase, once the clock is right, lies on one line
+    # through every symbol; noise or picture data does not.
+    fit = np.polyval(np.polyfit(symbols, phase, 1, w=level), symbols)
+    weight = level*level
+    steadiness = float(np.abs(np.sum(weight*np.exp(1j*(phase-fit)))) /
+                       np.sum(weight))
+    if steadiness < TONE_END_MIN_STEADINESS:
+        return None
+    return scale, steadiness
+
+
+def _tone_eof_marker(mono, frame_start, scale):
+    """A packet's end from its own timing tone, when its EOF mark is not
+    where the header puts it.
+
+    The tone's pitch is the packet's playback speed, the speed is its
+    length, and the header position plus that length is its end. The mark is
+    looked for once more, closely, at that end; if it is still absent the
+    tone length itself ends the packet (witness 'tones'). Nothing past the
+    packet's own last sample decides anything. Returns a
+    _measure_eof_marker-style dict, or None when the tone is not there or
+    the packet is not all in yet.
+    """
+    scale = float(scale)
+    measured = _packet_tone_scale(mono, frame_start, scale)
+    if measured is None:
+        return None
+    tone_scale, steadiness = measured
+    if not abs(tone_scale/scale-1) <= TONE_END_MAX_STEP:
+        return None
+    marker = _measure_eof_marker(mono, frame_start, tone_scale,
+                                 radius=TONE_END_MARK_RADIUS*tone_scale)
+    if marker is not None:
+        marker = dict(marker)
+        marker['tone_search'] = True
+        return marker
+    end = float(frame_start)+PULSE_FRAME*tone_scale
+    if end > len(mono)+1.0:
+        return None
+    return {'start': float(frame_start)+EOF_MARKER_OFFSET*tone_scale,
+            'end': end, 'scale': tone_scale, 'packet_scale': tone_scale,
+            'confidence': TONE_END_CONFIDENCE, 'witness': 'tones',
+            'tone_steadiness': steadiness}
+
+
+def _packet_end(mono, frame_start, scale, min_scale, max_scale):
+    """Where a packet ends: its EOF mark, found from the header; else from
+    its tones; else, for a packet a time-stretcher cut, from the splice
+    search; else the length its tones give.
+    """
+    marker = _measure_eof_marker(mono, frame_start, scale)
+    if marker is not None:
+        return marker
+    by_tones = _tone_eof_marker(mono, frame_start, scale)
+    if by_tones is not None and by_tones.get('witness') != 'tones':
+        return by_tones
+    spliced = _spliced_eof_marker(mono, frame_start, scale, min_scale,
+                                  max_scale)
+    return spliced if spliced is not None else by_tones
+
+
 def _spliced_eof_marker(mono, frame_start, scale, min_scale, max_scale,
                         exclude_end=None):
-    """EOF witness for a packet whose length differs from its header scale.
+    """EOF mark of a packet whose length differs from its header scale.
 
     The next header is found in a window wide enough for one splice; the EOF
     mark is then searched where that header puts it (header-to-EOF spacing is
-    fixed). If the splice took the mark itself, the next header is the
-    witness: the mark's end is the next packet's origin. Returns a
+    fixed). The next header only says where to look: the packet's own mark is
+    the witness, and without it there is none. Returns a
     _measure_eof_marker-style dict rebased on frame_start, or None.
     ``exclude_end`` rejects a witness at an endpoint already tried.
     """
@@ -4249,11 +4360,7 @@ def _spliced_eof_marker(mono, frame_start, scale, min_scale, max_scale,
         return None
     marker = _measure_eof_marker(mono, next_start-PULSE_FRAME*scale, scale)
     if marker is None:
-        # The splice took the mark itself; the next header ends the packet
-        # just as well (the mark's end is the next packet's origin).
-        marker = {'start': next_start-EOF_MARKER_LENGTH*scale,
-                  'end': next_start, 'scale': scale,
-                  'confidence': float(hit[2]), 'witness': 'next_header'}
+        return None
     marker = dict(marker)
     marker['packet_scale'] = (marker['end']-float(frame_start))/PULSE_FRAME
     marker['splice_search'] = True
@@ -4671,7 +4778,7 @@ def _decode_pulse_samples(model, samples, diagnostics, latest_only, models,
     eof_markers_validated = 0
     selected_marker = None
     last_metadata = None
-    next_header_witnesses = 0
+    tone_witnesses = 0
     previous_candidate = None
     min_scale, max_scale = pulse_sample_scale_bounds(sample_rate)
     # EOF-mode acquisition revisits one packet at a time. Cache this mono
@@ -4699,12 +4806,9 @@ def _decode_pulse_samples(model, samples, diagnostics, latest_only, models,
         frame_min, frame_max = pulse_sample_scale_bounds(sample_rate)
         for position, candidate in reversed(list(enumerate(candidates))):
             candidate_start, candidate_scale, _, _ = candidate
-            marker = _measure_eof_marker(
-                mono_samples, candidate_start, candidate_scale)
-            if marker is None:
-                marker = _spliced_eof_marker(
-                    mono_samples, candidate_start, candidate_scale,
-                    frame_min, frame_max)
+            marker = _packet_end(
+                mono_samples, candidate_start, candidate_scale,
+                frame_min, frame_max)
             if (marker is not None and
                     frame_min*.98 <= marker['packet_scale'] <= frame_max*1.02):
                 selected = candidate
@@ -4752,11 +4856,8 @@ def _decode_pulse_samples(model, samples, diagnostics, latest_only, models,
                                       PULSE_FRAME)
             selected_marker = None
         else:
-            marker = _measure_eof_marker(
-                mono_samples, frame_start, scale)
-            if marker is None:
-                marker = _spliced_eof_marker(
-                    mono_samples, frame_start, scale, min_scale, max_scale)
+            marker = _packet_end(mono_samples, frame_start, scale,
+                                 min_scale, max_scale)
         if marker is not None:
             frame_min, frame_max = pulse_sample_scale_bounds(sample_rate)
             candidate_scale = marker['packet_scale']
@@ -4768,8 +4869,8 @@ def _decode_pulse_samples(model, samples, diagnostics, latest_only, models,
                 frame_scale = candidate_scale
                 following_scale = marker['scale']
                 following_confidence = marker['confidence']
-                if marker.get('witness') == 'next_header':
-                    next_header_witnesses += 1
+                if marker.get('witness') == 'tones':
+                    tone_witnesses += 1
                 else:
                     eof_markers_validated += 1
                 boundary_diag = marker
@@ -5171,7 +5272,7 @@ def _decode_pulse_samples(model, samples, diagnostics, latest_only, models,
     info = {'frames': len(results), 'pulse_frames': len(results),
             'recovered': bool(results),
             'eof_markers_validated': eof_markers_validated,
-            'next_header_witnesses': next_header_witnesses,
+            'tone_witnesses': tone_witnesses,
             }
     if diagnostics is not None:
         info['diagnostics'] = _diagnostic_summary(diagnostics, 0.0)

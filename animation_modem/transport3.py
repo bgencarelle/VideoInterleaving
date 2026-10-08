@@ -17,6 +17,10 @@ PREAMBLE_BITS = (0, 0, 0, 0, 0, 0, 1, 0, 0, 1, 0, 1, 1, 1, 0, 0)
 PREAMBLE_AMPLITUDE = 0.55
 SHORT, LONG = HALF, 2 * HALF
 EDGE_HYSTERESIS = 0.2
+# The header's peak as it reaches the detector: the sender sends it near
+# full scale and the live leveler restores it to this (v7_live_input).
+# The Schmitt band is EDGE_HYSTERESIS of it.
+HEADER_ARRIVAL_PEAK = 10**(-1/20)
 
 # The six current coded-profile IDs use constant-weight biphase words.  Every
 # word keeps the same first/last edge and the same edge count, so pulse timing
@@ -94,7 +98,7 @@ for _array in (_PROFILE_CODES, _PROFILE_EDGES, _PROFILE_REVERSED_EDGES,
     _array.setflags(write=False)
 
 
-def edge_intervals(samples, hysteresis=EDGE_HYSTERESIS * PREAMBLE_AMPLITUDE):
+def edge_intervals(samples, hysteresis=EDGE_HYSTERESIS * HEADER_ARRIVAL_PEAK):
     state = np.where(samples > hysteresis, 1,
                      np.where(samples < -hysteresis, -1, 0))
     live = np.flatnonzero(state)
@@ -247,7 +251,7 @@ def _measure_pulse_profiles(samples, min_scale, max_scale, match_both,
     profile_ids = np.empty(len(samples), np.int64)
     fit_profiles = np.empty(len(samples), np.int64)
     edges, valid = _pulse_word_kernel(
-        samples, np.float64(EDGE_HYSTERESIS*PREAMBLE_AMPLITUDE),
+        samples, np.float64(EDGE_HYSTERESIS*HEADER_ARRIVAL_PEAK),
         _PROFILE_GAPS, _PROFILE_REVERSED_GAPS, NOMINAL_SPAN,
         float(min_scale), float(max_scale), bool(match_both),
         int(requested_direction), positions,

@@ -40,7 +40,7 @@ from tools.v7_send_gui import default_kernel_for_profile, ENCODE_DEFAULTS
 PROFILES = ('aspect-fold-500', 'aspect-mono-500')
 KERNELS = ('viewer_solve', 'native_source', 'csf_peak', 'band_taper', 'antiring')
 FINAL_CASES = ('clean-96k', 'hiss-45', 'hiss-40', 'hiss-35', 'lowpass-12k',
-               'lowpass-10k', 'wow-flutter', 'fast-flutter', 'soft-saturation',
+               'lowpass-10k', 'wow-flutter', 'fast-flutter', 'cassette-i-hot',
                'dropouts', 'azimuth-12us', 'crosstalk-10pct', 'right-minus-4db')
 STEREO_CASES = frozenset(('azimuth-12us', 'crosstalk-10pct', 'right-minus-4db'))
 SEEDS = (2026, 2027, 2028, 2029, 2030)

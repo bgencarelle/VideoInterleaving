@@ -47,12 +47,17 @@ _PACKET_DEADLINE = EOF_MARKER_OFFSET + EOF_MARKER_LENGTH + _EOF_RADIUS + 1.0
 # next packet starts there, and its header is re-measured from 8 samples
 # ahead of that.
 _FLUSH_LEAD = 16.0
-# Input leveler. The pulse detector's edge hysteresis and the EOF marker floor
-# are absolute levels that assume a preamble near PREAMBLE_AMPLITUDE, so the
-# input must be levelled *before* headers are searched: scanning the raw
-# capture made every input more than ~20 dB below line level undetectable.
-LEVEL_TARGET = PULSE.PREAMBLE_AMPLITUDE   # loudest 0.5% of a frame is set here
+# Input leveler. Once packets are found, the gain is set from each complete
+# packet's own header and EOF: their peak is put LEVEL_TARGET under full
+# scale, so they are never pushed into clipping, and nothing else (picture
+# data, saturation, noise) steers it. Until a header is found, the loudest
+# LEVEL_PERCENTILE of the newest frame is put where the data's peaks would
+# sit under that framing, so a quiet input is raised far enough for its
+# headers to be detected.
+LEVEL_TARGET = PULSE.HEADER_ARRIVAL_PEAK   # header/EOF peak, -1 dBFS
+LEVEL_SEARCH_TARGET = LEVEL_TARGET*10**(-1.5/20)
 LEVEL_PERCENTILE = 99.5
+LEVEL_FRAMED_FRAMES = 4     # frames without a framed packet: search again
 GAIN_MIN, GAIN_MAX = .5, 32.0
 GAIN_RISE = 1.5                           # per frame; reductions are immediate
 
@@ -193,6 +198,7 @@ class LiveInput:
         # same gain so its own anchor re-check sees the same levels.
         self.gain = 1.0
         self._leveled_to = 0       # absolute sample of the last level update
+        self._framed_to = None     # absolute end of the last packet levelled
 
     # ------------------------------------------------------------ buffer
     def span(self):
@@ -319,22 +325,50 @@ class LiveInput:
 
     # ------------------------------------------------------------ level
     def _update_level(self, audio):
-        """Once per frame of new audio, move the gain toward setting the
-        loudest 0.5% of the newest frame at LEVEL_TARGET: slow rise, immediate
-        reduction. It runs whether or not a header has been found yet -- that
-        is what lets a quiet input be raised far enough for its headers to
-        become detectable. A reset keeps the gain: an input gap does not
-        change the input level."""
+        """Before packets are found (or when they have stopped), once per frame
+        of new audio, move the gain toward putting the loudest 0.5% of the
+        newest frame where the data's peaks sit: slow rise, immediate
+        reduction. This is what lets a quiet input be raised far enough for
+        its headers to become detectable. Once packets are found,
+        _level_from_packet sets the gain instead. A reset keeps the gain: an
+        input gap does not change the input level."""
         frame = int(self._scaled(PULSE_FRAME) if self.scale
                     else PULSE_FRAME*self.rate/RATE)
         if self.total-self._leveled_to < frame or len(audio) < frame:
             return
         self._leveled_to = self.total
+        if (self._framed_to is not None and
+                self.total-self._framed_to < LEVEL_FRAMED_FRAMES*frame):
+            return
         peak = float(np.percentile(np.abs(audio[-frame:]), LEVEL_PERCENTILE))
-        desired = float(np.clip(LEVEL_TARGET/max(peak, 1e-6),
-                                GAIN_MIN, GAIN_MAX))
+        self._set_gain(LEVEL_SEARCH_TARGET/max(peak, 1e-6))
+
+    def _set_gain(self, desired):
+        desired = float(np.clip(desired, GAIN_MIN, GAIN_MAX))
         self.gain = (min(desired, self.gain*GAIN_RISE)
                      if desired > self.gain else desired)
+
+    def _level_from_packet(self, audio, start, scale, marker_found):
+        """Set the gain from one complete packet's own header and EOF: their
+        peak goes to LEVEL_TARGET. `start` is the packet's start in `audio`,
+        which is the raw (unlevelled) capture."""
+        header_lo = int(np.ceil(start+16*scale))
+        header_hi = int(np.floor(start+(16+len(PULSE.PREAMBLE))*scale))
+        if header_lo < 0 or header_hi > len(audio):
+            return
+        peak = float(np.max(np.abs(_mono_gain(audio[header_lo:header_hi],
+                                              np.float32(1.0)))))
+        if marker_found:
+            eof_lo = int(np.floor(start+EOF_MARKER_OFFSET*scale))
+            eof_hi = min(len(audio),
+                         int(np.ceil(start+PULSE_FRAME*scale))+1)
+            if 0 <= eof_lo < eof_hi:
+                peak = max(peak, float(np.max(np.abs(_mono_gain(
+                    audio[eof_lo:eof_hi], np.float32(1.0))))))
+        if peak <= 0:
+            return
+        self._set_gain(LEVEL_TARGET/peak)
+        self._framed_to = self.total
 
     # ------------------------------------------------------------ incoming
     def _count_headers(self, audio, now):
@@ -409,6 +443,7 @@ class LiveInput:
             self._awaiting.popleft()
             # Only a packet whose own marker was found has a known end.
             self._flush_to = start+PULSE_FRAME*scale if found else None
+            self._level_from_packet(audio, start-origin, scale, found)
             ready += 1
         return ready
 
@@ -423,7 +458,8 @@ class LiveInput:
                 len(audio)+1.0 < start+PULSE_FRAME*scale):
             return False
         # Only the stretch the search covers is levelled and examined.
-        cut = max(0, int(first)-8)
+        # From the packet's header on: the mark is judged against it.
+        cut = max(0, int(start)-8)
         window = _mono_gain(audio[cut:], np.float32(self.gain))
         return _measure_eof_marker(window, start-cut, scale) is not None
 

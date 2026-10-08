@@ -33,8 +33,9 @@ class EmittedLevelTests(unittest.TestCase):
         peaks = [float(np.max(np.abs(packet[:v7.PULSE.SYNC_LEN])))
                  for packet in self.packets]
         for peak in peaks:
-            self.assertLess(_db(peak), -2.0)
-            self.assertGreater(_db(peak), -3.2)
+            # 1 to 1.5 dB under clipping (fixes list item 28).
+            self.assertLess(_db(peak), -0.9)
+            self.assertGreater(_db(peak), -1.6)
         self.assertLess(_db(max(peaks))-_db(min(peaks)), .5)
 
     def test_body_stays_below_the_header_and_nothing_passes_full_scale(self):
@@ -44,7 +45,7 @@ class EmittedLevelTests(unittest.TestCase):
             self.assertGreater(_db(header)-_db(body), 1.0)
             self.assertLess(float(np.max(np.abs(packet))), 1.0)
 
-    def test_only_a_loud_body_is_scaled_down(self):
+    def test_every_body_is_levelled_to_the_ceiling(self):
         def body_peak(scale):
             rng = np.random.default_rng(4)
             coefficients = self.model.mu+scale*np.sqrt(self.model.lam) * \
@@ -54,12 +55,10 @@ class EmittedLevelTests(unittest.TestCase):
                           float(np.max(np.abs(packet[v7.EOF_MARKER_OFFSET:]))))
             return (float(np.max(np.abs(packet[BODY]))),
                     framing*10**(-v7.BODY_BELOW_EOF_DB/20))
-        # A quiet picture's body goes out as coded, under the ceiling the
-        # packet's own header and end marker set; loud ones are held at it
-        # however loud they are.
-        quiet, ceiling = body_peak(.3)
-        self.assertLess(quiet, .8*ceiling)
-        for scale in (4.0, 8.0):
+        # Every body is levelled to the ceiling the packet's own header and
+        # end marker set, quiet pictures raised and loud ones held
+        # (fixes list item 28).
+        for scale in (.3, 4.0, 8.0):
             peak, ceiling = body_peak(scale)
             self.assertAlmostEqual(peak, ceiling, delta=.01)
 
@@ -68,7 +67,8 @@ class EmittedLevelTests(unittest.TestCase):
         quiet = v7.encode_pulse_frame_coeffs(
             self.model, self.model.mu, 1)
         marker = quiet[-v7.EOF_MARKER_LENGTH:, 0]
-        np.testing.assert_allclose(np.abs(marker), level, rtol=.02)
+        self.assertAlmostEqual(float(np.max(np.abs(marker))), level,
+                               delta=.02*level)
 
     def test_final_packet_keeps_header_eof_body_metadata_level_order(self):
         body_region = slice(v7.PULSE.SYNC_LEN,
@@ -107,10 +107,10 @@ class EmittedLevelTests(unittest.TestCase):
                     metadata_peak = peak(packet, metadata_region)
 
                     context = (profile, counter, level)
-                    # Tone mixing changes the measured region peaks slightly;
-                    # the untoned pulse-level relationship is 1.5 dB.
+                    # Header and EOF are sent at one level; tone mixing moves
+                    # the measured peaks slightly.
                     self.assertAlmostEqual(
-                        delta_db(header_peak, eof_peak), 1.5, delta=.5,
+                        delta_db(header_peak, eof_peak), 0.0, delta=.5,
                         msg=f'header/EOF level gap {context}')
                     eof_body_gap = delta_db(eof_peak, body_peak)
                     self.assertGreaterEqual(
@@ -125,9 +125,10 @@ class EmittedLevelTests(unittest.TestCase):
                         v7.METADATA_BELOW_BODY_DB-.02,
                         f'body/metadata level gap {context}')
                     packet_peak = float(np.max(np.abs(packet)))
-                    self.assertAlmostEqual(packet_peak, header_peak,
+                    self.assertAlmostEqual(packet_peak,
+                                           max(header_peak, eof_peak),
                                            delta=1e-6,
-                                           msg=f'header is not packet peak {context}')
+                                           msg=f'framing is not packet peak {context}')
                     self.assertLess(packet_peak, 1.0,
                                     f'packet clipped {context}')
 

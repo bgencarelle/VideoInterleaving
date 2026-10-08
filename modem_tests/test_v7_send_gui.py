@@ -519,6 +519,8 @@ class SenderGuiTests(unittest.TestCase):
         command = build_command(self.settings, self.devices, self.sd)
         args = v7_live.parser().parse_args(command[2:])
 
+        self.assertIsNone(args.dct_encode)      # the sender's own default
+        v7_live._apply_encode_defaults(args, 500)
         self.assertTrue(args.dct_encode)
         self.assertEqual(v7_live._dct_encode_options(args), {
             'sharpen': 'taper', 'sharpen_strength': .5, 'clarity': .15,
@@ -559,13 +561,13 @@ class SenderGuiTests(unittest.TestCase):
         self.assertTrue(v7_live._dct_encode_options(args)['linear_light'])
         v7_live._send_profile(args, 500)
 
-    def test_direct_dct_defaults_add_only_the_opt_in_flag(self):
+    def test_direct_dct_is_the_default_and_only_turning_it_off_is_said(self):
         command = build_command(self.settings, self.devices, self.sd)
-        self.assertFalse(any(word.startswith('--dct') for word in command))
+        self.assertEqual([word for word in command if 'dct' in word],
+                         ['--no-dct-encode'])
         self.settings['dct_encode'] = True
         command = build_command(self.settings, self.devices, self.sd)
-        self.assertEqual([word for word in command if word.startswith('--dct')],
-                         ['--dct-encode'])
+        self.assertFalse(any('dct' in word for word in command))
         # Strength is sent only with a sharpen mode.
         self.settings.update(dct_sharpen='off', dct_sharpen_strength='0.9')
         command = build_command(self.settings, self.devices, self.sd)
@@ -696,6 +698,30 @@ class SenderGuiTests(unittest.TestCase):
         self.assertEqual(section_of(gui, 'clip_aware'), 'Picture encode')
         self.assertIn('clip_aware', gui._visible_fields())
 
+    def test_a_sender_with_no_switches_is_an_untouched_gui(self):
+        def resolved(argv):
+            args = v7_live.parser().parse_args(argv)
+            v7_live._apply_profile_option(args)
+            v7_live._apply_encode_defaults(args, 500)
+            kernel = args.dct_kernel or v7_live._default_kernel_for_profile(
+                args.profile)
+            return (args.profile, args.dct_encode, args.luma_adjust, kernel,
+                    bool(args.pixel_encode), bool(args.clip_aware_encode))
+
+        gui = SenderGui(self.devices)
+        gui.settings.update(device=3, source='video', video_source='clip.mp4')
+        command = build_command(gui.settings, self.devices, self.sd)
+        bare = ['send', '--device', '3', '--source', 'video']
+        self.assertEqual(resolved(command[2:]), resolved(bare))
+        self.assertEqual(resolved(bare), (
+            'aspect-fold-500', True, True, 'viewer_solve', False, False))
+        for name in ('aspect-mono-500', 'aspect-mono-nested', 'stereo-nested'):
+            gui.settings.update(profile=name)
+            gui.settings['dct_kernel'] = v7_live._default_kernel_for_profile(name)
+            command = build_command(gui.settings, self.devices, self.sd)
+            self.assertEqual(resolved(command[2:]),
+                             resolved(bare+['--profile', name]))
+
     def test_luma_adjustment_is_on_with_direct_dct_and_reaches_the_cli(self):
         gui = SenderGui(self.devices)
         self.assertTrue(gui.settings['luma_adjust'])
@@ -704,10 +730,15 @@ class SenderGuiTests(unittest.TestCase):
         self.assertNotIn('luma_adjust', gui._visible_fields())
         self.settings.update(dct_encode=True, luma_adjust=True)
         command = build_command(self.settings, self.devices, self.sd)
-        self.assertTrue(v7_live.parser().parse_args(command[2:]).luma_adjust)
+        args = v7_live.parser().parse_args(command[2:])
+        v7_live._apply_encode_defaults(args, 500)
+        self.assertTrue(args.luma_adjust)
         self.settings['luma_adjust'] = False
-        self.assertNotIn('--luma-adjust',
-                         build_command(self.settings, self.devices, self.sd))
+        command = build_command(self.settings, self.devices, self.sd)
+        self.assertIn('--no-luma-adjust', command)
+        args = v7_live.parser().parse_args(command[2:])
+        v7_live._apply_encode_defaults(args, 500)
+        self.assertFalse(args.luma_adjust)
 
     def test_ffmpeg_screen_input_is_forwarded_only_for_ffmpeg_capture(self):
         self.settings.update(source='screen', screen_backend='ffmpeg',
@@ -1979,10 +2010,10 @@ class SenderGuiButtonLayoutTests(unittest.TestCase):
             'send', '--device', '3', '--source', 'screen', '--profile',
             'aspect-fold-500', '--aspect-layout', '16:9', '--aspect-tail',
             'chroma', '--speed', '1.25', '--brightness', '1.1', '--gamma',
-            '0.9', '--dct-encode', '--dct-sharpen', 'taper',
+            '0.9', '--dct-sharpen', 'taper',
             '--dct-sharpen-strength', '0.5', '--dct-clarity', '0.15',
             '--dct-kernel', 'viewer_solve',
-            '--luma-adjust', '--luma-adjust-linear', '--clip-aware-encode',
+            '--luma-adjust-linear', '--clip-aware-encode',
             '--capture-fps', '30.0', '--screen-backend', 'mss',
             '--region=0,0,1920,1080', '--capture-width', '160',
             '--gui-control', '--image-preview-port', '5005',

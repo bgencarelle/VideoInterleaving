@@ -920,5 +920,35 @@ class CommandLineTests(unittest.TestCase):
         self.assertEqual(args.dct_kernel_dir, ['/a', '/b'])
 
 
+class ViewerDescriptionTests(unittest.TestCase):
+    """The sender's viewer model and the receiver's display share one
+    description (animation_modem/v7_viewer_model.py)."""
+
+    def test_the_receiver_draws_from_the_description(self):
+        from animation_modem.v7_viewer_model import RECEIVER_DISPLAY
+        from tools import v7_gl_viewer as viewer
+        self.assertEqual(viewer.RECOMMENDED_DISPLAY_MODE,
+                         RECEIVER_DISPLAY['draw'])
+        self.assertEqual(viewer.RECOMMENDED_DCT_RECONSTRUCTION,
+                         f"{RECEIVER_DISPLAY['factor']}x")
+        self.assertEqual(viewer.RECOMMENDED_EDGE_STRENGTH,
+                         RECEIVER_DISPLAY['edge_strength'])
+
+    def test_the_matched_viewer_model_is_the_ideal_enlargement(self):
+        import numpy as np
+        from animation_modem.v7_viewer_model import RECEIVER_DISPLAY
+        from dct_kernels import viewer_solve
+        code = viewer_solve.viewer_from(RECEIVER_DISPLAY)
+        self.assertEqual(code, viewer_solve.RECEIVER_VIEWER)
+        model = viewer_solve._model(code, 80, 96, 40, 48, 4)
+        ideal = viewer_solve._ideal(80, 96, 40, 48, 4)
+        for ours, theirs in zip(model, ideal):
+            np.testing.assert_array_equal(ours, theirs)
+        # So there is nothing to correct: the solve returns what it was given.
+        my_my, mx_mx, my_iy, ix_mx = viewer_solve._normal(code, 80, 96, 40, 48, 4)
+        np.testing.assert_allclose(my_my, my_iy, atol=1e-12)
+        np.testing.assert_allclose(mx_mx, ix_mx, atol=1e-12)
+
+
 if __name__ == '__main__':
     unittest.main()

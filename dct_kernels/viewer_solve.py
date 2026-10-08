@@ -16,9 +16,13 @@ HELP = ('Plain truncation is the best choice only for an ideal receiver. '
         'ideal enlargement of the band: a regularised deconvolution of the '
         'viewer, limited to the coefficients the wire carries. Then halos '
         'are moved back inside the source range. `viewer` must match the '
-        'receiver\'s upscaler (0 bilinear, 1 bicubic, 2 nearest).')
+        'receiver\'s upscaler: 0 bilinear, 1 bicubic, 2 nearest, or 3 for '
+        'the frequency-space enlargement the receiver uses by default '
+        '(animation_modem/v7_viewer_model.py). Against that one there is '
+        'nothing to correct and the plain coefficients are sent.')
 PARAMS = {
-    'viewer': (0, 0, 2, 1, '0 bilinear, 1 bicubic, 2 nearest', True),
+    'viewer': (0, 0, 3, 1, '0 bilinear, 1 bicubic, 2 nearest, '
+               "3 the receiver's own (frequency space)", True),
     'iterations': (10, 1, 40, 1, 'conjugate-gradient steps', True),
     'lam': (0.5, 0.0, 1.0, 0.005, 'pull toward the plain coefficients (bigger = gentler)'),
     'up': (4, 2, 6, 1, 'model lattice: viewer pixels per sent pixel', True),
@@ -30,6 +34,15 @@ PROFILE_DEFAULTS = {
 }
 _FILTERS = (Image.Resampling.BILINEAR, Image.Resampling.BICUBIC,
             Image.Resampling.NEAREST)
+RECEIVER_VIEWER = 3     # enlarges in frequency space: see _model
+
+
+def viewer_from(display):
+    """The `viewer` setting for a receiver display description
+    (animation_modem.v7_viewer_model.RECEIVER_DISPLAY)."""
+    if display.get('enlarge') == 'dct':
+        return RECEIVER_VIEWER
+    return {'bilinear': 0, 'bicubic': 1, 'nearest': 2}[display['draw']]
 
 
 @lru_cache(maxsize=64)
@@ -48,6 +61,11 @@ def _resample_matrix(n, m, method):
 @lru_cache(maxsize=32)
 def _model(viewer, rows, cols, sent_rows, sent_cols, up):
     """My, Mx: coefficient -> viewer-shown picture, per axis."""
+    if int(viewer) == RECEIVER_VIEWER:
+        # The receiver zero-pads the coefficients it was sent and inverts:
+        # that is the ideal enlargement itself.
+        return _ideal(rows, cols, sent_rows, sent_cols, up)
+
     def axis(n, sent):
         reduce_ = _resample_matrix(n, sent, Image.Resampling.BOX)
         enlarge = _resample_matrix(sent, sent*up, _FILTERS[int(viewer)])

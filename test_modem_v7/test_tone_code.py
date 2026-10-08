@@ -208,6 +208,11 @@ class ToneCodeTests(unittest.TestCase):
         wire = resample_poly(np.concatenate(packets), 2, 1,
                              axis=0).astype(np.float32)
         case = next(case for case in CASES if case.name == 'mains-buzz')
+        # The wire sits about 3 dB higher since fixes list item 28; the buzz
+        # follows it so it still causes errors for the code to correct.
+        import dataclasses
+        case = dataclasses.replace(case,
+                                   mains_buzz_dbfs=case.mains_buzz_dbfs+3)
         capture = impair(wire, case)
         starts = acquire_packet_starts(capture, limit=8)
         self.assertEqual(len(starts), 8)

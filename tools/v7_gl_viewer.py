@@ -9,6 +9,7 @@ from pathlib import Path
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 from animation_modem.imaging import values_image
+from animation_modem.v7_viewer_model import RECEIVER_DISPLAY
 
 
 DISPLAY_MODES = (
@@ -100,9 +101,9 @@ EDGE_LABELS = {'on': 'Consistent · sharp edges, no ripple · recommended',
 # shader's bicubic to the window. 4x + bicubic matches the exact viewport
 # evaluation to 77 dB PSNR at 1080 lines (nearest: 43 dB) for about a fifth of
 # the CPU time.
-RECOMMENDED_DISPLAY_MODE = 'bicubic'
-RECOMMENDED_DCT_RECONSTRUCTION = '4x'
-RECOMMENDED_EDGE_MODE = 'on'
+RECOMMENDED_DISPLAY_MODE = RECEIVER_DISPLAY['draw']
+RECOMMENDED_DCT_RECONSTRUCTION = f"{RECEIVER_DISPLAY['factor']}x"
+RECOMMENDED_EDGE_MODE = RECEIVER_DISPLAY['edge']
 # Edge strength: how much of the edge reconstruction is mixed into the plain
 # picture. Full strength suits flat-shaded pictures and looks painted on
 # natural texture. Real modem, SSIMULACRA2 over no reconstruction at 25 / 50 /
@@ -113,14 +114,14 @@ EDGE_STRENGTHS = (1.0, .75, .5, .25)
 EDGE_STRENGTH_LABELS = {1.0: '100% · flattest, sharpest',
                         .75: '75% · recommended',
                         .5: '50%', .25: '25% · most natural texture'}
-RECOMMENDED_EDGE_STRENGTH = .75
+RECOMMENDED_EDGE_STRENGTH = RECEIVER_DISPLAY['edge_strength']
 # Colour detail: rebuild each chroma plane on the luma grid with the detail
 # that brightness predicts locally, keeping every received chroma coefficient
 # (animation_modem.v7_dct_display.guided_chroma_plane). About 2 ms a picture.
 CHROMA_MODES = ('off', 'guided')
 CHROMA_LABELS = {'off': 'Off · colour as sent',
                  'guided': 'Luma-guided · recommended'}
-RECOMMENDED_CHROMA_MODE = 'guided'
+RECOMMENDED_CHROMA_MODE = RECEIVER_DISPLAY['chroma']
 GRAIN_AMOUNT = 0.024            # triangular +-amount; sigma = amount/sqrt(6)
 GRAIN_FLAT_SIGMA = 1.2          # luma grid samples
 GRAIN_FLAT_CONTRAST = 0.06      # local luma s.d. (code units) that stops grain
@@ -166,7 +167,7 @@ def _preference_path():
     return root/'modemTest'/'v7_display.json'
 
 
-def _load_display_default():
+def _load_display_default():  # a mode the viewer's toolbar saved, if any
     try:
         data = json.loads(_preference_path().read_text())
         if (isinstance(data, dict) and data.get('version') == 1 and
@@ -174,7 +175,7 @@ def _load_display_default():
             return data['mode']
     except (OSError, ValueError, TypeError):
         pass
-    return 'nearest'
+    return RECOMMENDED_DISPLAY_MODE
 
 
 def _save_display_default(mode):
@@ -993,8 +994,13 @@ def _fit_diagnostic_text(text, font, width):
 def run(frame_source, status_source, aspect_ratios, fullscreen=False,
         show_diagnostics=True, diagnostics_source=None,
         profile_cpu=False, display_mode=None, image_only=False,
-        stop_event=None):
+        stop_event=None, dct_reconstruction=None, edge_mode=None,
+        edge_strength=None, chroma_mode=None):
     """Display new frames on a vsynced GL window, sleeping between events.
+
+    Untouched, it draws as the receiver GUI does (the RECOMMENDED_* display:
+    animation_modem/v7_viewer_model.py): frequency-space enlargement, the
+    edge rebuild, guided colour and the recommended final filter.
 
     GLFW and ModernGL are imported here so headless receive stays independent
     of the graphics stack. The context is owned by this thread; decoded frames
@@ -1071,7 +1077,21 @@ def run(frame_source, status_source, aspect_ratios, fullscreen=False,
         toolbar_key = None
         display_mode = display_mode or _load_display_default()
         if display_mode not in DISPLAY_MODES:
-            display_mode = 'nearest'
+            display_mode = RECOMMENDED_DISPLAY_MODE
+        dct_reconstruction = dct_reconstruction or RECOMMENDED_DCT_RECONSTRUCTION
+        edge_mode = edge_mode or RECOMMENDED_EDGE_MODE
+        edge_strength = (RECOMMENDED_EDGE_STRENGTH if edge_strength is None
+                         else edge_strength)
+        chroma_mode = chroma_mode or RECOMMENDED_CHROMA_MODE
+        rebuilt = (dct_reconstruction != 'off' or edge_mode != 'off' or
+                   chroma_mode != 'off')
+        # The picture area the float planes were rebuilt for: the
+        # frequency-space enlargement is sized to it.
+        float_viewport_size = None
+        planes_viewport_size = None
+
+        def use_float_display():
+            return display_mode != 'nearest' or rebuilt
 
         def update_texture_filters():
             if texture is not None:
@@ -1291,12 +1311,22 @@ def run(frame_source, status_source, aspect_ratios, fullscreen=False,
                 last_frame_generation = frame.generation
                 dirty = True
 
-            if (frame is not None and display_mode != 'nearest' and
+            if (frame is not None and use_float_display() and
                     (frame.generation != last_float_generation or
-                     display_mode != last_float_mode)):
+                     display_mode != last_float_mode or
+                     float_viewport_size != planes_viewport_size)):
                 planes = float_planes(frame.values, frame.shapes)
+                if rebuilt:
+                    planes = dct_reconstruct_planes(
+                        planes, dct_reconstruction, float_viewport_size,
+                        edge=edge_mode, edge_strength=edge_strength,
+                        pixel_shapes=getattr(frame, 'pixel_shapes', None),
+                        chroma=chroma_mode,
+                        luma_room=getattr(frame, 'luma_room', None))
+                planes_viewport_size = float_viewport_size
                 filtered_intermediate = (
-                    display_mode in FILTER_PRECOMPUTE_MODES)
+                    display_mode in FILTER_PRECOMPUTE_MODES and
+                    dct_reconstruction == 'off')
                 if filtered_intermediate:
                     planes = resample_filter_planes(planes, display_mode)
                 plane_sizes = tuple((plane.shape[1], plane.shape[0])
@@ -1416,25 +1446,28 @@ def run(frame_source, status_source, aspect_ratios, fullscreen=False,
             if viewport != last_viewport:
                 last_viewport = viewport
                 dirty = True
+            if rebuilt and viewport[2] and viewport[3]:
+                float_viewport_size = (viewport[2], viewport[3])
             if dirty and viewport[2] and viewport[3]:
                 context.viewport = (0, 0, *fb_size)
                 context.clear(.025, .032, .045, 1.0)
                 if texture is not None:
                     context.viewport = viewport
-                    if display_mode == 'nearest':
+                    if not use_float_display():
                         texture.use(location=0)
                         vertex_array.render(mode=moderngl.TRIANGLES, vertices=3)
-                    else:
+                    elif len(plane_textures) == 3:
                         ensure_float_renderer()
                         for unit, plane_texture in enumerate(plane_textures):
                             plane_texture.use(location=unit)
                         kernel_texture_for(display_mode).use(location=3)
-                        float_program['reconstruction'].value = FLOAT_MODE_IDS[
-                            display_mode]
+                        float_program['reconstruction'].value = (
+                            FLOAT_MODE_IDS.get(display_mode, 0))
                         float_program['output_size'].value = (
                             float(viewport[2]), float(viewport[3]))
                         float_program['filtered_intermediate'].value = int(
-                            display_mode in FILTER_PRECOMPUTE_MODES)
+                            display_mode in FILTER_PRECOMPUTE_MODES and
+                            dct_reconstruction == 'off')
                         float_array.render(mode=moderngl.TRIANGLES, vertices=3)
                 if details_visible and overlay is not None and panel_height:
                     context.enable(moderngl.BLEND)

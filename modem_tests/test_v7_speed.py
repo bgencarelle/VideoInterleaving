@@ -66,7 +66,9 @@ class V7SpeedTests(unittest.TestCase):
                                      model.coder.grids, 'nearest')
         wire = v7.encode_pulse_stream(
             model, [values]*5, source_indices=list(range(5)))
-        cases = ((32000, .25), (48000, 3.0), (48000, 4.0),
+        # Not 4x into 48 kHz: the shaped wire then lies far above half the
+        # sample rate (testing rule 11 in docs/V7_FIXES.md).
+        cases = ((32000, .25), (48000, 3.0),
                  (96000, 3.0), (96000, 3.4), (96000, 4.0))
         for rate, speed in cases:
             audio = v7.speed_pulse_stream(wire, speed, rate=rate)

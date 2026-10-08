@@ -174,13 +174,13 @@ class LiveTests(unittest.TestCase):
                     # status-tone overlay afterwards; the header-order checks
                     # above also cover that final overlay.
                     self.assertGreater(peak, .85*ceiling, mode)
-        # Outside the nested senders a quiet body goes out as coded; with
-        # auto-level it is raised to the ceiling its framing sets.
+        # Every packet is auto-levelled now (fixes list item 28); turned off,
+        # a quiet body goes out as coded.
         model = self.rig.base
         quiet = model.mu+.3*np.sqrt(model.lam)*np.random.default_rng(4).standard_normal(len(model.mu))
-        plain = v7.encode_pulse_frame_coeffs(model, quiet, 1)
-        with v7.body_auto_level():
-            raised = v7.encode_pulse_frame_coeffs(model, quiet, 1)
+        with v7.body_auto_level(False):
+            plain = v7.encode_pulse_frame_coeffs(model, quiet, 1)
+        raised = v7.encode_pulse_frame_coeffs(model, quiet, 1)
         framing = min(float(np.max(np.abs(raised[:v7.PULSE.SYNC_LEN]))),
                       float(np.max(np.abs(raised[v7.EOF_MARKER_OFFSET:]))))
         ceiling = framing*10**(-v7.BODY_BELOW_EOF_DB/20)
