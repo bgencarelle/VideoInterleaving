@@ -1,5 +1,7 @@
 """Aspect-matched stereo Fold 500 (experimental aspect-fold-500 profile)."""
 import sys
+import contextlib
+import io
 import unittest
 import unittest.mock
 from pathlib import Path
@@ -191,8 +193,11 @@ class AspectLayoutTests(unittest.TestCase):
                     pulse_profile_code=wire.pulse_profile_code),
                 counter, tone_code.encode_status(wire.status_mode))
                 for counter in range(1, 6)]).astype(np.float32)
+            # The profile fixes the tail (fixes list item 9); the codec's
+            # other tails are still decoded when its wire is given them.
             profile = v7_live._AdaptiveProfileDecoder(
-                v7_live._experimental_fold(500), base, aspect_tail=tail)
+                v7_live._experimental_fold(500), base)
+            profile.aspect_wire = wire
             profile.install()
             try:
                 with tone_code.coded_pilot_timing():
@@ -313,22 +318,25 @@ class AspectWireTests(unittest.TestCase):
         args = v7_live.parser().parse_args([
             'send', '--device', 'null', '--source', 'test',
             '--profile', 'aspect-fold-500', '--aspect-layout', '16:9',
-            '--aspect-tail', 'split', '--dct-encode'])
+            '--dct-encode'])
         v7_live._apply_profile_option(args)
         self.assertTrue(args.aspect_fold)
         self.assertEqual(v7_live._fold_slots(args), 0)
         self.assertEqual(v7_live._send_profile(args, 500)[0], 'box')
-        self.assertEqual((args.aspect_layout, args.aspect_tail), ('16:9', 'split'))
+        self.assertEqual(args.aspect_layout, '16:9')
         receive = v7_live.parser().parse_args([
-            'receive', '--device', '0', '--aspect-layout', '16:9',
-            '--aspect-tail', 'split'])
-        self.assertEqual((receive.aspect_layout, receive.aspect_tail),
-                         ('16:9', 'split'))
+            'receive', '--device', '0', '--aspect-layout', '16:9'])
+        self.assertEqual(receive.aspect_layout, '16:9')
+        # The tail is the profile's, not a setting (fixes list item 9).
+        for mode in (['send', '--device', 'null', '--source', 'test'],
+                     ['receive', '--device', '0']):
+            with self.assertRaises(SystemExit), \
+                    contextlib.redirect_stderr(io.StringIO()):
+                v7_live.parser().parse_args(mode+['--aspect-tail', 'luma'])
 
     def test_adaptive_receiver_dispatches_the_aspect_status(self):
         decoder = v7_live._make_auto_profile_decoder(
-            v7_live.parser().parse_args(['receive', '--device', '0',
-                                         '--aspect-tail', 'luma']),
+            v7_live.parser().parse_args(['receive', '--device', '0']),
             v7_live._experimental_fold(500))
         self.assertIn(tone_code.FOLD_OFF, decoder.supported_modes)
         decoder.active_mode = decoder.dispatch_mode = tone_code.FOLD_OFF
@@ -348,7 +356,8 @@ class AspectWireTests(unittest.TestCase):
                 profile_hint={'aspect_code': self.aspect})
             self.assertEqual(result.diag['aspect_layout'], '16:9')
             self.assertEqual(result.diag['wire_profile'], 'aspect-fold-500')
-            self.assertEqual(np.count_nonzero(seen['model'].plane == 0), 1920+96)
+            # The profile's fixed tail carries colour: no extra luma slots.
+            self.assertEqual(np.count_nonzero(seen['model'].plane == 0), 1920)
             held = decoder._decode_frame(
                 self.base, None, None, 3, self.base.mu, direct_body=body,
                 profile_hint={'aspect_code': None})

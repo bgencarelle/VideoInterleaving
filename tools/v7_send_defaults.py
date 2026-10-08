@@ -32,6 +32,14 @@ PROFILE_DEFAULT_KERNELS = {
 }
 
 
+def kernel_profiles(profile):
+    """The names a kernel's settings are looked up under for ``profile``:
+    the mode itself, then the wire a nested mode rides on."""
+    if profile in NESTED_BASE_PROFILES:
+        return (profile, NESTED_BASE_PROFILES[profile])
+    return profile
+
+
 def default_kernel_for_profile(profile):
     """Kernel enabled by default for the selected sender wire profile."""
     if profile in PROFILE_DEFAULT_KERNELS:

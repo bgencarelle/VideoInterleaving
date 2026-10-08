@@ -199,12 +199,6 @@ LIVE_RUNTIME_DESTS = frozenset((
 ASPECT_OPTION_LABELS = {
     'temporal_fusion': {'off': 'Off', 'held': 'On'},
     'aspect_layout': {'auto': 'Auto · sender layout in each packet'},
-    'aspect_tail': {
-        'chroma': 'Chroma · rotating colour detail (V7) · best for held stills',
-        'split': 'Split · 48 luma + 48 rotating chroma',
-        'luma': 'Luma · 96 luma every packet',
-        'fixed': 'Fixed · 96 colour every packet, no rotation · recommended',
-    },
 }
 # The setup page: named sections, most used first. The first holds exactly
 # what takes effect while receiving; the rest are locked then. A setting is
@@ -218,19 +212,18 @@ LIVE_CONTROLS = (
 CONFIG_SECTIONS = (
     ('Live controls', LIVE_CONTROLS),
     ('Input', ('device', 'temporal_fusion')),
-    ('Wire', ('aspect_layout', 'aspect_tail')),
+    ('Wire', ('aspect_layout',)),
     ('Startup view', ('fullscreen', 'image_only', 'show_diagnostics')),
     ('Output and logging', ('save_dir', 'no_log', 'log', 'diagnostics',
                             'headless')),
 )
 # Cell widths in grid columns: long values take the whole line, a few take
 # two cells, everything else (numbers, short pickers, on/off) one.
-FULL_WIDTH_SETTINGS = ('device', 'audio_output_device', 'save_dir',
-                       'aspect_tail')
+FULL_WIDTH_SETTINGS = ('device', 'audio_output_device', 'save_dir')
 DOUBLE_WIDTH_SETTINGS = ('Display upscaler', 'Edge reconstruction',
                          'aspect_layout')
 # Not signalled on the wire: the sender must be set the same.
-MATCH_SETTINGS = ('aspect_layout', 'aspect_tail')
+MATCH_SETTINGS = ('aspect_layout',)
 HIDDEN_DECODE_OPTIONS = frozenset((
     'direction', 'fixture', 'experimental_fold',
     'experimental_mono_fold', 'experimental_mono_colour',
@@ -486,7 +479,6 @@ def _field_label(action):
         'experimental_mono_fold': 'Experimental mono video fold',
         'mono_video_side': 'Mono video input side',
         'aspect_layout': 'Aspect layout',
-        'aspect_tail': 'Aspect tail',
         'temporal_fusion': 'Held-picture averaging',
     }
     return friendly.get(action.dest,

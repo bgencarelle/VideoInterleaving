@@ -51,14 +51,13 @@ class Rig:
     def __init__(self, layout='auto'):
         self.base = v7.load_model(TARGET, 'box')
         self.dispatcher = v7_live._AdaptiveProfileDecoder(
-            v7_live._experimental_fold(500), self.base,
-            aspect_tail=v7_live.DEFAULT_ASPECT_TAIL)
+            v7_live._experimental_fold(500), self.base)
         self.senders = {
             'aspect-mono-500': AspectMonoWire(self.base, side='left'),
             'mono nested': nested_fold.enable_mono(AspectMonoWire(self.base, side='left'), send=True),
             'stereo-slices': nested_fold.slice_wire('auto'),
             'stereo nested': nested_fold.slice_wire('auto', send=True),
-            'aspect-fold-500': AspectFoldWire('auto', v7_live.DEFAULT_ASPECT_TAIL)}
+            'aspect-fold-500': AspectFoldWire('auto', v7_live.ASPECT_FOLD_TAIL)}
 
     # ----------------------------------------------------------------- send
     def _values(self, rgb, luma_mask, chroma_masks):

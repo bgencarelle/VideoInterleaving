@@ -587,8 +587,9 @@ class SenderTests(unittest.TestCase):
             self.assertTrue(args.nested_fold)
             for flag in flags:
                 self.assertTrue(getattr(args, flag))
+            # Kernel settings are looked up under the mode, then its wire.
             self.assertEqual(v7_live._kernel_defaults_profile(args),
-                             v7_live.NESTED_BASE_PROFILES[profile])
+                             (profile, v7_live.NESTED_BASE_PROFILES[profile]))
 
     def test_the_sender_gui_offers_both_options(self):
         from tools import v7_send_gui as gui

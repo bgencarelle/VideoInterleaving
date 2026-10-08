@@ -950,5 +950,41 @@ class ViewerDescriptionTests(unittest.TestCase):
         np.testing.assert_allclose(mx_mx, ix_mx, atol=1e-12)
 
 
+
+class KernelSettingsPerModeTests(unittest.TestCase):
+    """Fixes list item 7: every mode states its kernel settings; a kernel
+    without settings for a mode is refused instead of running raw."""
+
+    def setUp(self):
+        self.registry = K.open_registry(())
+
+    def test_each_mode_default_kernel_has_settings(self):
+        from tools.v7_send_defaults import (default_kernel_for_profile,
+                                            kernel_profiles)
+        from tools.v7_send_gui import PROFILE_CHOICES
+        for _label, profile in PROFILE_CHOICES:
+            name = default_kernel_for_profile(profile)
+            self.assertIsNotNone(
+                self.registry.select(name, profile=kernel_profiles(profile)))
+
+    def test_settings_did_not_move(self):
+        from tools.v7_send_defaults import kernel_profiles
+        stereo = self.registry.get('upscale_precomp').defaults(
+            kernel_profiles('stereo-nested'))
+        self.assertEqual(stereo['luma_mix'], 1.0)
+        self.assertEqual(stereo['tame'], 6)
+        mono = self.registry.get('viewer_solve').defaults(
+            kernel_profiles('aspect-mono-nested'))
+        self.assertEqual(mono, self.registry.get('viewer_solve').defaults(
+            'aspect-mono-500'))
+
+    def test_a_kernel_without_settings_for_a_mode_is_refused(self):
+        from tools.v7_send_defaults import kernel_profiles
+        with self.assertRaises(K.KernelError):
+            self.registry.select('viewer_solve',
+                                 profile=kernel_profiles('stereo-nested'))
+        self.assertIsNone(self.registry.select(
+            K.REFERENCE, profile=kernel_profiles('stereo-nested')))
+
 if __name__ == '__main__':
     unittest.main()

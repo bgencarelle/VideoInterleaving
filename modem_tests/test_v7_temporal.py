@@ -208,7 +208,7 @@ class TemporalFusionTests(unittest.TestCase):
             for counter in range(1, 18)])
         audio = audio+rng.normal(0, 10**(-34/20), audio.shape)
         profile = v7_live._AdaptiveProfileDecoder(
-            v7_live._experimental_fold(500), self.model, aspect_tail='fixed')
+            v7_live._experimental_fold(500), self.model)
         profile.install()
         try:
             with tone_code.coded_pilot_timing():

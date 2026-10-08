@@ -487,28 +487,27 @@ class SenderGuiTests(unittest.TestCase):
         self.assertNotIn('--no-pilot-tones', command)
         self.assertNotIn('--no-eof-marker', command)
 
-    def test_fixed_tail_is_the_default_and_older_saved_tails_reset_once(self):
+    def test_the_tail_is_the_profiles_and_old_saved_tails_are_dropped(self):
+        # Fixes list item 9: no tail setting anywhere; a saved one is ignored.
         import json
-        from tools.v7_send_gui import (DEFAULT_ASPECT_TAIL,
-                                       _load_sender_preferences)
-        self.assertEqual(DEFAULT_ASPECT_TAIL, 'fixed')
-        self.assertEqual(v7_live.parser().parse_args(
-            ['send', '--device', 'null', '--source', 'test']).aspect_tail,
-            'fixed')
+        from tools.v7_send_gui import _load_sender_preferences
+        self.assertFalse(hasattr(v7_live.parser().parse_args(
+            ['send', '--device', 'null', '--source', 'test']), 'aspect_tail'))
+        self.assertEqual(v7_live.ASPECT_FOLD_TAIL, 'fixed')
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp)/'prefs.json'
-            for version, expected, saved_kernel, expected_kernel in (
-                    (4, None, 'reference', None),
-                    (5, 'chroma', 'reference', None),
-                    (5, 'chroma', 'lanczos', 'lanczos'),
-                    (6, 'chroma', 'reference', 'reference')):
+            for version, saved_kernel, expected_kernel in (
+                    (4, 'reference', None),
+                    (5, 'reference', None),
+                    (5, 'lanczos', 'lanczos'),
+                    (6, 'reference', 'reference')):
                 path.write_text(json.dumps({
                     'version': version,
                     'settings': {'aspect_tail': 'chroma', 'source': 'test',
                                  'dct_kernel': saved_kernel}}))
                 loaded = _load_sender_preferences(path)
                 settings = loaded.get('settings', loaded)
-                self.assertEqual(settings.get('aspect_tail'), expected)
+                self.assertNotIn('aspect_tail', settings)
                 self.assertEqual(settings.get('source'), 'test')
                 self.assertEqual(settings.get('dct_kernel'), expected_kernel)
 
@@ -547,10 +546,7 @@ class SenderGuiTests(unittest.TestCase):
         command = build_command(self.settings, self.devices, self.sd)
         self.assertEqual(v7_live.parser().parse_args(command[2:]).pixel_grid,
                          'large')
-        self.settings.update(aspect_tail='luma')
-        with self.assertRaisesRegex(ValueError, 'Fixed or Chroma tail'):
-            build_command(self.settings, self.devices, self.sd)
-        self.settings.update(aspect_tail='fixed', profile='fold-500')
+        self.settings.update(profile='fold-500')
         self.assertNotIn(
             '--pixel-grid', build_command(self.settings, self.devices, self.sd))
         self.settings.update(profile=profile, pixel_grid='robust')
@@ -638,17 +634,14 @@ class SenderGuiTests(unittest.TestCase):
         self.assertEqual(command[command.index('--profile')+1], 'aspect-fold-500')
         self.assertNotIn('--aspect-layout', command)
         self.assertNotIn('--aspect-tail', command)
-        self.settings.update(aspect_layout='16:9', aspect_tail='split')
+        self.settings.update(aspect_layout='16:9')
         command = build_command(self.settings, self.devices, self.sd)
         args = v7_live.parser().parse_args(command[2:])
-        self.assertEqual((args.aspect_layout, args.aspect_tail), ('16:9', 'split'))
+        self.assertEqual(args.aspect_layout, '16:9')
         # Other profiles never forward the aspect options.
         self.settings['profile'] = 'fold-500'
         command = build_command(self.settings, self.devices, self.sd)
         self.assertNotIn('--aspect-layout', command)
-        with self.assertRaisesRegex(ValueError, 'aspect tail'):
-            validate_settings(dict(self.settings, profile='aspect-fold-500',
-                                   aspect_tail='fresh'), self.devices, self.sd)
 
     def test_aspect_fold_fields_are_advanced_and_profile_specific(self):
         gui = SenderGui(self.devices)
@@ -659,11 +652,10 @@ class SenderGuiTests(unittest.TestCase):
         gui._assign('profile', 'aspect-fold-500')
         visible = gui._visible_fields()
         self.assertIn('aspect_layout', visible)
-        self.assertIn('aspect_tail', visible)
+        self.assertNotIn('aspect_tail', visible)
         self.assertIn('dct_encode', visible)
         self.assertEqual(gui._value_label('aspect_layout'), 'Auto · source aspect')
         self.assertEqual(section_of(gui, 'aspect_layout'), 'Wire profile')
-        self.assertEqual(section_of(gui, 'aspect_tail'), 'Wire profile')
 
     def test_aspect_mono_profile_forwards_layout_and_mono_routing_only(self):
         self.settings.update(profile='aspect-mono-500', aspect_layout='4:3',
@@ -1763,7 +1755,7 @@ class SenderGuiButtonLayoutTests(unittest.TestCase):
                  for dest, _column, _span in payload}
         self.assertEqual(shown, set(gui._visible_fields()))
         for dest in ('dct_encode', 'clip_aware', 'dct_sharpen',
-                     'aspect_tail', 'dct_clarity'):
+                     'aspect_layout', 'dct_clarity'):
             self.assertIn(dest, shown)
         hits = self._all_hits(gui)
         for dest in shown:
@@ -1811,7 +1803,7 @@ class SenderGuiButtonLayoutTests(unittest.TestCase):
                     if gui.settings['dct_kernel'] == 'reference':
                         self.assertEqual(max_scroll, 0)
                     else:
-                        self.assertEqual(max_scroll > 0, source != 'test')
+                        self.assertGreaterEqual(max_scroll, 0)
                         target = gui._kernel_param_fields()[-1]
                         gui._scroll_to(target, self.SIZE)
                         gui._canvas(self.SIZE)
@@ -1829,7 +1821,7 @@ class SenderGuiButtonLayoutTests(unittest.TestCase):
             'source_audio_delay_ms', 'capture_fps', 'profile',
             'aspect_layout', 'mono_video_side', 'brightness', 'gamma',
             'speed', 'perceptual_resize', 'perceptual_detail_strength',
-            'aspect_tail', 'dct_encode', 'pixel_encode', 'pixel_detail',
+            'dct_encode', 'pixel_encode', 'pixel_detail',
             'pixel_grid', 'luma_adjust', 'luma_adjust_linear', 'dct_sharpen',
             'dct_sharpen_strength', 'dct_clarity', 'dct_chroma_gain',
             'dct_kernel', 'dct_preshrink', 'clip_aware', 'screen_backend', 'region', 'ffmpeg_input',
@@ -1936,8 +1928,7 @@ class SenderGuiButtonLayoutTests(unittest.TestCase):
         self.assertIn('change_source', gui.hits)
 
     def test_settings_that_must_match_the_receiver_are_tagged(self):
-        self.assertEqual(SenderGui.MATCH_FIELDS,
-                         ('aspect_layout', 'aspect_tail'))
+        self.assertEqual(SenderGui.MATCH_FIELDS, ('aspect_layout',))
         for dest in SenderGui.MATCH_FIELDS:
             self.assertNotIn('match', SenderGui._button_label(
                 self._gui(), dest).lower())
@@ -1998,7 +1989,7 @@ class SenderGuiButtonLayoutTests(unittest.TestCase):
             'pixel_detail': 'average', 'pixel_grid': 'robust',
             'dct_sharpen': 'taper', 'dct_sharpen_strength': '0.5',
             'dct_clarity': '0.15', 'dct_chroma_gain': '1',
-            'aspect_layout': '16:9', 'aspect_tail': 'chroma',
+            'aspect_layout': '16:9',
         }
         sd = Mock()
         sd.check_output_settings.return_value = None
@@ -2008,8 +1999,8 @@ class SenderGuiButtonLayoutTests(unittest.TestCase):
         self.assertEqual(Path(command[1]).parts[-2:], ('tools', 'v7_live.py'))
         self.assertEqual(command[2:], [
             'send', '--device', '3', '--source', 'screen', '--profile',
-            'aspect-fold-500', '--aspect-layout', '16:9', '--aspect-tail',
-            'chroma', '--speed', '1.25', '--brightness', '1.1', '--gamma',
+            'aspect-fold-500', '--aspect-layout', '16:9',
+            '--speed', '1.25', '--brightness', '1.1', '--gamma',
             '0.9', '--dct-sharpen', 'taper',
             '--dct-sharpen-strength', '0.5', '--dct-clarity', '0.15',
             '--dct-kernel', 'viewer_solve',

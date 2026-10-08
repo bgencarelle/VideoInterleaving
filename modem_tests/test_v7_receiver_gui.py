@@ -482,16 +482,15 @@ class ReceiverGuiOptionTests(unittest.TestCase):
         live = {gui.fields[index].dest for index in sections['Live controls']}
         wire = {gui.fields[index].dest for index in sections['Wire']}
         self.assertNotIn('aspect_layout', live)
-        self.assertEqual(wire, {'aspect_layout', 'aspect_tail'})
-        self.assertIn(('Luma · 96 luma every packet', 'luma'),
-                      fields['aspect_tail'].options)
+        # The tail is the profile's, not a setting (fixes list item 9).
+        self.assertEqual(wire, {'aspect_layout'})
+        self.assertNotIn('aspect_tail', fields)
         fields['device'].value = 3
         args = gui._build_arguments()
-        self.assertEqual((args.aspect_layout, args.aspect_tail), ('auto', 'fixed'))
+        self.assertEqual(args.aspect_layout, 'auto')
         fields['aspect_layout'].value = '4:3'
-        fields['aspect_tail'].value = 'luma'
         args = gui._build_arguments()
-        self.assertEqual((args.aspect_layout, args.aspect_tail), ('4:3', 'luma'))
+        self.assertEqual(args.aspect_layout, '4:3')
 
     def test_display_grain_is_a_basic_display_choice_off_by_default(self):
         gui = ReceiverGui(self, self.root_parser, self.receive_parser,
@@ -728,7 +727,7 @@ class ReceiverGuiOptionTests(unittest.TestCase):
         self.assertNotIn('direction', shown)
         self.assertNotIn('decode_history', shown)
         self.assertIn('DCT reconstruction', shown)
-        self.assertIn('aspect_tail', shown)
+        self.assertIn('aspect_layout', shown)
         self.assertEqual(sorted(gui._config_field_indexes()),
                          list(range(len(gui.fields))))
 
@@ -1492,7 +1491,7 @@ class ReceiverGuiButtonLayoutTests(unittest.TestCase):
                  for index, _column, _span in payload}
         self.assertEqual(shown, set(range(len(gui.fields))))
         dests = {gui.fields[index].dest for index in shown}
-        for dest in ('aspect_layout', 'aspect_tail', 'log', 'no_log',
+        for dest in ('aspect_layout', 'log', 'no_log',
                      'diagnostics', 'device'):
             self.assertIn(dest, dests)
         # Each is reachable on the page by scrolling alone.
@@ -1665,7 +1664,7 @@ class ReceiverGuiButtonLayoutTests(unittest.TestCase):
 
     def test_settings_that_must_match_the_sender_are_tagged(self):
         from tools.v7_receiver_gui import MATCH_SETTINGS
-        self.assertEqual(MATCH_SETTINGS, ('aspect_layout', 'aspect_tail'))
+        self.assertEqual(MATCH_SETTINGS, ('aspect_layout',))
         gui = self._gui()
         for field in gui.fields:
             if field.dest in MATCH_SETTINGS:

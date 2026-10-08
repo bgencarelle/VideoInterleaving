@@ -45,7 +45,8 @@ from animation_modem.imaging import values_image                         # noqa:
 from animation_modem import v7 as P                                       # noqa: E402
 from animation_modem import v7_kernels as K                               # noqa: E402
 from tools.v7_send_defaults import (NESTED_BASE_PROFILES, SENDER_DEFAULTS,  # noqa: E402
-                                    default_kernel_for_profile)
+                                    default_kernel_for_profile,
+                                    kernel_profiles)
 from animation_modem.v7_live_input import (DirectionStreak, LiveInput,
                                            select_packet_hit,
                                            windowed_rate)                 # noqa: E402
@@ -1167,8 +1168,8 @@ def _kernel_defaults_profile(args):
     """Return the selected wire profile for profile-specific kernel defaults."""
     profile = getattr(args, 'profile', None)
     if profile:
-        # The nested-fold modes ride on these wires and share their kernels.
-        return NESTED_BASE_PROFILES.get(profile, profile)
+        # A nested-fold mode's own kernel settings first, then its wire's.
+        return kernel_profiles(profile)
     if getattr(args, 'aspect_mono', False):
         return 'aspect-mono-500'
     if getattr(args, 'aspect_fold', False):
@@ -1481,7 +1482,7 @@ def _run_send_session(args):
                       if getattr(args, 'dct_encode', False) and
                       dct_options.get('pixel') else None)
         aspect_wire = AspectFoldWire(getattr(args, 'aspect_layout', 'auto'),
-                                     getattr(args, 'aspect_tail', DEFAULT_ASPECT_TAIL),
+                                     ASPECT_FOLD_TAIL,
                                      pixel=pixel_grid)
         if pixel_grid:
             dct_options = dict(dct_options, pixel_shapes=tuple(
@@ -2393,7 +2394,7 @@ class _AdaptiveProfileDecoder:
     PIXEL_RETRY_EVERY = 4
 
     def __init__(self, fold, base_model, preferred_side='auto',
-                 aspect_layout='auto', aspect_tail=None):
+                 aspect_layout='auto'):
         from animation_modem import v7
         _ensure_test_modem_path()
         from live_fold import LiveFold
@@ -2427,7 +2428,7 @@ class _AdaptiveProfileDecoder:
         # Stereo Fold 500 with an aspect-matched coefficient layout; its
         # layout and tail are receiver settings matching the sender's.
         self.aspect_wire = AspectFoldWire(
-            aspect_layout, aspect_tail or DEFAULT_ASPECT_TAIL)
+            aspect_layout, ASPECT_FOLD_TAIL)
         self.aspect_mode = self.aspect_wire.status_mode
         # The same profile on a pixel grid (the sender's Pixel encode); the
         # packet's metadata model bit says which, so nothing is set here.
@@ -3059,7 +3060,7 @@ def _make_auto_profile_decoder(args, fold):
         fold, _model(args.fixture, 'box'),
         preferred_side=getattr(args, 'mono_video_side', 'auto'),
         aspect_layout=getattr(args, 'aspect_layout', 'auto'),
-        aspect_tail=getattr(args, 'aspect_tail', DEFAULT_ASPECT_TAIL))
+        )
 
 
 def run_receive(args):
@@ -4477,11 +4478,11 @@ def _run_receive_session(args, fold, mono_wire=None, adaptive_profile=None,
 
 ASPECT_LAYOUT_CHOICES = ('auto', '1:1', '4:3', '3:2', '16:9', '3:4', '2:3',
                          '9:16')
-ASPECT_TAIL_CHOICES = ('chroma', 'split', 'luma', 'fixed')
-# Fixed: everything shown comes from the current packet. At 12 pictures a
-# second the eye does not blend successive packets, so the rotating tails'
-# older detail shows as stale colour on anything that moves.
-DEFAULT_ASPECT_TAIL = 'fixed'
+# aspect-fold-500's tail is part of the profile (fixes list item 9): the 96
+# tail slots carry the strongest tail colour values of the current packet.
+# At 12 pictures a second the eye does not blend successive packets, so the
+# rotating tails' older detail showed as stale colour on anything that moves.
+ASPECT_FOLD_TAIL = 'fixed'
 # Pixel encode on the aspect profile: 'robust' fits the ordinary slots,
 # 'large' adds fold guests (exact on clean links only).
 DEFAULT_PIXEL_GRID = 'robust'
@@ -4493,15 +4494,6 @@ def _add_aspect_arguments(sub):
         help=('aspect-fold-500 and aspect-mono-500: coefficient layout aspect '
               '(default auto: the source aspect sent in each packet). Sender '
               'and receiver must agree.'))
-    sub.add_argument(
-        '--aspect-tail', choices=ASPECT_TAIL_CHOICES,
-        default=DEFAULT_ASPECT_TAIL,
-        help=('aspect-fold-500: what the 96 tail slots carry (default fixed): '
-              "chroma (rotating fine colour, V7's tail), "
-              'split (48 luma every packet + 48 '
-              'rotating chroma), luma (96 luma every packet) or fixed (the 96 '
-              'strongest tail colour values every packet, no rotation: best '
-              'for moving pictures). Sender and receiver must agree.'))
 
 
 def parser():

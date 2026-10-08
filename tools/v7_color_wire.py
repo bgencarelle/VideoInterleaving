@@ -305,7 +305,7 @@ class ColorWire:
     def receiver(self):
         decoder = v7_live._AdaptiveProfileDecoder(
             v7_live._experimental_fold(500), self.base,
-            aspect_layout=self.layout, aspect_tail='fixed')
+            aspect_layout=self.layout)
         if self.profile == 'aspect-fold-500':
             decoder.aspect_wire = self.wire
             mode = decoder.aspect_mode

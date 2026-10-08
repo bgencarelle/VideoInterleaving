@@ -122,6 +122,8 @@ Copy this and fill it in. Leave out what is not known; do not guess lines.
 - Left over: a cassette recorded 4 dB hot is still worse than the original
   (test frame: no pictures; face 49 to 43 pictures since item 31). Peak
   reduction stays off.
+- Second pass: header and EOF peak at -1.2 to -1.6 and -1.3 to -1.9 dBFS at 96 kHz (the sender's resampler holds back the inter-sample peaks, so some packets land a little under the 1 to 1.5 dB aim); data average -15.0 dBFS (face). Hiss 30 dB down and type I cassette: every packet shown. The hot cassette is still the one bad case (face 58 of 70 at 23.6 dB, test frame none).
+
 
 ### 1. Live packet start is rounded to a whole sample
 - Status: solved (awaiting second pass)
@@ -151,6 +153,7 @@ Copy this and fill it in. Leave out what is not known; do not guess lines.
 - Left over: the 35 to 55 parts per million that remain are the difference
   between the header's own scale reading and the header-to-EOF length, not
   an error in the length. Not looked at further.
+- Second pass: second pass (merged build, 96 kHz both ends): no rounding left; clean timing error median 9-12 ppm, largest 89-94 ppm, the same as before the merge (that remainder is the header-scale/end difference, see Left over). Gone: ready to delete.
 
 
 ### 2. A finished packet is not decoded until the next header arrives
@@ -185,6 +188,7 @@ Copy this and fill it in. Leave out what is not known; do not guess lines.
   with it. A packet whose marker never appears is handed over at the far
   edge of the marker search; the decoder then falls back to the next-header
   endpoint (item 4).
+- Second pass: second pass: every packet decoded on its own mark, one decode per picture, the last packet of each run shown (face and test frame, clean). Gone: ready to delete.
 
 
 ### 3. Each wake first tries a header that has no EOF yet
@@ -200,6 +204,7 @@ Copy this and fill it in. Leave out what is not known; do not guess lines.
 - Report: gone with item 2. In six live runs every wake decoded the newest
   header's packet at the first attempt (one decode call per picture, no
   empty calls).
+- Second pass: second pass: decode calls equal pictures shown on every clean run; no extra wakes. Gone: ready to delete.
 
 
 ### 4. The next header is used as a packet's end when the EOF is missing
@@ -234,6 +239,8 @@ Copy this and fill it in. Leave out what is not known; do not guess lines.
   to find where a cut packet's own mark went. It stays, for now; see item 27.
   A wire sent without timing tones has no backup at all now. See items 23,
   24 and 25, found here.
+- Second pass: second pass: every mark blanked, face and test frame: 67 of 67 shown, every one ended by its tone. Gone: ready to delete.
+
 
 ### 5. Stock stereo shows no picture on one test chart
 - Status: solved (awaiting second pass)
@@ -252,6 +259,8 @@ Copy this and fill it in. Leave out what is not known; do not guess lines.
   44.1 kHz against a 48 kHz sender (before testing rule 10), and before
   item 31 stopped picture data being taken for headers; either may have
   been the cause. Not changed in code.
+- Second pass: second pass: vertical line-widths chart shown in all four modes. Gone: ready to delete.
+
 
 ### 6. Command-line defaults do not match the GUI defaults
 - Status: solved (awaiting second pass)
@@ -284,9 +293,11 @@ Copy this and fill it in. Leave out what is not known; do not guess lines.
   on beside it; whether pixel-exact mode should drop Direct DCT is a
   separate question. On this test rig the sender picks 44.1 kHz for the
   loopback device unless told `--rate 48000` (same cause as item 22).
+- Second pass: second pass: bare sender and untouched GUI hand sample-identical audio to the device at 96 kHz. Gone: ready to delete.
+
 
 ### 7. Kernel strength depends on a profile's name
-- Status: open
+- Status: solved (awaiting second pass)
 - What is wrong: each kernel holds tuned settings by profile name. A profile
   that is not listed silently gets the kernel's raw, full-strength setting.
   Two builds of the same mode ended up at different strengths that way.
@@ -300,6 +311,19 @@ Copy this and fill it in. Leave out what is not known; do not guess lines.
 - Notes: the existing profile settings were tuned by hand and stay. For
   testing, the `reference` kernel (plain projection, no shaping) is the
   common baseline; each mode's tuned setting is a second run.
+- Report: a kernel now runs for a mode only if it has settings for that
+  mode, looked up under the mode's own name and then the wire a nested mode
+  rides on; otherwise the sender refuses to start ("viewer_solve has no
+  settings for stereo-nested: add them to its PROFILE_DEFAULTS, or use
+  reference"), and the GUI refuses the switch. The one mode that was running
+  a kernel at raw strength, stereo-nested with upscale_precomp, now has those
+  same values written down. Live, 96 kHz, vertical line-widths chart: every
+  mode's sender output is sample-identical to before (all four modes), and
+  the start-up line reports the same kernel settings.
+- Left over: other kernels have settings only for the two aspect wires, so
+  they can no longer be picked for stereo-nested until tuned for it.
+- Second pass: second pass: refusal confirmed (stereo-nested with viewer_solve). Not in the merge yet; on top of it here.
+
 
 ### 8. The default kernel corrects for a viewer that is not the one in use
 - Status: not fixed yet (the means is in; the default is the owner's call)
@@ -336,7 +360,7 @@ Copy this and fill it in. Leave out what is not known; do not guess lines.
   on the charts by switching the kernel and the edge rebuild off in turn.
 
 ### 9. The tail mode is set by hand at both ends
-- Status: open
+- Status: solved (awaiting second pass)
 - What is wrong: what the 96 tail slots carry is not signalled and is a
   separate setting on sender and receiver that must be matched by hand. It
   should be part of the profile.
@@ -349,6 +373,19 @@ Copy this and fill it in. Leave out what is not known; do not guess lines.
 - Notes: the fixed colour tail stays as the default. Only the mid/side
   stereo wire has tail slots; mono wires and stereo modes built from two
   mono packets have none.
+- Report: aspect-fold-500's tail is now part of the profile: the fixed
+  colour tail, always (`ASPECT_FOLD_TAIL` in `tools/v7_live.py`). The
+  `--aspect-tail` option is gone from sender and receiver, the setting is
+  gone from both GUIs, and a tail saved in old sender preferences is
+  dropped on load. Live, 96 kHz, vertical line-widths chart on stock stereo:
+  the sender's output is sample-identical to before, and the receiver shows
+  every packet after the first three (50 of 53) with no setting to match.
+- Left over: the chroma, split and luma tails are still in the codec
+  (`test_modem_v7/aspect_fold.py`) and its tests, unreachable from the
+  sender and receiver. To be removed on the second pass if nothing needs
+  them.
+- Second pass: second pass: --aspect-tail refused, every picture decodes with no setting. Not in the merge yet; on top of it here.
+
 
 ### 10. The end marker is too short to survive lossy audio codecs
 - Status: solved (awaiting second pass); no change needed
@@ -372,6 +409,7 @@ Copy this and fill it in. Leave out what is not known; do not guess lines.
   The shaped mark (item 28) and thresholds that follow the header (item 23)
   are the likely reasons. The packet length is unchanged. The packets that
   are still lost through codecs lose their picture, not their end: item 32.
+- Second pass: second pass: through MP3 192 and AAC 256 every packet's end was found by its mark. Gone: ready to delete.
 
 
 ### 11. The test tool does not decode the way the live receiver does
@@ -547,6 +585,7 @@ Copy this and fill it in. Leave out what is not known; do not guess lines.
   no longer happens). Worth a look in the second pass.
 - Left over: `docs/LIVE_MODEM.md` and the dirty spec still describe the
   removed options.
+- Second pass: second pass: no trace of the no-end-marker wire left in the code. Gone: ready to delete.
 
 
 ### 19. The tail slice number is still counted, sent and used
@@ -628,6 +667,8 @@ Copy this and fill it in. Leave out what is not known; do not guess lines.
   where they were fixed at 0.04 and 0.08. Live, every mark blanked: no packet
   ended by a false mark on stock stereo (52 of 52 ended by tone) or stock
   mono (51 of 51); before, 1 of 52 and 9 of 52 were ended by a false mark.
+- Second pass: second pass: every mark blanked: no packet ended by a false mark (134 of 134 ended by tone). Gone: ready to delete.
+
 
 ### 24. The diagnostic tone speed reading is wrong on coded-pilot wires
 - Status: open
@@ -681,6 +722,7 @@ Copy this and fill it in. Leave out what is not known; do not guess lines.
   0-255 scale (it was 4.09).
 - Left over: a viewer that already saved "nearest" from its toolbar keeps
   it until changed there.
+- Second pass: second pass: command-line viewer 0.37 off the receiver GUI on a 0-255 scale. Gone: ready to delete.
 
 
 ### 27. Time-stretched audio: damaged pictures pass, and the bar is in the wrong place
@@ -722,7 +764,7 @@ Copy this and fill it in. Leave out what is not known; do not guess lines.
   removed (it is not the default timing).
 
 ### 30. Under soft saturation the left channel's header is read as the wrong profile
-- Status: open
+- Status: solved (second pass)
 - What is wrong: on the test frame through the soft-saturation case, the left
   channel's header word is read as profile 2 (retired) in 26 of 64 packets;
   the right channel reads correctly. The two disagree, so the receiver never
@@ -741,6 +783,8 @@ Copy this and fill it in. Leave out what is not known; do not guess lines.
   replaced by tape chains (`tools/v7_tape.py`): cassette I and II, a hot
   cassette, reel-to-reel at 15 ips, and a hard digital clip. To be
   rechecked on those.
+- Second pass: on the realistic tape cases (hot cassette, reel-to-reel) the header is never read as the wrong profile any more (item 31 removed the false headers). The hot cassette's pictures are still lost, but to picture damage, not to the profile: that is item 28.
+
 
 ### 31. Things in the picture data were taken for headers
 - Status: solved (awaiting second pass)
@@ -762,6 +806,8 @@ Copy this and fill it in. Leave out what is not known; do not guess lines.
   43).
 - Notes: probably also explains item 30, which was found on the old
   soft-saturation case; recheck on the second pass.
+- Second pass: second pass: test frame on reel-to-reel and digital clip: 67 of 70 shown (the three missing are start-up). Gone: ready to delete.
+
 
 ### 32. Lossy codecs: packets found whole but not shown
 - Status: open

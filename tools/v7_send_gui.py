@@ -33,6 +33,7 @@ from tools.v7_preview_protocol import parse_preview_datagram
 from animation_modem import v7_kernels
 # What an untouched GUI sends is what a sender with no switches sends.
 from tools.v7_send_defaults import (DEFAULT_PROFILE, NESTED_BASE_PROFILES,
+                                    kernel_profiles,
                                     PROFILE_DEFAULT_KERNELS, SENDER_DEFAULTS,
                                     default_kernel_for_profile)
 
@@ -64,18 +65,10 @@ FOLDED_PROFILES = ('fold-500', 'mono-colour-500', 'aspect-fold-500',
                    'stereo-nested')
 ASPECT_PROFILES = ('aspect-fold-500', 'aspect-mono-500', 'stereo-slices',
                    'aspect-mono-nested', 'stereo-nested')
-# Only the stereo aspect profile has a V7 tail (mono packets carry none).
-ASPECT_TAIL_PROFILES = ('aspect-fold-500',)
 ASPECT_LAYOUT_CHOICES = (
     ('Auto · source aspect', 'auto'),
     ('1:1', '1:1'), ('4:3', '4:3'), ('3:2', '3:2'), ('16:9', '16:9'),
     ('3:4', '3:4'), ('2:3', '2:3'), ('9:16', '9:16'),
-)
-ASPECT_TAIL_CHOICES = (
-    ('Fixed · 96 colour every packet, no rotation · recommended', 'fixed'),
-    ('Chroma · rotating colour detail (V7) · best for held stills', 'chroma'),
-    ('Split · 48 luma + 48 rotating chroma', 'split'),
-    ('Luma · 96 luma every packet', 'luma'),
 )
 PRIMARY_PROFILE_CHOICES = PROFILE_CHOICES
 SOURCE_AUDIO_CHOICES = (
@@ -250,8 +243,6 @@ FIELD_HELP = {
     'aspect_layout': ('Which coefficients the aspect profiles send: matched '
                       'to this picture shape. Not signalled; set the receiver '
                       'to the same layout.'),
-    'aspect_tail': ('What the 96 tail slots carry. Not signalled; set the '
-                    'receiver to the same tail.'),
 }
 FIELD_LABELS = {
     'device': 'Audio output device',
@@ -288,7 +279,6 @@ FIELD_LABELS = {
     'dct_preshrink': 'DCT pre-shrink',
     'dct_chroma_gain': 'Chroma gain',
     'aspect_layout': 'Aspect layout',
-    'aspect_tail': 'Aspect tail',
 }
 # DCT kernels: one file each in dct_kernels/ (see the README there),
 # read when the GUI starts and again on R. The kernel's own parameters are
@@ -353,17 +343,13 @@ def _kernel_values(settings, kernel, profile=None):
     saved = (settings.get('dct_kernel_params') or {}).get(kernel.name, {})
     return kernel.resolve({key: value for key, value in saved.items()
                            if key in kernel.params},
-                          profile=NESTED_BASE_PROFILES.get(profile, profile))
+                          profile=kernel_profiles(profile))
 
 
 VIDEO_FILE_GLOB = '*.mp4 *.m4v *.mov *.mkv *.webm *.avi *.mpeg *.mpg *.wmv *.ts'
 DEVICE_REFRESH_SECONDS = 3.0
 GUI_EVENT_WAIT_SECONDS = 0.5
 SENDER_PREFERENCES_VERSION = 6
-DEFAULT_ASPECT_TAIL = 'fixed'
-# Version 5 made the fixed tail the default (the rotating tails show stale
-# colour on moving pictures): an earlier saved tail starts at it once.
-V5_RESET_SETTINGS = ('aspect_tail',)
 # Version 6 makes the measured Aspect-profile winner the active kernel default;
 # migrate the old Reference selection but preserve an explicit kernel choice.
 # Settings whose defaults changed in version 4 (four folded profiles, Aspect
@@ -396,9 +382,8 @@ def _load_sender_preferences(path):
         if version < 4:
             for key in V4_RESET_SETTINGS:
                 settings.pop(key, None)
-        if version < 5:
-            for key in V5_RESET_SETTINGS:
-                settings.pop(key, None)
+        # The tail is the profile's now, not a setting (fixes list item 9).
+        settings.pop('aspect_tail', None)
         if version < 6:
             if settings.get('dct_kernel', 'reference') == 'reference':
                 settings.pop('dct_kernel', None)
@@ -542,7 +527,7 @@ SAVED_SETTING_FIELDS = (
     'capture_width', 'capture_filter', 'perceptual_resize',
     'perceptual_detail_strength', 'dct_encode', 'dct_sharpen',
     'dct_sharpen_strength', 'dct_clarity', 'dct_chroma_gain', 'dct_preshrink',
-    'aspect_layout', 'aspect_tail', 'clip_aware', 'luma_adjust',
+    'aspect_layout', 'clip_aware', 'luma_adjust',
     'luma_adjust_linear', 'pixel_encode', 'pixel_detail', 'pixel_grid',
     'dct_kernel', 'dct_kernel_params', 'collapsed_sections',
 )
@@ -1279,19 +1264,11 @@ def validate_settings(settings, devices, sd_module=None, audio_devices=()):
                     settings, kernel_registry().get(dct_kernel), profile)
             except v7_kernels.KernelError as exc:
                 raise ValueError(f'DCT kernel: {exc}.') from exc
-    aspect_layout, aspect_tail = 'auto', DEFAULT_ASPECT_TAIL
+    aspect_layout = 'auto'
     if profile in ASPECT_PROFILES:
         aspect_layout = settings.get('aspect_layout', 'auto')
-        if profile in ASPECT_TAIL_PROFILES:
-            aspect_tail = settings.get('aspect_tail', DEFAULT_ASPECT_TAIL)
         if aspect_layout not in dict(ASPECT_LAYOUT_CHOICES).values():
             raise ValueError('Choose a supported aspect layout.')
-        if aspect_tail not in dict(ASPECT_TAIL_CHOICES).values():
-            raise ValueError('Choose a supported aspect tail.')
-        if (profile == 'aspect-fold-500' and dct_encode and
-                settings.get('pixel_encode') and
-                aspect_tail not in ('fixed', 'chroma')):
-            raise ValueError('Pixel encode needs the Fixed or Chroma tail.')
 
     speed = _float_setting(settings.get('speed', '1'), 'Speed')
     if not .25 <= speed <= 4.0:
@@ -1400,7 +1377,6 @@ def validate_settings(settings, devices, sd_module=None, audio_devices=()):
         'pixel_detail': pixel_detail,
         'pixel_grid': pixel_grid,
         'aspect_layout': aspect_layout,
-        'aspect_tail': aspect_tail,
         'dct_sharpen': dct_sharpen,
         'dct_sharpen_strength': dct_strength,
         'dct_clarity': dct_clarity,
@@ -1439,8 +1415,6 @@ def build_command(settings, devices, sd_module=None, python=None,
     if checked['profile'] in ASPECT_PROFILES:
         if checked['aspect_layout'] != 'auto':
             command.extend(('--aspect-layout', checked['aspect_layout']))
-        if checked['aspect_tail'] != DEFAULT_ASPECT_TAIL:
-            command.extend(('--aspect-tail', checked['aspect_tail']))
     if checked['profile'] in MONO_PROFILES:
         command.extend(('--mono-video-side',
                         checked['mono_video_side'], '--source-audio',
@@ -1491,8 +1465,7 @@ def build_command(settings, devices, sd_module=None, python=None,
         if checked['dct_kernel'] != 'reference':
             kernel = kernel_registry().get(checked['dct_kernel'])
             command.extend(('--dct-kernel', checked['dct_kernel']))
-            kernel_defaults = kernel.defaults(NESTED_BASE_PROFILES.get(
-                checked['profile'], checked['profile']))
+            kernel_defaults = kernel.defaults(kernel_profiles(checked['profile']))
             for key, value in sorted(checked['dct_kernel_values'].items()):
                 if value != kernel_defaults[key]:
                     command.extend(('--dct-kernel-param', f'{key}={value:g}'))
@@ -1665,7 +1638,7 @@ class SenderGui:
     LOG_LINE = 18
     LIVE_FIELDS = LIVE_FIELDS
     # Not signalled on the wire: the receiver must be set the same.
-    MATCH_FIELDS = ('aspect_layout', 'aspect_tail')
+    MATCH_FIELDS = ('aspect_layout',)
     # The setup page: named sections, most used first. A setting appears in
     # exactly one section; _shown_fields hides what the current choices make
     # irrelevant. The encoder resize filter is not offered: every profile is
@@ -1676,8 +1649,7 @@ class SenderGui:
         ('Output', ('device', 'speed')),
         ('Source', ('source', 'capture_fps', 'preview', 'video_source',
                     'video_live', 'camera', 'screen_target')),
-        ('Wire profile', ('profile', 'aspect_layout', 'aspect_tail',
-                          'mono_video_side')),
+        ('Wire profile', ('profile', 'aspect_layout', 'mono_video_side')),
         ('Source audio', ('source_audio', 'source_audio_device',
                           'source_audio_input_side', 'source_audio_gain',
                           'source_audio_delay_ms')),
@@ -1696,7 +1668,7 @@ class SenderGui:
     # take two cells, everything else (numbers, short pickers, on/off) one.
     FULL_WIDTH_FIELDS = (
         'camera', 'screen_target', 'profile',
-        'aspect_tail', 'source_audio_device', 'ffmpeg_input', 'region',
+        'source_audio_device', 'ffmpeg_input', 'region',
         'pixel_detail', 'pixel_grid',
     )
     DOUBLE_WIDTH_FIELDS = ('device', 'video_source', 'aspect_layout',
@@ -1706,7 +1678,7 @@ class SenderGui:
         'mono_video_side', 'source_audio', 'source_audio_device',
         'source_audio_input_side', 'screen_backend', 'capture_filter',
         'camera', 'screen_target', 'perceptual_resize', 'dct_sharpen',
-        'aspect_layout', 'aspect_tail', 'pixel_detail', 'pixel_grid',
+        'aspect_layout', 'pixel_detail', 'pixel_grid',
         'preview', 'dct_kernel',
     )
 
@@ -1786,7 +1758,6 @@ class SenderGui:
             'dct_kernel': default_kernel_for_profile(DEFAULT_PROFILE),
             'dct_kernel_params': {},
             'aspect_layout': 'auto',
-            'aspect_tail': DEFAULT_ASPECT_TAIL,
         }
         self.notice = 'Choose an output device, capture source, and profile.'
         # Playback of a video file: the sender's last report while it runs,
@@ -1938,12 +1909,10 @@ class SenderGui:
             return DOWNSCALER_CHOICES
         if dest == 'aspect_layout':
             return ASPECT_LAYOUT_CHOICES
-        if dest == 'aspect_tail':
-            return ASPECT_TAIL_CHOICES
         if dest == 'dct_kernel':
+            profile = self.settings.get('profile')
             winners = KERNEL_BENCHMARK_WINNERS.get(
-                NESTED_BASE_PROFILES.get(self.settings.get('profile'),
-                                         self.settings.get('profile')),
+                NESTED_BASE_PROFILES.get(profile, profile),
                 DEFAULT_KERNEL_BENCHMARK_WINNERS)
             ideal, bilinear = winners['ideal'], winners['bilinear']
             default_kernel = default_kernel_for_profile(
@@ -2434,8 +2403,6 @@ class SenderGui:
                 self.settings.get('luma_adjust', True)) or
             dest == 'aspect_layout' and
             self.settings['profile'] not in ASPECT_PROFILES or
-            dest == 'aspect_tail' and
-            self.settings['profile'] not in ASPECT_TAIL_PROFILES or
             dest == 'dct_sharpen_strength' and not (
                 self.settings['dct_encode'] and
                 self.settings['dct_sharpen'] != 'off') or
@@ -2517,9 +2484,7 @@ class SenderGui:
             kernel, name, _param = found
             saved = (self.settings.get('dct_kernel_params') or {}).get(
                 kernel.name, {})
-            return saved.get(name, kernel.defaults(NESTED_BASE_PROFILES.get(
-                self.settings.get('profile'),
-                self.settings.get('profile')))[name])
+            return saved.get(name, kernel.defaults(kernel_profiles(self.settings.get('profile')))[name])
         return self.settings.get(dest)
 
     def _edit_text(self, dest):
@@ -2552,9 +2517,7 @@ class SenderGui:
             if found is None:
                 return ''
             kernel, name, param = found
-            default = kernel.defaults(NESTED_BASE_PROFILES.get(
-                self.settings.get('profile'),
-                self.settings.get('profile')))[name]
+            default = kernel.defaults(kernel_profiles(self.settings.get('profile')))[name]
             return (f'{param.help or name} · {param.low:g} to {param.high:g}, '
                     f'default {default:g}. Left/Right steps by '
                     f'{param.step:g} (Shift: five times) and is heard on the '
@@ -2573,9 +2536,7 @@ class SenderGui:
         if dest.startswith(KERNEL_PARAM_PREFIX):
             found = self._kernel_param(dest)
             return (None if found is None else
-                    found[0].defaults(NESTED_BASE_PROFILES.get(
-                        self.settings.get('profile'),
-                        self.settings.get('profile')))[found[1]])
+                    found[0].defaults(kernel_profiles(self.settings.get('profile')))[found[1]])
         if dest in TONE_DEFAULTS:
             return TONE_DEFAULTS[dest]
         if dest == 'dct_kernel':
@@ -2822,7 +2783,7 @@ class SenderGui:
                          if candidate == value), str(value))
         if dest in ('source', 'profile', 'screen_backend', 'preview',
                     'encode_filter', 'capture_filter', 'perceptual_resize',
-                    'dct_sharpen', 'aspect_layout', 'aspect_tail',
+                    'dct_sharpen', 'aspect_layout',
                     'pixel_detail', 'pixel_grid', 'mono_video_side',
                     'source_audio', 'source_audio_input_side', 'capture_fps',
                     'dct_kernel'):
@@ -3734,9 +3695,6 @@ class SenderGui:
                  'Direct DCT' if settings.get('dct_encode') else 'Resize']
         if settings.get('profile') in ASPECT_PROFILES:
             layout = settings.get('aspect_layout', 'auto')
-            if settings.get('profile') in ASPECT_TAIL_PROFILES:
-                layout += ' / '+settings.get('aspect_tail',
-                                             DEFAULT_ASPECT_TAIL)
             facts.append('aspect '+layout)
         facts.append(f"{settings['speed']}×")
         if self._ab_stash is not None:

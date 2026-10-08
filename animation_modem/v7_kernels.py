@@ -395,10 +395,23 @@ class Kernel:
             options['preshrink'] = value
         return options
 
+    def _profile_entry(self, profile):
+        """The kernel's own settings for ``profile``: a name, or names in
+        order of preference (a nested mode, then the wire it rides on)."""
+        names = (profile,) if isinstance(profile, str) or profile is None \
+            else tuple(profile)
+        for name in names:
+            if name in self._profile_defaults:
+                return self._profile_defaults[name]
+        return None
+
+    def has_settings_for(self, profile):
+        return self._profile_entry(profile) is not None
+
     def defaults(self, profile=None):
         defaults = {name: spec.default for name, spec in self.params.items()}
         defaults.update(self._host_defaults)
-        defaults.update(self._profile_defaults.get(profile, {}))
+        defaults.update(self._profile_entry(profile) or {})
         return defaults
 
     def resolve(self, values=None, profile=None):
@@ -682,6 +695,13 @@ class KernelRegistry:
         kernel = self.get(name)
         if kernel is None:
             return None
+        if profile is not None and not kernel.has_settings_for(profile):
+            # A mode states its kernel settings; without them the kernel
+            # would run at its raw, full strength (fixes list item 7).
+            shown = profile if isinstance(profile, str) else profile[0]
+            raise KernelError(
+                f'{name} has no settings for {shown}: add them to its '
+                f'PROFILE_DEFAULTS, or use {REFERENCE}')
         return KernelSelection(kernel, tuple(sorted(
             kernel.resolve(values, profile=profile).items())))
 
