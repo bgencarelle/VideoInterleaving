@@ -2473,6 +2473,9 @@ class _AdaptiveProfileDecoder:
         self.stereo_tail_memory = True
         self.dispatch_mode = None
         self.dispatch_side = None
+        # Called with (profile name, side) whenever a new profile is
+        # confirmed; the live receiver keeps it for its next start.
+        self.on_switch = None
         self._local = threading.local()
         self._installed = None
         # Last layout confirmed by packet metadata, per aspect profile mode.
@@ -2494,6 +2497,20 @@ class _AdaptiveProfileDecoder:
         if self.candidate is None:
             return None
         return self._mode_names[self.candidate[0]]
+
+    def start_with(self, profile_name, side=None):
+        """Start out as if ``profile_name`` had been confirmed, so its first
+        packet is shown at once; another profile still needs
+        REQUIRED_STREAK agreeing packets. False if the name is unknown."""
+        modes = {name: mode for mode, name in self._mode_names.items()}
+        mode = modes.get(profile_name)
+        if mode is None:
+            return False
+        self.active_mode = mode
+        self.active_side = (side if mode in self.mono_status_modes and
+                            side in (0, 1) else None)
+        self.reset_candidate()
+        return True
 
     def bind_state(self, state):
         self.state = state
@@ -2621,6 +2638,9 @@ class _AdaptiveProfileDecoder:
                 if self.streak >= self.REQUIRED_STREAK:
                     self.active_mode, self.active_side = key
                     self.reset_candidate()
+                    if self.on_switch is not None:
+                        self.on_switch(self._mode_names[self.active_mode],
+                                       self.active_side)
                     self._reset_aspect_wires()
                     self.generation += 1
                     changed = confirmed = True
@@ -3054,6 +3074,38 @@ def _detect_mono_fold_side(args, timeout=2.0, wait_for_signal=False):
     return confirmed_profile()
 
 
+def _sticky_profile_path():
+    """Where the receiver keeps the last profile it confirmed (item 33)."""
+    root = Path(os.environ.get('XDG_CONFIG_HOME') or Path.home()/'.config')
+    return root/'modemTest'/'v7_receiver_profile.json'
+
+
+def _load_sticky_profile(decoder):
+    """Start the receiver on the profile it last confirmed, if any."""
+    try:
+        data = json.loads(_sticky_profile_path().read_text())
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict) or data.get('version') != 1:
+        return None
+    name, side = data.get('profile'), data.get('side')
+    if not isinstance(name, str) or not decoder.start_with(name, side):
+        return None
+    return name
+
+
+def _save_sticky_profile(name, side):
+    path = _sticky_profile_path()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = path.with_suffix('.tmp')
+        temporary.write_text(json.dumps({'version': 1, 'profile': name,
+                                         'side': side}, sort_keys=True)+'\n')
+        os.replace(temporary, path)
+    except OSError:
+        pass
+
+
 def _make_auto_profile_decoder(args, fold):
     """Build the default status-driven Fold-500/mono-video receiver."""
     return _AdaptiveProfileDecoder(
@@ -3089,6 +3141,13 @@ def run_receive(args):
             raise ValueError('automatic profile selection requires tone-assisted timing')
         fold = _experimental_fold(500)
         profile_decoder = _make_auto_profile_decoder(args, fold)
+        # Start on the profile confirmed last time: its first packet is then
+        # shown at once (fixes list item 33).
+        sticky = _load_sticky_profile(profile_decoder)
+        if sticky is not None and not args.no_log:
+            print({'status': 'sticky_profile', 'profile': sticky,
+                   'video_side': profile_decoder.active_side}, flush=True)
+        profile_decoder.on_switch = _save_sticky_profile
         _ensure_test_modem_path()
         from tone_code import coded_pilot_timing
         profile_decoder.install()

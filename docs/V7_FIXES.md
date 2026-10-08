@@ -125,206 +125,6 @@ Copy this and fill it in. Leave out what is not known; do not guess lines.
 - Second pass: header and EOF peak at -1.2 to -1.6 and -1.3 to -1.9 dBFS at 96 kHz (the sender's resampler holds back the inter-sample peaks, so some packets land a little under the 1 to 1.5 dB aim); data average -15.0 dBFS (face). Hiss 30 dB down and type I cassette: every packet shown. The hot cassette is still the one bad case (face 58 of 70 at 23.6 dB, test frame none).
 
 
-### 1. Live packet start is rounded to a whole sample
-- Status: solved (awaiting second pass)
-- What is wrong: the live decode restarts from the whole-number part of the
-  measured packet start, so each packet reads up to one sample too long and
-  its picture data is stretched to fit. Offline decode keeps the fraction.
-  It gets worse with playback speed (one sample is about 255 parts per
-  million at 1x and about 1,020 at 4x).
-- Where: `animation_modem/v7.py`, lines 4777-4778 (`cursor = int(fs)`,
-  `measured = (16*sc, sc, conf)`).
-- How it was found: live run. The receiver's reported timing error matched
-  the dropped fraction exactly; on a digital copy it showed as an 8-packet
-  cycle.
-- What "fixed" looks like: on a clean digital copy every live packet reports
-  under about 10 parts per million, and successive pictures of a still agree.
-- Notes: a wider audit of whole-number conversions of positions found only
-  search-window edges (harmless) and the live input's arrival bookkeeping
-  (harmless, re-measured). Not every line of the receiver has been read.
-- Report: the fraction is kept (`animation_modem/v7.py`, the live restart
-  in `_decode_pulse_stream`). Live run over a PortAudio loopback, sender at
-  48 kHz, receiver at the device's 44.1 kHz, stock mono, one chart: before,
-  69 of 137 pictures read more than 100 parts per million off (up to 232);
-  after, none of 137 (largest 54). Same result on stock stereo, both nested
-  modes and at half speed. Pictures of a held still differ less from one
-  another (stock mono 4.5 to 2.6 and 3.5 to 1.8 on a 0-255 scale; mono
-  nested 1.65 to 0.99).
-- Left over: the 35 to 55 parts per million that remain are the difference
-  between the header's own scale reading and the header-to-EOF length, not
-  an error in the length. Not looked at further.
-- Second pass: second pass (merged build, 96 kHz both ends): no rounding left; clean timing error median 9-12 ppm, largest 89-94 ppm, the same as before the merge (that remainder is the header-scale/end difference, see Left over). Gone: ready to delete.
-
-
-### 2. A finished packet is not decoded until the next header arrives
-- Status: solved (awaiting second pass)
-- What is wrong: the live input hands audio to the decoder only when a new
-  header has arrived. A packet that is complete, header to EOF, waits for
-  the following packet, and the last packet of a finite input is never
-  decoded. The rule should be: header and EOF both in, decode, at any
-  playback speed, without looking at the next packet.
-- Where: `animation_modem/v7_live_input.py`, line 210 onward (the wake
-  rule); `animation_modem/v7.py`, lines 4705-4776 (live candidate
-  selection); `tools/v7_live.py`, line 4064 onward (the live decode call).
-- How it was found: read in the code and the spec; seen in the live log.
-- What "fixed" looks like: a single packet followed by silence is decoded
-  and shown; a stream's last packet is shown.
-- Notes: highest priority after anything that is breaking work.
-- Report: `LiveInput` now hands a packet over when its own end marker is
-  found and its last samples are in (`animation_modem/v7_live_input.py`,
-  `_count_complete` and `_marker_in`); `tools/v7_live.py` passes the frame
-  boundary through. Live run: ten packets followed by silence, played into
-  the loopback. Before, the receiver showed packets 2 to 8; after, 2 to 9
-  (the first two go to profile detection in both). Six live runs of 12
-  seconds: one decode per picture, none missing, none repeated, last packet
-  shown. `modem_tests`: 954 tests, the same two failures as the untouched
-  build (a missing package and one test that fails now and then on both).
-- Tests changed: three tests pinned the old rule ("every frame but the
-  last") and now expect every packet, the last included
-  (`modem_tests/test_v7_live_input.py`, `modem_tests/test_v7_reverse.py`).
-- Left over: a wire with no end marker (frame boundary `baseline`) still
-  ends a packet at the next header, since it has nothing else. If that wire
-  is retired, the `frame_boundary` argument of `LiveInput` and its branch go
-  with it. A packet whose marker never appears is handed over at the far
-  edge of the marker search; the decoder then falls back to the next-header
-  endpoint (item 4).
-- Second pass: second pass: every packet decoded on its own mark, one decode per picture, the last packet of each run shown (face and test frame, clean). Gone: ready to delete.
-
-
-### 3. Each wake first tries a header that has no EOF yet
-- Status: solved (awaiting second pass)
-- What is wrong: on waking, the decoder checks candidates newest first, so
-  it always tries the packet that has only just started, fails, and falls
-  back to the previous one.
-- Where: `animation_modem/v7.py`, lines 4751-4767.
-- How it was found: live log (two marker searches per wake, the first always
-  empty).
-- What "fixed" looks like: one marker search per decoded packet.
-- Notes: expected to disappear with item 2.
-- Report: gone with item 2. In six live runs every wake decoded the newest
-  header's packet at the first attempt (one decode call per picture, no
-  empty calls).
-- Second pass: second pass: decode calls equal pictures shown on every clean run; no extra wakes. Gone: ready to delete.
-
-
-### 4. The next header is used as a packet's end when the EOF is missing
-- Status: solved (awaiting second pass)
-- What is wrong: the backup for a lost or badly fitting EOF reads past the
-  packet into the next one. The backup should come from inside the packet:
-  the pitch of the timing tones gives the playback speed, the speed gives
-  the packet length, and header position plus length gives the end.
-- Where: `animation_modem/v7.py`, `_packet_tone_scale`, `_tone_eof_marker`
-  and `_packet_end`; `_spliced_eof_marker` no longer returns the next header
-  as an end.
-- How it was found: read in the code and the spec. Not tested.
-- What "fixed" looks like: a packet with its EOF removed is still decoded,
-  from its own header and tones, with nothing after it in the input.
-- Report: a packet's end is now looked for in this order: its mark where
-  the header puts it; its mark where its own tone puts it (searched within
-  4 samples); its mark through the time-stretcher search; and last the
-  length its tone gives, with no mark at all. The next header is never the
-  end of a packet any more. The tone length is measured by reading the
-  1,125 Hz tone once per body symbol and correcting the clock until its
-  phase advances as sent. Live run, PortAudio loopback, 48 kHz both ends,
-  reference face, the mark blanked after the sender made the packet:
-  stock stereo with every other mark blanked, 51 of 51 pictures shown, 26
-  of them ended by tone, each within 0.01 sample of where the mark would
-  have put it, pictures no different from the untouched run; every mark
-  blanked, 52 of 52 shown, 51 by tone; stock mono with every mark blanked,
-  52 of 52 shown, 43 by tone. The last packet of each run had only silence
-  after it and was shown. Tool only (not live): one packet with no mark and
-  no samples after it decodes at 0.8x, 1x and 1.5x; with hiss 45 dB down
-  the tone end stays within one sample.
-- Left over: the time-stretcher search still reads ahead to the next header
-  to find where a cut packet's own mark went. It stays, for now; see item 27.
-  A wire sent without timing tones has no backup at all now. See items 23,
-  24 and 25, found here.
-- Second pass: second pass: every mark blanked, face and test frame: 67 of 67 shown, every one ended by its tone. Gone: ready to delete.
-
-
-### 5. Stock stereo shows no picture on one test chart
-- Status: solved (awaiting second pass)
-- What is wrong: with the vertical line-widths chart, the live receiver
-  decoded nothing for `aspect-fold-500` in two attempts. Its profile
-  detector reported a different profile.
-- Where: not located yet. The profile detector is `_ProfileStatusProbe`,
-  `tools/v7_live.py`, line 2308.
-- How it was found: live run, one picture only.
-- What "fixed" looks like: every chart in the test set is shown in every
-  mode on a clean signal.
-- Report: not reproduced. Live, 96 kHz both ends, clean: both line-widths
-  charts (vertical and horizontal) are shown in all four modes, every packet
-  but the first three while the receiver confirms the profile, on this build
-  and on the original. The first sighting was made with the receiver at
-  44.1 kHz against a 48 kHz sender (before testing rule 10), and before
-  item 31 stopped picture data being taken for headers; either may have
-  been the cause. Not changed in code.
-- Second pass: second pass: vertical line-widths chart shown in all four modes. Gone: ready to delete.
-
-
-### 6. Command-line defaults do not match the GUI defaults
-- Status: solved (awaiting second pass)
-- What is wrong: the GUI turns on Direct DCT encode, luma adjustment and the
-  tuned kernel; a bare command line turns on none of them and falls back to
-  a different profile. The GUI's defaults should be the defaults everywhere,
-  with arguments as overrides. Direct DCT should be used for everything
-  except pixel-exact mode.
-- Where: `tools/v7_send_defaults.py` (the one definition);
-  `tools/v7_live.py`, `_apply_profile_option` and `_apply_encode_defaults`;
-  `tools/v7_send_gui.py`, `build_command` and the starting settings.
-- How it was found: live run and read in the code.
-- What "fixed" looks like: the sender started with no arguments and the
-  sender started from an untouched GUI hand bit-identical packets to the
-  modem.
-- Report: the default profile, Direct DCT, luma adjustment and the
-  per-profile kernel now live in one file that both the command line and
-  the GUI read. `--dct-encode` and `--luma-adjust` each gained a `--no-`
-  form; the GUI now says only what was turned off. Live run over the
-  PortAudio loopback at 48 kHz both ends, reference face: every block
-  handed to the audio device by a sender with no switches equals, sample for
-  sample, the blocks from the command an untouched GUI builds (227,360
-  samples compared). Same for `--profile` alone against the GUI on
-  aspect-mono-500, aspect-mono-nested and stereo-nested. Every picture
-  decoded on every run.
-- Left over: a bare sender used to send the old non-aspect Fold 500 wire
-  through a resize; it now sends aspect-fold-500, so anything scripted on
-  the old behaviour needs `--experimental-fold 500 --no-dct-encode`. Pixel
-  encode keeps Direct DCT and, as in the GUI, luma adjustment stays switched
-  on beside it; whether pixel-exact mode should drop Direct DCT is a
-  separate question. On this test rig the sender picks 44.1 kHz for the
-  loopback device unless told `--rate 48000` (same cause as item 22).
-- Second pass: second pass: bare sender and untouched GUI hand sample-identical audio to the device at 96 kHz. Gone: ready to delete.
-
-
-### 7. Kernel strength depends on a profile's name
-- Status: solved (awaiting second pass)
-- What is wrong: each kernel holds tuned settings by profile name. A profile
-  that is not listed silently gets the kernel's raw, full-strength setting.
-  Two builds of the same mode ended up at different strengths that way.
-- Where: `dct_kernels/viewer_solve.py`, line 27; `dct_kernels/
-  upscale_precomp.py`, line 18; `tools/v7_send_gui.py`, lines 58 and
-  322-337; `tools/v7_live.py`, lines 1123 and 1174.
-- How it was found: read in the code; confirmed by the live sender's own
-  start-up report of the kernel in use.
-- What "fixed" looks like: every selectable mode states its kernel and
-  strength explicitly, and a mode without one refuses to start.
-- Notes: the existing profile settings were tuned by hand and stay. For
-  testing, the `reference` kernel (plain projection, no shaping) is the
-  common baseline; each mode's tuned setting is a second run.
-- Report: a kernel now runs for a mode only if it has settings for that
-  mode, looked up under the mode's own name and then the wire a nested mode
-  rides on; otherwise the sender refuses to start ("viewer_solve has no
-  settings for stereo-nested: add them to its PROFILE_DEFAULTS, or use
-  reference"), and the GUI refuses the switch. The one mode that was running
-  a kernel at raw strength, stereo-nested with upscale_precomp, now has those
-  same values written down. Live, 96 kHz, vertical line-widths chart: every
-  mode's sender output is sample-identical to before (all four modes), and
-  the start-up line reports the same kernel settings.
-- Left over: other kernels have settings only for the two aspect wires, so
-  they can no longer be picked for stereo-nested until tuned for it.
-- Second pass: second pass: refusal confirmed (stereo-nested with viewer_solve). Not in the merge yet; on top of it here.
-
-
 ### 8. The default kernel corrects for a viewer that is not the one in use
 - Status: not fixed yet (the means is in; the default is the owner's call)
 - What is wrong: `viewer_solve` models the receiver as shrinking to half the
@@ -358,59 +158,6 @@ Copy this and fill it in. Leave out what is not known; do not guess lines.
   three cases (see item 14).
 - Notes: possible link to the squares and stairs seen earlier; to be settled
   on the charts by switching the kernel and the edge rebuild off in turn.
-
-### 9. The tail mode is set by hand at both ends
-- Status: solved (awaiting second pass)
-- What is wrong: what the 96 tail slots carry is not signalled and is a
-  separate setting on sender and receiver that must be matched by hand. It
-  should be part of the profile.
-- Where: `test_modem_v7/aspect_fold.py`, lines 27-28 and 72-76;
-  `tools/v7_live.py`, lines 4463-4467; the matching settings in
-  `tools/v7_send_gui.py` and `tools/v7_receiver_gui.py`.
-- How it was found: read in the code and the spec.
-- What "fixed" looks like: choosing a profile fixes the tail; there is no
-  separate tail setting to match.
-- Notes: the fixed colour tail stays as the default. Only the mid/side
-  stereo wire has tail slots; mono wires and stereo modes built from two
-  mono packets have none.
-- Report: aspect-fold-500's tail is now part of the profile: the fixed
-  colour tail, always (`ASPECT_FOLD_TAIL` in `tools/v7_live.py`). The
-  `--aspect-tail` option is gone from sender and receiver, the setting is
-  gone from both GUIs, and a tail saved in old sender preferences is
-  dropped on load. Live, 96 kHz, vertical line-widths chart on stock stereo:
-  the sender's output is sample-identical to before, and the receiver shows
-  every packet after the first three (50 of 53) with no setting to match.
-- Left over: the chroma, split and luma tails are still in the codec
-  (`test_modem_v7/aspect_fold.py`) and its tests, unreachable from the
-  sender and receiver. To be removed on the second pass if nothing needs
-  them.
-- Second pass: second pass: --aspect-tail refused, every picture decodes with no setting. Not in the merge yet; on top of it here.
-
-
-### 10. The end marker is too short to survive lossy audio codecs
-- Status: solved (awaiting second pass); no change needed
-- What is wrong: the EOF marker is 24 samples, half a millisecond, a single
-  short burst. Lossy codecs smear and reshape a burst that short.
-- Where: `animation_modem/v7.py`, lines 49-51 (`PULSE_GUARD_BASE`,
-  `EOF_MARKER_LENGTH`) and the marker search at `_eof_marker_kernel`.
-- How it was found: tool only (frames lost through MP3 and AAC). The length
-  needed, about 4 milliseconds of an in-band tone, is an estimate, not a
-  measurement.
-- What "fixed" looks like: all packets shown after a live run through MP3
-  and AAC at agreed bit rates.
-- Notes: lengthening to about 200 samples costs about 4.5% of picture rate.
-  The header is 288 samples; whether its shape suits a codec has not been
-  looked at. Changing the packet length touches sender, receiver, reverse
-  playback and tests.
-- Report: not reproduced on this build. Live, 96 kHz both ends, the
-  sender's own audio through MP3 (320, 192, 128 kbit/s), AAC (256, 128)
-  and Opus (128, 96), reference face and video test frame: every packet's
-  end was found by its mark, within 0.2 samples, on every codec and rate.
-  The shaped mark (item 28) and thresholds that follow the header (item 23)
-  are the likely reasons. The packet length is unchanged. The packets that
-  are still lost through codecs lose their picture, not their end: item 32.
-- Second pass: second pass: through MP3 192 and AAC 256 every packet's end was found by its mark. Gone: ready to delete.
-
 
 ### 11. The test tool does not decode the way the live receiver does
 - Status: open
@@ -545,67 +292,22 @@ Copy this and fill it in. Leave out what is not known; do not guess lines.
   not finished cutting when the samples were dropped, and it cut into wanted
   picture frequencies.
 
-### 18. Code for a wire without an end marker is still there
-- Status: solved (awaiting second pass)
-- What is wrong: the end marker is a core part of V7 and nothing is used
-  without it. The code still carries the other way of ending a packet (the
-  next header, frame boundary `baseline`): in the decoder, as an argument of
-  `LiveInput` kept when item 2 was fixed, as a receiver option, and in tests
-  that send a wire with no marker.
-- Where: `animation_modem/v7.py` (`frame_boundary`, the `baseline` branches
-  around lines 4713-4722 and 4835-4860); `animation_modem/v7_live_input.py`
-  (`frame_boundary`); `tools/v7_live.py` (the `frame_boundary` option);
-  `modem_tests/test_v7_live_input.py` and others that use the wire without
-  a marker.
-- How it was found: owner's decision.
-- What "fixed" looks like: one way to end a packet. No `baseline` option,
-  branch or test.
-- Report: there is one way to end a packet. Removed: the `eof_marker`
-  argument of the packet encoders and of every wrapper around them (they
-  always write the marker); the `frame_boundary` argument of the decoders
-  and its next-header branches; the `frame_boundary` argument of
-  `LiveInput`; the receiver's `--frame-boundary` option and its GUI entry;
-  the application sender's `--modem-eof-marker` option. 43 files had the
-  now-redundant arguments stripped from calls.
-- Checked: `modem_tests`, 953 tests, the only failure is the missing
-  package the untouched build also fails on. Live run at 48 kHz both ends,
-  all four modes: every packet shown, none repeated.
-- Tests changed: tests that sent a wire with no marker now send the only
-  wire there is; the ones that expected "every frame but the last" expect
-  every frame; the two pilot-tone tests take the tone overlay from the
-  function that makes it, because a packet's final level is set after the
-  tones are mixed in; two level tests measure the body against the ceiling
-  the packet's own header and end marker set; one test that only refused a
-  missing marker was deleted.
-- Two tests pinned behaviour that existed only on the old wire and now
-  assert less: `test_timing_aided_retry_recovers_metadata_in_previous_
-  lowpass_case` (the plain decode already reads 39 of 40 there, so the
-  retry has nothing to add) and `test_static_filter_bias_falls_back_to_
-  packet_average_scale` (with the end pinned by the marker the fall-back
-  no longer happens). Worth a look in the second pass.
-- Left over: `docs/LIVE_MODEM.md` and the dirty spec still describe the
-  removed options.
-- Second pass: second pass: no trace of the no-end-marker wire left in the code. Gone: ready to delete.
-
-
-### 19. The tail slice number is still counted, sent and used
+### 19. The rotating tail modes are still in the codec
 - Status: open
-- What is wrong: with the fixed tail nothing rotates, but every packet still
-  carries a slice number from 0 to 6 in three metadata bits, on every wire,
-  mono included. The decoder picks a slot layout by it, tail memory is
-  updated by it, the nested fold's optional dither uses it as its counter,
-  and predicted metadata advances it.
-- Where: `animation_modem/v7.py`, `metadata_word` (line 318), the layout
-  lookup at line 569, lines 5154-5177 and 5257-5260;
-  `test_modem_v7/nested_fold.py`, line 502 onward;
-  `test_modem_v7/aspect_fold.py`, lines 665-668.
-- How it was found: read in the code; seen in the double-speed runs.
-- What "fixed" looks like: no slice number on the wire; the rotating tail
-  modes, tail memory and the seven layouts are gone; the bits are free.
-- Notes: two slice values (5 and 6) also mark the packets that carry the
-  loop fields (item 20), so the loop fields need another way to be marked or
-  carried first. Changes the metadata layout, so it changes the wire. Ties
-  into item 9.
+- What is wrong: since item 9 the stereo profile always uses the fixed tail,
+  but the codec still holds the rotating tails (chroma, split, luma), their
+  tail memory and the seven per-slice tail layouts, unreachable from the
+  sender and receiver.
+- Where: `test_modem_v7/aspect_fold.py` (`TAIL_MODES`, `FROZEN_TAIL_MODES`
+  and their pinned tables), the tail memory in `animation_modem/v7.py`, and
+  the tests that exercise every tail.
+- How it was found: item 9.
+- What "fixed" looks like: only the fixed tail remains in the codec; nothing
+  else changes on the wire.
+- Notes: the slice number itself stays on the wire. It was listed here as
+  dead, but it is in use on purpose: the nested fold's dither picks its
+  offset set by it (commit "Dither: folded slots' stairs..."), and slices 5
+  and 6 mark the packets that carry the loop fields (item 20).
 
 ### 20. Packets on slices 5 and 6 pass a damaged metadata check
 - Status: open
@@ -645,31 +347,6 @@ Copy this and fill it in. Leave out what is not known; do not guess lines.
   line makes a mismatch with the device obvious.
 
 
-### 23. Something else is taken for the EOF mark when the real one is gone
-- Status: solved (awaiting second pass)
-- What is wrong: with the mark blanked, the mark detector sometimes accepts
-  a pattern 25 to 49 samples early (inside the metadata symbol and guard)
-  as the mark. The packet is then ended there, about 1 percent short. The
-  check is three edges spaced 8 and 6 samples at a level over 0.08, looked
-  for 47 samples either side of the expected place, which data can pass.
-- Where: `animation_modem/v7.py`, `_eof_marker_kernel` and
-  `_measure_eof_marker` (search radius `EOF_SEARCH_FRACTION`).
-- How it was found: live run for item 4. 1 of 52 packets on stock stereo
-  and 9 of 52 on stock mono with every mark blanked. Never seen with the
-  mark present.
-- What "fixed" looks like: with the mark blanked, no packet is ended by a
-  mark.
-- Notes: ties in with item 10 (a longer mark). The tone length is now known
-  to 0.01 sample on a clean line and could be used to refuse a mark that
-  disagrees with it.
-- Report: the mark's thresholds now follow the level the packet's header
-  arrived at (switching at 35 percent of it, every run reaching 60 percent),
-  where they were fixed at 0.04 and 0.08. Live, every mark blanked: no packet
-  ended by a false mark on stock stereo (52 of 52 ended by tone) or stock
-  mono (51 of 51); before, 1 of 52 and 9 of 52 were ended by a false mark.
-- Second pass: second pass: every mark blanked: no packet ended by a false mark (134 of 134 ended by tone). Gone: ready to delete.
-
-
 ### 24. The diagnostic tone speed reading is wrong on coded-pilot wires
 - Status: open
 - What is wrong: `pilot_tone_speed` assumes a plain tone. The aspect
@@ -697,33 +374,6 @@ Copy this and fill it in. Leave out what is not known; do not guess lines.
   again within a few packets.
 - Notes: may be the test rig (the loopback daemon is unreliable here), like
   items 15 and 17.
-
-### 26. The command-line receiver does not draw the way the receiver GUI does
-- Status: solved (awaiting second pass)
-- What is wrong: `v7_live.py receive` opens its viewer in nearest-pixel
-  mode (or whatever mode was last saved) with no frequency-space
-  enlargement, no edge rebuild and no guided chroma. The receiver GUI
-  starts with all of them on. Same split as item 6, on the receiving side.
-- Where: `tools/v7_gl_viewer.py`, `_load_display_default` (falls back to
-  `nearest`) and `run`; `tools/v7_receiver_gui.py`, lines 778-783.
-- How it was found: live run on a virtual screen for item 8; the two
-  viewers showed the same packets visibly differently. Confirmed in the
-  code.
-- What "fixed" looks like: both viewers, untouched, put the same picture
-  on screen for the same packet.
-- Report: the command-line viewer (`tools/v7_gl_viewer.py`, `run`) now
-  draws as the receiver GUI does: frequency-space enlargement sized to the
-  picture area, the edge rebuild at 75%, guided colour and bicubic, all
-  taken from the one description (`animation_modem/v7_viewer_model.py`).
-  With no saved toolbar choice it starts on the recommended filter instead
-  of nearest pixel; a filter picked on its toolbar is still remembered. Live,
-  96 kHz, reference face, both viewers on a virtual screen, pictures brought
-  to one size: the command-line viewer differs from the GUI by 0.37 on a
-  0-255 scale (it was 4.09).
-- Left over: a viewer that already saved "nearest" from its toolbar keeps
-  it until changed there.
-- Second pass: second pass: command-line viewer 0.37 off the receiver GUI on a 0-255 scale. Gone: ready to delete.
-
 
 ### 27. Time-stretched audio: damaged pictures pass, and the bar is in the wrong place
 - Status: open (long-term goal, not for now)
@@ -763,52 +413,6 @@ Copy this and fill it in. Leave out what is not known; do not guess lines.
 - What "fixed" looks like: pulse-warp decodes the high-passed stream, or is
   removed (it is not the default timing).
 
-### 30. Under soft saturation the left channel's header is read as the wrong profile
-- Status: solved (second pass)
-- What is wrong: on the test frame through the soft-saturation case, the left
-  channel's header word is read as profile 2 (retired) in 26 of 64 packets;
-  the right channel reads correctly. The two disagree, so the receiver never
-  settles on a profile and shows nothing. The original build misread 16 and
-  still showed 28 pictures.
-- Where: the header word reader, `animation_modem/transport3.py`
-  (`_pulse_word_kernel`, `_runs`).
-- How it was found: live run, 96 kHz, and the profile detector run on the
-  same audio.
-- What "fixed" looks like: both channels read the right profile through
-  soft saturation.
-- Notes: the leveler is ruled out: both channels now sit at the same gain,
-  and no leveler target removes the misreads.
-- Notes, later: the soft-saturation case it was found on was not
-  realistic (one flat curve that also turned everything up 6 dB). It is
-  replaced by tape chains (`tools/v7_tape.py`): cassette I and II, a hot
-  cassette, reel-to-reel at 15 ips, and a hard digital clip. To be
-  rechecked on those.
-- Second pass: on the realistic tape cases (hot cassette, reel-to-reel) the header is never read as the wrong profile any more (item 31 removed the false headers). The hot cassette's pictures are still lost, but to picture damage, not to the profile: that is item 28.
-
-
-### 31. Things in the picture data were taken for headers
-- Status: solved (awaiting second pass)
-- What is wrong: on the test frame, the profile detector found "headers"
-  inside the picture data, read at about 3.5 times normal speed and as the
-  retired profile 2, on the left channel two packets in every eight. The
-  receiver then never agreed on the profile for those packets and dropped
-  them, although their pictures were perfect.
-- Where: `tools/v7_live.py`, `_ProfileStatusProbe.scan`.
-- How it was found: live run at 96 kHz, reel-to-reel, digital clip and
-  cassette II cases; the detector run offline on the same audio.
-- What "fixed" looks like: every test-frame packet shown on channels that do
-  not damage the picture.
-- Report: a header now counts only if its packet ends where the header's
-  own scale puts the end: its EOF mark there, or else a steady timing tone
-  through it. Live, 96 kHz, test frame, 69 packets sent: reel-to-reel 46 to
-  66 pictures, digital clip 44 to 66, cassette II 52 to 66, clean and worn
-  type I and II 66 as before. Face unchanged except the hot cassette (49 to
-  43).
-- Notes: probably also explains item 30, which was found on the old
-  soft-saturation case; recheck on the second pass.
-- Second pass: second pass: test frame on reel-to-reel and digital clip: 67 of 70 shown (the three missing are start-up). Gone: ready to delete.
-
-
 ### 32. Lossy codecs: packets found whole but not shown
 - Status: open
 - What is wrong: through lossy codecs most packets are found and ended
@@ -822,3 +426,54 @@ Copy this and fill it in. Leave out what is not known; do not guess lines.
 - How it was found: live run for item 10.
 - What "fixed" looks like: to be agreed. By the design goal, a packet whose
   picture is mostly there should be shown; where the bar sits is item 27.
+
+### 33. The first two packets of every run are not shown
+- Status: solved (awaiting second pass)
+- What is wrong: the receiver waits for three packets in a row to agree on
+  the profile before it shows anything, so the first two packets of every
+  start (about 160 ms) are never shown, even when the profile is the same as
+  last time.
+- Where: `tools/v7_live.py`, `_AdaptiveProfileDecoder._observe`
+  (`REQUIRED_STREAK`).
+- How it was found: second pass over this list; every run showed 68 of 70.
+- What "fixed" looks like: with the same sender and mode as last time, the
+  first packet is shown.
+- Report: the receiver keeps the last profile it confirmed (and the mono
+  video side) in `~/.config/modemTest/v7_receiver_profile.json`, one for the
+  receiver, and starts on it; its first packet is shown at once. Another
+  profile still needs three agreeing packets, and then replaces the saved
+  one. Live, 96 kHz, reference face: first run 68 of 70 (nothing saved yet);
+  second run 70 of 70 from the first packet; switching the sender to mono,
+  the next run confirmed mono after three packets as before and saved it;
+  the run after that showed every packet from the first.
+
+### 34. Header speed and header-to-EOF length disagree by up to 90 ppm
+- Status: open
+- What is wrong: on a clean line the speed read from a packet's header and
+  the length measured from header to EOF disagree: median 9-12 ppm, largest
+  about 90 ppm at 96 kHz (about 55 at 48 kHz). The receiver reports it as its
+  timing error. Left over from item 1.
+- Where: the header's scale fit (`animation_modem/transport3.py`,
+  `measure_pulses`) against the EOF end (`_measure_eof_marker`).
+- How it was found: item 1 and its second pass.
+- What "fixed" looks like: on a clean line every packet within about 10 ppm.
+
+## Deleted items
+
+Gone on the second pass and taken off the list. Each line says what fixed it
+and how it was checked.
+
+- **1. Live packet start is rounded to a whole sample** — gone (second pass, live, 96 kHz both ends): the fraction of the packet start is kept; clean timing error median 9-12 ppm. What remains (up to about 90 ppm at 96 kHz) is item 34.
+- **2. A finished packet is not decoded until the next header arrives** — gone (second pass, live, 96 kHz both ends): a packet is decoded when its own EOF is in; one decode per picture, the last packet of a run is shown.
+- **3. Each wake first tries a header that has no EOF yet** — gone (second pass, live, 96 kHz both ends): no wake on a packet that is not complete; decode calls equal pictures shown.
+- **4. The next header is used as a packet's end when the EOF is missing** — gone (second pass, live, 96 kHz both ends): a packet with no EOF ends by its own timing tone; every packet shown with every mark blanked. The time-stretcher look-ahead stays for item 27.
+- **5. Stock stereo shows no picture on one test chart** — gone (second pass, live, 96 kHz both ends): not reproduced at matched rates; the chart shows in all four modes.
+- **6. Command-line defaults do not match the GUI defaults** — gone (second pass, live, 96 kHz both ends): one set of sender defaults; a bare sender and an untouched GUI send sample-identical audio.
+- **7. Kernel strength depends on a profile's name** — gone (second pass, live, 96 kHz both ends; now merged): a kernel without settings for a mode is refused; stereo-nested's settings are written down; every mode sends exactly as before.
+- **9. The tail mode is set by hand at both ends** — gone (second pass, live, 96 kHz both ends; now merged): aspect-fold-500's tail is part of the profile; no tail setting anywhere; every picture decodes with nothing to match. The rotating tails left in the codec are item 19.
+- **10. The end marker is too short to survive lossy audio codecs** — gone (second pass, live, 96 kHz both ends): no change needed; through MP3 and AAC every packet's end is found by its mark. Codec losses are picture, not end: item 32.
+- **18. Code for a wire without an end marker is still there** — gone (second pass, live, 96 kHz both ends): the no-end-marker wire is removed; nothing left in the code.
+- **23. Something else is taken for the EOF mark when the real one is gone** — gone (second pass, live, 96 kHz both ends): the mark's thresholds follow the header's level; no false marks with every mark blanked.
+- **26. The command-line receiver does not draw the way the receiver GUI does** — gone (second pass, live, 96 kHz both ends): the command-line viewer draws as the receiver GUI does (0.37 apart on a 0-255 scale).
+- **30. Under soft saturation the left channel's header is read as the wrong profile** — gone (second pass, live, 96 kHz both ends): no wrong-profile reads on the realistic tape cases; the false headers were item 31.
+- **31. Things in the picture data were taken for headers** — gone (second pass, live, 96 kHz both ends): a header counts only if its packet ends where its scale says; no packets lost to false headers.

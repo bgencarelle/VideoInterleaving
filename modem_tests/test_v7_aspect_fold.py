@@ -334,6 +334,34 @@ class AspectWireTests(unittest.TestCase):
                     contextlib.redirect_stderr(io.StringIO()):
                 v7_live.parser().parse_args(mode+['--aspect-tail', 'luma'])
 
+    def test_the_receiver_starts_on_the_profile_it_confirmed_last(self):
+        # Fixes list item 33: the last confirmed profile is kept between runs.
+        import os
+        import tempfile
+        from unittest import mock
+        args = v7_live.parser().parse_args(['receive', '--device', '0'])
+        with tempfile.TemporaryDirectory() as tmp, \
+                mock.patch.dict(os.environ, {'XDG_CONFIG_HOME': tmp}):
+            first = v7_live._make_auto_profile_decoder(
+                args, v7_live._experimental_fold(500))
+            self.assertIsNone(v7_live._load_sticky_profile(first))
+            first.on_switch = v7_live._save_sticky_profile
+            for packet in range(first.REQUIRED_STREAK):
+                decision = first._observe(packet*3920.0, 1.0,
+                                          first.aspect_mode, None, packet)
+            self.assertTrue(decision['switched'])
+            second = v7_live._make_auto_profile_decoder(
+                args, v7_live._experimental_fold(500))
+            self.assertEqual(v7_live._load_sticky_profile(second),
+                             'aspect-fold-500')
+            # Its first packet is confirmed at once.
+            self.assertTrue(second._observe(0.0, 1.0, second.aspect_mode,
+                                            None, 0)['confirmed'])
+            # Another profile still needs the full streak.
+            other = second.aspect_mono_mode
+            self.assertFalse(second._observe(3920.0, 1.0, other, 1,
+                                             1)['confirmed'])
+
     def test_adaptive_receiver_dispatches_the_aspect_status(self):
         decoder = v7_live._make_auto_profile_decoder(
             v7_live.parser().parse_args(['receive', '--device', '0']),
