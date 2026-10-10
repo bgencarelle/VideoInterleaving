@@ -2890,6 +2890,7 @@ class _AdaptiveProfileDecoder:
         if result is not None:
             # A nested fold's account of its coefficients, for the display.
             result.diag['luma_room'] = getattr(wire, 'last_room', None)
+            result.diag['display_grids'] = getattr(wire, 'last_grids', P.V7_GRIDS)
         return values
 
     def values(self, model, result):
@@ -3347,6 +3348,7 @@ def _run_receive_session(args, fold, mono_wire=None, adaptive_profile=None,
     decode_cpu_times = deque(maxlen=512)  # (completion time, thread CPU seconds)
     shown_times = deque(maxlen=64)      # wall time of every published picture
     latest = None
+    latest_grids = None
     display_frames = FRAME_BUFFER
     previous_values = None
     temporal_fusion = None
@@ -3993,7 +3995,7 @@ def _run_receive_session(args, fold, mono_wire=None, adaptive_profile=None,
         return True
 
     def decode_available():
-        nonlocal latest, auto_gain, previous_values, direction_streak
+        nonlocal latest, latest_grids, auto_gain, previous_values, direction_streak
         nonlocal decoded_through, auto_mono_locked, profile_generation_seen
         if input_gap.is_set():
             # Never stitch samples across a callback drop.  Keep displaying
@@ -4344,41 +4346,43 @@ def _run_receive_session(args, fold, mono_wire=None, adaptive_profile=None,
                         models.get(result.diag.get('encoding_type'), model), result)
                 else:
                     values = P.values_from(model, result.coeffs)
-                result.diag.pop('temporal_fusion', None)
-                if 'fusion_gain' in result.diag:
-                    meter['fusion_gain'] = result.diag['fusion_gain']
-                if args.mono_compatible:
-                    noise = result.diag.get('noise') or [0.0]
-                    values = stabilize_chroma(
-                        values, previous_values, model.coder.grids,
-                        pilot_error=max(noise),
-                        coverage=result.diag.get('head_coverage'))
-                latest = values
-                if args.mono_compatible:
-                    previous_values = latest.copy()
-                display_frames.publish(
-                    latest, model.coder.grids, meter['aspect'],
-                    pixel_shapes=result.diag.get('pixel_shapes'),
-                    luma_room=result.diag.get('luma_room'))
-                shown_times.append(time.monotonic())
-                meter['shown_index'] = result.diag.get('source_index')
-                meter['shown_direction'] = result.diag.get('direction')
-                # Lag: where the live loop is now (this machine's clock and
-                # the received N, p) against the index just put on screen.
-                if (loop is not None and loop.clocked and
-                        result.diag.get('source_index') is not None):
-                    # The recent median resolves ping-pong turns (see
-                    # loop_lag_ticks); the mean of recent readings gives
-                    # sub-tick resolution, since pictures fall at varying
-                    # points within a 33 ms tick.
-                    lag_ticks.append(P.loop_lag_ticks(
-                        result.diag['source_index'],
-                        P.loop_ticks(time.time_ns()), loop,
-                        expected=round(float(np.median(lag_ticks)))
-                        if lag_ticks else 0,
-                        direction=result.diag.get('direction')))
-                    meter['lag_ms'] = (float(np.mean(lag_ticks)) *
-                                       1000/P.LOOP_IPS)
+                if values is not None:
+                    result.diag.pop('temporal_fusion', None)
+                    if 'fusion_gain' in result.diag:
+                        meter['fusion_gain'] = result.diag['fusion_gain']
+                    if args.mono_compatible:
+                        noise = result.diag.get('noise') or [0.0]
+                        values = stabilize_chroma(
+                            values, previous_values, model.coder.grids,
+                            pilot_error=max(noise),
+                            coverage=result.diag.get('head_coverage'))
+                    latest = values
+                    latest_grids = result.diag.get('display_grids', model.coder.grids)
+                    if args.mono_compatible:
+                        previous_values = latest.copy()
+                    display_frames.publish(
+                        latest, latest_grids, meter['aspect'],
+                        pixel_shapes=result.diag.get('pixel_shapes'),
+                        luma_room=result.diag.get('luma_room'))
+                    shown_times.append(time.monotonic())
+                    meter['shown_index'] = result.diag.get('source_index')
+                    meter['shown_direction'] = result.diag.get('direction')
+                    # Lag: where the live loop is now (this machine's clock and
+                    # the received N, p) against the index just put on screen.
+                    if (loop is not None and loop.clocked and
+                            result.diag.get('source_index') is not None):
+                        # The recent median resolves ping-pong turns (see
+                        # loop_lag_ticks); the mean of recent readings gives
+                        # sub-tick resolution, since pictures fall at varying
+                        # points within a 33 ms tick.
+                        lag_ticks.append(P.loop_lag_ticks(
+                            result.diag['source_index'],
+                            P.loop_ticks(time.time_ns()), loop,
+                            expected=round(float(np.median(lag_ticks)))
+                            if lag_ticks else 0,
+                            direction=result.diag.get('direction')))
+                        meter['lag_ms'] = (float(np.mean(lag_ticks)) *
+                                           1000/P.LOOP_IPS)
             if result.status in ('received', 'verified'):
                 meter['verified'] += 1
                 update_channel_hint()
@@ -4418,9 +4422,9 @@ def _run_receive_session(args, fold, mono_wire=None, adaptive_profile=None,
                                        decode_info=info)
             if (args.log or args.diagnostics) and not args.no_log:
                 print(report, flush=True)
-            if args.save_dir:
+            if args.save_dir and latest is not None:
                 args.save_dir.mkdir(parents=True, exist_ok=True)
-                values_image(latest, model.coder.grids).save(
+                values_image(latest, latest_grids).save(
                     args.save_dir/f'v7_{meter["decoded"]:08d}.png')
         else:
             confirmed_direction, _ = direction_streak.observe(

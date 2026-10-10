@@ -53,6 +53,205 @@ def luma_error(values, sent):
 
 
 class TableTests(unittest.TestCase):
+    def test_default_stereo_chroma_reconstruction_stays_base_only(self):
+        import os
+        import slice_wire
+
+        old_detail, old_plane_detail = (slice_wire.CHROMA_DETAIL,
+                                        slice_wire.PLANE_DETAIL)
+        slice_wire.layout_tables.cache_clear()
+        was_set = 'SLICE_CHROMA_DETAIL' in os.environ
+        old_environment = os.environ.pop('SLICE_CHROMA_DETAIL', None)
+        try:
+            slice_wire.CHROMA_DETAIL = False
+            slice_wire.PLANE_DETAIL = (slice_wire.DETAIL, 0.0, 0.0)
+            base_model = v7.load_model(.1521/np.sqrt(
+                1+10**(v7.CLOCK_REL_DB/10)), 'box')
+            wire = nested_fold.slice_wire('3:4', send=True)
+            model = wire.model_for(base_model, '3:4')
+            wire._packet_layout, wire._counter = '3:4', 30
+            ready = wire.prepared('3:4')
+            rng = np.random.default_rng(7902)
+            source_values = rng.normal(0.0, 0.12, ready.pixels)
+            spectra = wire.spectra(source_values)
+            halves = []
+            for channel, side in enumerate(slice_wire.SIDES):
+                coefficients = wire.channel_coefficients(model, spectra, side)
+                result = types.SimpleNamespace(
+                    coeffs=coefficients, status='received',
+                    diag={'head_confidence': 1.0, 'noise': [0.0],
+                          'mono_fold_eq': (coefficients-model.mu,
+                                           np.ones(len(coefficients)))})
+                halves.append(wire.half(model, result, channel=channel))
+            with mock.patch.object(nested_fold.sk, 'scatter_pair',
+                                   side_effect=AssertionError('default used detail scatter')):
+                shown = wire.values(halves)
+            estimates = wire.estimate(wire.choose(halves))
+            start = ready.grids[0][0]*ready.grids[0][1]
+            for plane in (1, 2):
+                base, detail = estimates[plane]
+                self.assertIsNone(detail)
+                rows, cols = ready.grids[plane]
+                spectrum = nested_fold.sk.scatter(
+                    rows*cols, ready.base[plane], nested_fold._f8(base))
+                expected = np.empty(rows*cols)
+                nested_fold.sk.inverse_plane(
+                    spectrum, expected, 0, *ready.transforms[plane])
+                np.testing.assert_array_equal(
+                    shown[start:start+rows*cols], expected)
+                start += rows*cols
+        finally:
+            if was_set:
+                os.environ['SLICE_CHROMA_DETAIL'] = old_environment
+            slice_wire.CHROMA_DETAIL = old_detail
+            slice_wire.PLANE_DETAIL = old_plane_detail
+            slice_wire.layout_tables.cache_clear()
+
+    def test_nested_stereo_chroma_detail_reaches_enlarged_receiver_grid(self):
+        import os
+        import slice_wire
+
+        old_detail = slice_wire.CHROMA_DETAIL
+        old_plane_detail = slice_wire.PLANE_DETAIL
+        old_table = nested_fold.table
+        was_set = 'SLICE_CHROMA_DETAIL' in os.environ
+        old_environment = os.environ.get('SLICE_CHROMA_DETAIL')
+        slice_wire.layout_tables.cache_clear()
+        try:
+            os.environ['SLICE_CHROMA_DETAIL'] = '1'
+            slice_wire.CHROMA_DETAIL = True
+            slice_wire.PLANE_DETAIL = (slice_wire.DETAIL,
+                                       slice_wire.DETAIL, slice_wire.DETAIL)
+            source_table = old_table('slices', '3:4')
+            arrays = {name: np.asarray(getattr(source_table, name)).copy()
+                      for name in source_table.FIELDS+source_table.PAIRED}
+            luma_position = lambda positions: (
+                positions//80*100+positions % 80).astype(np.int64)
+            arrays['host_position'] = luma_position(arrays['host_position'])
+            arrays['guest_position'] = luma_position(arrays['guest_position'])
+            arrays['detail_position'] = luma_position(arrays['detail_position'])
+            arrays['luma_grid'] = np.asarray((120, 100), np.int64)
+            arrays['chroma_grid'] = np.asarray((60, 50), np.int64)
+            experimental = nested_fold.FrozenFold(arrays)
+            self.assertEqual(experimental.grids,
+                             ((120, 100), (60, 50), (60, 50)))
+            nested_fold.table = lambda family, layout, path=None: (
+                experimental if family == 'slices' else old_table(family, layout, path))
+
+            base_model = v7.load_model(.1521/np.sqrt(
+                1+10**(v7.CLOCK_REL_DB/10)), 'box')
+            wire = nested_fold.slice_wire('3:4', send=True)
+            model = wire.model_for(base_model, '3:4')
+            wire._packet_layout, wire._counter = '3:4', 30
+            ready = wire.prepared('3:4')
+            rng = np.random.default_rng(7901)
+            source_values = rng.normal(0.0, 0.12, ready.pixels)
+            spectra = wire.spectra(source_values)
+            halves = []
+            for channel, side in enumerate(slice_wire.SIDES):
+                coefficients = wire.channel_coefficients(model, spectra, side)
+                result = types.SimpleNamespace(
+                    coeffs=coefficients, status='received',
+                    diag={'head_confidence': 1.0, 'noise': [0.0],
+                          'mono_fold_eq': (coefficients-model.mu,
+                                           np.ones(len(coefficients)))})
+                halves.append(wire.half(model, result, channel=channel))
+            shown = wire.values(halves)
+            self.assertTrue(wire.last_nested)
+            self.assertEqual(wire.last_grids, ((120, 100), (60, 50), (60, 50)))
+            detail_luma = shown[:12000].copy()
+            for plane, (rows, cols) in ((1, (60, 50)), (2, (60, 50))):
+                start = ready.grids[0][0]*ready.grids[0][1]
+                if plane == 2:
+                    start += rows*cols
+                recovered = slice_wire._dct_matrix(rows) @ \
+                    shown[start:start+rows*cols].reshape(rows, cols) @ \
+                    slice_wire._dct_matrix(cols).T
+                detail = ready.detail[plane]
+                scale = experimental.grid.scales[plane]
+                # Slot tables retain their legacy coefficient units; the
+                # receiver's established inverse-grid scaling is applied after
+                # restoring both transmitted legs.
+                expected = spectra[plane][detail]/(scale*scale)
+                np.testing.assert_allclose(recovered.ravel()[detail], expected,
+                                           rtol=2e-5, atol=2e-7)
+                self.assertGreater(float(np.linalg.norm(recovered.ravel()[detail])),
+                                   0.0)
+
+            # One channel remains a signed M/S leg; it retains some of its
+            # colour detail instead of being decoded as a mono sum.
+            wire.reset()
+            one_leg = wire.values([halves[0]])
+            self.assertTrue(wire.last_nested)
+            chroma_start = 12000
+            for plane in (1, 2):
+                recovered = slice_wire._dct_matrix(60) @ \
+                    one_leg[chroma_start:chroma_start+3000].reshape(60, 50) @ \
+                    slice_wire._dct_matrix(50).T
+                self.assertGreater(float(np.linalg.norm(
+                    recovered.ravel()[ready.detail[plane]])), 0.0)
+                chroma_start += 3000
+
+            os.environ.pop('SLICE_CHROMA_DETAIL', None)
+            slice_wire.CHROMA_DETAIL = False
+            slice_wire.PLANE_DETAIL = (slice_wire.DETAIL, 0.0, 0.0)
+            slice_wire.layout_tables.cache_clear()
+            base_wire = nested_fold.slice_wire('3:4', send=True)
+            base_model = base_wire.model_for(base_model, '3:4')
+            base_wire._packet_layout, base_wire._counter = '3:4', 30
+            base_spectra = base_wire.spectra(source_values)
+            base_halves = []
+            for channel, side in enumerate(slice_wire.SIDES):
+                coefficients = base_wire.channel_coefficients(
+                    base_model, base_spectra, side)
+                result = types.SimpleNamespace(
+                    coeffs=coefficients, status='received',
+                    diag={'head_confidence': 1.0, 'noise': [0.0],
+                          'mono_fold_eq': (coefficients-base_model.mu,
+                                           np.ones(len(coefficients)))})
+                base_halves.append(base_wire.half(
+                    base_model, result, channel=channel))
+            base_shown = base_wire.values(base_halves)
+            np.testing.assert_allclose(detail_luma, base_shown[:12000],
+                                       rtol=0.0, atol=1e-15)
+        finally:
+            nested_fold.table = old_table
+            slice_wire.CHROMA_DETAIL = old_detail
+            slice_wire.PLANE_DETAIL = old_plane_detail
+            slice_wire.layout_tables.cache_clear()
+            if was_set:
+                os.environ['SLICE_CHROMA_DETAIL'] = old_environment
+            else:
+                os.environ.pop('SLICE_CHROMA_DETAIL', None)
+
+    def test_stereo_level_cache_tracks_values_even_when_arrays_are_reused(self):
+        base = v7.load_model(.1521/np.sqrt(1+10**(v7.CLOCK_REL_DB/10)), 'box')
+        wire = nested_fold.slice_wire('auto', send=True)
+        model = wire.model_for(base, '16:9')
+        fold = wire.fold('16:9')
+        spectra = [np.zeros(rows*cols) for rows, cols in v7.V7_GRIDS]
+        with mock.patch.object(fold, 'choose_level', wraps=fold.choose_level) as choose:
+            wire.channel_coefficients(model, spectra, 'left')
+            wire.channel_coefficients(model, [p.copy() for p in spectra], 'right')
+            self.assertEqual(choose.call_count, 1)
+            spectra[0][0] = 1.0
+            wire.channel_coefficients(model, spectra, 'left')
+            self.assertEqual(choose.call_count, 2)
+
+    def test_stereo_level_choice_protects_right_guests_and_is_leg_symmetric(self):
+        fold = nested_fold.table('slices', '16:9')
+        plane = np.zeros(fold.luma)
+        plane[fold.host_position] = fold.host_mean
+        plane[fold.guest_position[1, 0]] = 20*fold.guest_sd[1, 0]
+        chosen = fold.choose_level(plane)
+        arrays = {name: getattr(fold, name).copy()
+                  for name in fold.FIELDS+fold.PAIRED}
+        for name in ('guest_position', 'guest_sd', 'guest_sector'):
+            arrays[name] = np.ascontiguousarray(arrays[name][::-1])
+        mirrored = nested_fold.FrozenFold(arrays)
+        self.assertEqual(chosen, mirrored.choose_level(plane))
+        self.assertGreater(chosen, nested_fold.LOWEST)
+
     def test_every_layout_has_both_tables_and_they_match_the_record(self):
         record = json.loads(nested_fold.TABLES.with_suffix('.json').read_text())
         with np.load(nested_fold.TABLES) as data:

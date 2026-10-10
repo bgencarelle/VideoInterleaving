@@ -48,6 +48,7 @@ from tools.v7_gl_viewer import (CHROMA_LABELS, CHROMA_MODES,
                                 fit_viewport, flat_area_mask, float_planes,
                                 grain_detail_mask,
                                 resample_filter_planes)
+from tools.v7_nested_gui_patch import DEFAULT_TABLE_PATH, resolve_table_path
 
 
 ROW_HEIGHT = 34
@@ -566,6 +567,14 @@ def _make_fields(receive_parser, device_choices, audio_output_choices=()):
     fields.append(OptionField(
         None, RECOMMENDED_CHROMA_MODE, 'Colour detail', 'choice',
         tuple((CHROMA_LABELS[name], name) for name in CHROMA_MODES)))
+    fields.append(OptionField(None, False, 'Matched nested test patch · opt-in',
+                              'bool'))
+    fields.append(OptionField(
+        None, 'stereo-nested', 'Matched nested profile', 'choice',
+        (('Stereo nested · chroma detail enabled', 'stereo-nested'),
+         ('Aspect mono nested · chroma detail omitted', 'aspect-mono-nested'))))
+    fields.append(OptionField(None, str(DEFAULT_TABLE_PATH),
+                              'Matched nested tables (.npz)', 'text'))
     return fields
 
 
@@ -1227,6 +1236,14 @@ class ReceiverGui:
         parsed = self.root_parser.parse_args(words)
         parsed.headless = True
         parsed.fullscreen = False
+        parsed.matched_nested_test = bool(self._field(
+            'Matched nested test patch · opt-in').value)
+        parsed.nested_test_tables = str(self._field(
+            'Matched nested tables (.npz)').value or '').strip()
+        parsed.nested_test_profile = self._field('Matched nested profile').value
+        if parsed.matched_nested_test:
+            parsed.nested_test_tables = str(
+                resolve_table_path(parsed.nested_test_tables))
         return parsed
 
     def _notify_ui(self):
@@ -1301,6 +1318,15 @@ class ReceiverGui:
         def receive():
             writer = QueueWriter(self.output, self._notify_ui)
             try:
+                if args.matched_nested_test:
+                    from tools.v7_nested_gui_patch import install_receiver
+                    _table, detail = install_receiver(
+                        self.v7_live, args.nested_test_tables,
+                        args.nested_test_profile)
+                    print('V7 nested mapping=serpentine adaptive_guest_range=factors[1,2,4,8,16] '
+                          'host_level=-1 step_factor=0.25 exact_inverse '
+                          f'chroma_detail={"on" if detail else "off"} '
+                          f'profile={args.nested_test_profile} matched-test-only', flush=True)
                 with contextlib.redirect_stdout(writer), \
                         contextlib.redirect_stderr(writer):
                     self.v7_live.run_receive(args)

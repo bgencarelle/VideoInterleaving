@@ -161,6 +161,33 @@ class SliceWireTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.wire.channel_coefficients(self.model, self.spectra, 'sum')
 
+    def test_chroma_detail_arm_doubles_unique_colour_coefficients_at_fixed_budget(self):
+        old_detail, old_plane_detail = (slice_wire.CHROMA_DETAIL,
+                                        slice_wire.PLANE_DETAIL)
+        try:
+            slice_wire.CHROMA_DETAIL = True
+            slice_wire.PLANE_DETAIL = (DETAIL, DETAIL, DETAIL)
+            tables = slice_wire._layout_tables(
+                self.layout, slice_wire._canonical_curves(),
+                v7._frozen_tables()['phase'])
+            slots = slice_wire._Slots(self.layout, tables)
+            self.assertEqual(LUMA_BASE+2*CHROMA_BASE+
+                             MARKER_SLOTS+SIGNATURE_SLOTS, FRESH_SLOTS)
+            self.assertEqual(slots.length, FRESH_SLOTS)
+            for plane in (1, 2):
+                self.assertEqual(len(np.unique(np.r_[slots.base[plane],
+                                                     slots.detail[plane]])),
+                                 2*CHROMA_BASE)
+                self.assertTrue(np.all(slots.ride[plane] == DETAIL))
+            self.assertEqual(slots.parts[0].stop-slots.parts[0].start,
+                             LUMA_BASE)
+            self.assertTrue(np.all(slots.ride[0] == DETAIL))
+            self.assertEqual(len(slots.sent[1]), 2*CHROMA_BASE)
+            self.assertEqual(len(slots.sent[2]), 2*CHROMA_BASE)
+        finally:
+            slice_wire.CHROMA_DETAIL = old_detail
+            slice_wire.PLANE_DETAIL = old_plane_detail
+
     def test_a_perfect_channel_gives_whole_base_and_sum_pictures(self):
         left = self.wire.channel_coefficients(self.model, self.spectra, 'left')
         right = self.wire.channel_coefficients(self.model, self.spectra, 'right')

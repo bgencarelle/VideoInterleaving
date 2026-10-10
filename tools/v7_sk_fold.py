@@ -41,6 +41,19 @@ B_LIMIT = 16.0                 # compander domain, guest standard deviations
 
 
 @njit(cache=True)
+def contract_grid_planes(plane0, plane1, plane2, positions, old_off, new_off, old_size):
+    """Contract three transformed planes into legacy coefficient positions."""
+    out = np.zeros(old_size, np.float64)
+    planes = (plane0, plane1, plane2)
+    for plane in range(3):
+        for i in range(old_off[plane+1]-old_off[plane]):
+            position = positions[old_off[plane]+i]
+            if position >= 0:
+                out[old_off[plane]+i] = planes[plane][position-new_off[plane]]
+    return out
+
+
+@njit(cache=True)
 def dct_matrix(n):
     """Orthonormal DCT-II analysis matrix (rows are basis functions)."""
     out = np.empty((n, n))
@@ -1090,6 +1103,55 @@ def choose_level(flat, lowest, highest, ratio, host_position, host_mean, host_sd
 
 
 @njit(cache=True)
+def choose_paired_level(flat, lowest, highest, ratio, host_position, host_mean, host_sd,
+                        level, step, scale, alpha, compander, inverse, member, host_sector,
+                        sectors, law, guest_sector, guest_band, limit_low, limit_high,
+                        guest_position, guest_sd, guest_slot, noise, draw, ride,
+                        detail_position):
+    """One stereo ladder level, scored against both channels' actual guests.
+
+    The channels share the level, not their guest coefficients. Looking only
+    at the left guests can pick the quietest level while right-only detail
+    saturates. Keep the single-channel trial's arithmetic and score both legs.
+    """
+    slots = len(host_position)
+    nothing = np.zeros(slots)
+    best, chosen = np.inf, 0
+    for index in range(lowest, highest+1):
+        factor = ratio**index
+        error = 0.0
+        for leg in range(2):
+            sign = 1.0 if leg == 0 else -1.0
+            hosts = normalised_hosts(flat, host_position, host_mean, host_sd, factor,
+                                     ride, detail_position, sign)
+            sent_scale = guest_scales(
+                sector_activity(stair_values(hosts, level, step), member, host_sector, sectors),
+                law, guest_sector[leg], guest_band, limit_low, limit_high)
+            guests = normalised_guests(flat, guest_position[leg], guest_sd[leg], guest_slot,
+                                       sent_scale, factor, slots)
+            symbols = encode_frame(hosts, guests, nothing, level, step, scale, alpha, 3, .25,
+                                   compander, 1.0)
+            loud = loudness(symbols)
+            received = np.empty(slots)
+            for i in range(slots):
+                received[i] = symbols[i]+loud*noise[i]*draw[i]
+            got_hosts, got = hard_decode_frame(received, level, step, scale, alpha, inverse)
+            got_scale = guest_scales(
+                sector_activity(got_hosts, member, host_sector, sectors),
+                law, guest_sector[leg], guest_band, limit_low, limit_high)
+            for i in range(slots):
+                error += (host_sd[i]*(got_hosts[i]-hosts[i]))**2
+            for i in range(len(guest_position[leg])):
+                slot = guest_slot[i]
+                error += (guest_sd[leg,i]*(got[slot]*got_scale[i]-
+                                         guests[slot]*sent_scale[i]))**2
+        error *= factor*factor
+        if error < best:
+            best, chosen = error, index
+    return chosen
+
+
+@njit(cache=True)
 def dither_offsets(table, sign):
     out = np.empty(len(table))
     for i in range(len(table)):
@@ -1241,6 +1303,33 @@ def scatter(size, index, values):
 
 
 @njit(cache=True)
+def scatter_pair(size, base_index, base_values, detail_index, detail_values):
+    """Scatter two disjoint transmitted coefficient legs into one spectrum.
+
+    A -1 address means that a frozen legacy position is outside an experimental
+    grid. Input arrays and index maps are prepared once by the wire setup.
+    """
+    if len(base_index) != len(base_values) or len(detail_index) != len(detail_values):
+        raise ValueError('paired scatter indices and values differ in length')
+    out = np.zeros(size)
+    for i in range(len(base_index)):
+        index = base_index[i]
+        if index == -1:
+            continue
+        if index < 0 or index >= size:
+            raise ValueError('base scatter index is outside the spectrum')
+        out[index] = base_values[i]
+    for i in range(len(detail_index)):
+        index = detail_index[i]
+        if index == -1:
+            continue
+        if index < 0 or index >= size:
+            raise ValueError('detail scatter index is outside the spectrum')
+        out[index] = detail_values[i]
+    return out
+
+
+@njit(cache=True)
 def inverse_plane(spectrum, out, start, rows_transposed, cols_matrix):
     """Pixels of a flat coefficient plane, written into ``out`` from
     ``start``; returns the position after them."""
@@ -1251,6 +1340,175 @@ def inverse_plane(spectrum, out, start, rows_transposed, cols_matrix):
         for c in range(cols):
             out[start+r*cols+c] = plane[r, c]
     return start+rows*cols
+
+
+@njit(cache=True)
+def grid_plane(values, out, start, rows_matrix, cols_matrix, scale):
+    """A grid transform in canonical coefficient units, written into out."""
+    rows, cols = rows_matrix.shape[1], cols_matrix.shape[0]
+    plane = np.dot(np.dot(rows_matrix, np.ascontiguousarray(
+        values[start:start+rows*cols]).reshape(rows, cols)), cols_matrix)
+    for y in range(rows):
+        for x in range(cols):
+            out[start+y*cols+x] = plane[y, x]*scale
+    return start+rows*cols
+
+
+@njit(cache=True)
+def inverse_plane_scaled(spectrum, out, start, rows_transposed, cols_matrix, scale):
+    rows, cols = rows_transposed.shape[0], cols_matrix.shape[1]
+    plane = np.dot(np.dot(rows_transposed, np.ascontiguousarray(spectrum).reshape(rows, cols)),
+                   cols_matrix)
+    for y in range(rows):
+        for x in range(cols):
+            out[start+y*cols+x] = plane[y, x]*scale
+    return start+rows*cols
+
+
+@njit(cache=True)
+def remap_grid(values, positions, size, expand):
+    """Copy between legacy and experimental grids; -1 means outside the grid."""
+    out = np.zeros(size)
+    for i in range(len(positions)):
+        if positions[i] < 0:
+            continue
+        if expand:
+            out[positions[i]] = values[i]
+        else:
+            out[i] = values[positions[i]]
+    return out
+
+
+@njit(cache=True)
+def scaled_copy(values, factor):
+    out = np.empty(len(values))
+    for i in range(len(values)):
+        out[i] = values[i]*factor
+    return out
+
+
+@njit(cache=True)
+def range_host_rooms(size, host_position, level, step, host_sd, factor):
+    """Half-cell coefficient allowance for quantized base-host positions."""
+    if (size < 0 or len(host_position) != len(level) or len(level) != len(step) or
+            len(step) != len(host_sd)):
+        raise ValueError('host room inputs have inconsistent dimensions')
+    out = np.zeros(size)
+    for i in range(len(host_position)):
+        if level[i] == 1:
+            if host_position[i] < 0 or host_position[i] >= size:
+                raise ValueError('host position outside coefficient plane')
+            out[host_position[i]] = .5*step[i]*host_sd[i]*factor
+    return out
+
+
+@njit(cache=True)
+def range_consistent_luma(luma, sent_mask, rows_matrix, rows_transposed,
+                          cols_matrix, cols_transposed, bound, passes,
+                          host_room=None):
+    """Adjust omitted DCT coefficients to reduce pixel-bound violations.
+
+    The transforms are orthonormal DCT-II analysis/synthesis matrices. Sent
+    coefficients are held exactly; only omitted coefficients are optimized.
+    """
+    rows, cols = rows_matrix.shape[0], cols_matrix.shape[0]
+    if (rows <= 0 or cols <= 0 or bound <= 0.0 or not np.isfinite(bound) or passes < 0 or
+            len(luma) != rows*cols or len(sent_mask) != rows*cols or
+            rows_matrix.shape[1] != rows or rows_transposed.shape != (rows, rows) or
+            cols_matrix.shape[1] != cols or cols_transposed.shape != (cols, cols)):
+        raise ValueError('invalid range reconstruction dimensions or parameters')
+    for value in luma:
+        if not np.isfinite(value):
+            raise ValueError('luma must be finite')
+    if host_room is not None:
+        if host_room.ndim != 1 or len(host_room) != len(luma):
+            raise ValueError('host room length must match coefficients')
+        for value in host_room:
+            if not np.isfinite(value) or value < 0.0:
+                raise ValueError('host rooms must be finite and nonnegative')
+    original = np.ascontiguousarray(luma).reshape(rows, cols).copy()
+    initial_image = np.dot(np.dot(rows_transposed, original), cols_matrix)
+    in_range = True
+    for value in initial_image.ravel():
+        if value < -bound or value > bound:
+            in_range = False
+            break
+    if in_range or passes == 0:
+        return original.ravel()
+
+    carried = original.copy()
+    current = original.copy()
+    ahead = original.copy()
+    best = original.copy()
+    gradient = np.empty((rows, cols))
+    best_objective = 0.0
+    for r in range(rows):
+        for c in range(cols):
+            miss = initial_image[r, c]-min(max(initial_image[r, c], -bound), bound)
+            best_objective += miss*miss
+    weight = 1.0
+    for iteration in range(passes+1):
+        image = np.dot(np.dot(rows_transposed, ahead), cols_matrix)
+        objective = 0.0
+        for r in range(rows):
+            for c in range(cols):
+                value = image[r, c]
+                clipped = min(max(value, -bound), bound)
+                miss = value-clipped
+                objective += miss*miss
+                gradient[r, c] = miss
+        if objective < best_objective:
+            best_objective = objective
+            best = ahead.copy()
+        if iteration == passes:
+            break
+        spectrum = np.dot(np.dot(rows_matrix, gradient), cols_transposed)
+        candidate = ahead.copy()
+        for r in range(rows):
+            for c in range(cols):
+                if not sent_mask[r*cols+c]:
+                    candidate[r, c] = ahead[r, c]-spectrum[r, c]
+                else:
+                    if host_room is not None:
+                        room = host_room[r*cols+c]
+                        candidate[r, c] = ahead[r, c]-spectrum[r, c]
+                        candidate[r, c] = min(max(candidate[r, c], carried[r, c]-room),
+                                              carried[r, c]+room)
+                    else:
+                        candidate[r, c] = carried[r, c]
+        # Monotone restart keeps the returned violation no worse than the
+        # initial reconstruction, even when acceleration overshoots.
+        candidate_image = np.dot(np.dot(rows_transposed, candidate), cols_matrix)
+        candidate_objective = 0.0
+        for r in range(rows):
+            for c in range(cols):
+                value = candidate_image[r, c]
+                miss = value-min(max(value, -bound), bound)
+                candidate_objective += miss*miss
+        if candidate_objective < best_objective:
+            best_objective = candidate_objective
+            best = candidate.copy()
+        if candidate_objective > objective:
+            ahead = current.copy()
+            weight = 1.0
+            continue
+        following = .5*(1.0+math.sqrt(1.0+4.0*weight*weight))
+        push = (weight-1.0)/following
+        previous = current
+        current = candidate
+        ahead = candidate.copy()
+        for r in range(rows):
+            for c in range(cols):
+                if not sent_mask[r*cols+c]:
+                    ahead[r, c] += push*(candidate[r, c]-previous[r, c])
+                else:
+                    ahead[r, c] = carried[r, c]
+                    if host_room is not None:
+                        room = host_room[r*cols+c]
+                        ahead[r, c] = min(max(ahead[r, c], carried[r, c]-room),
+                                          carried[r, c]+room)
+        weight = following
+    return best.ravel()
 
 
 @njit(cache=True)
@@ -1295,3 +1553,247 @@ def same_values(a, b):
         if a[i] != b[i]:
             return False
     return True
+
+
+@njit(cache=True)
+def curvature_gradient(image, edge, out):
+    """Gradient of smoothed Hessian variation, with forward differences.
+
+    Unlike first-order variation this favours affine gradients as well as
+    constant areas. Missing boundary derivatives contribute zero.
+    """
+    rows, cols = image.shape
+    for r in range(rows):
+        for c in range(cols):
+            out[r, c] = 0.0
+    for r in range(rows):
+        for c in range(cols):
+            xx = yy = xy = 0.0
+            if c+2 < cols:
+                xx = image[r, c+2]-2.0*image[r, c+1]+image[r, c]
+            if r+2 < rows:
+                yy = image[r+2, c]-2.0*image[r+1, c]+image[r, c]
+            if r+1 < rows and c+1 < cols:
+                xy = image[r+1, c+1]-image[r+1, c]-image[r, c+1]+image[r, c]
+            size = math.sqrt(xx*xx+yy*yy+2.0*xy*xy+edge*edge)
+            if c+2 < cols:
+                p = xx/size
+                out[r, c] += p
+                out[r, c+1] -= 2.0*p
+                out[r, c+2] += p
+            if r+2 < rows:
+                p = yy/size
+                out[r, c] += p
+                out[r+1, c] -= 2.0*p
+                out[r+2, c] += p
+            if r+1 < rows and c+1 < cols:
+                p = 2.0*xy/size
+                out[r, c] += p
+                out[r+1, c] -= p
+                out[r, c+1] -= p
+                out[r+1, c+1] += p
+
+
+@njit(cache=True)
+def curvature_within_room(luma, room, rows, rows_matrix, rows_transposed,
+                          cols_matrix, cols_transposed, passes, edge):
+    """Experimental accelerated Hessian-variation solve within decoded bounds.
+
+    The Hessian difference operator has squared norm at most 64; edge/64
+    is a conservative smooth-gradient step. Arithmetic stays compiled.
+    """
+    cols = len(luma)//rows
+    start = np.ascontiguousarray(luma).reshape(rows, cols)
+    reach = np.ascontiguousarray(room).reshape(rows, cols)
+    current = start.copy()
+    ahead = start.copy()
+    gradient = np.empty((rows, cols))
+    weight = 1.0
+    for _ in range(passes):
+        image = np.dot(np.dot(rows_transposed, ahead), cols_matrix)
+        curvature_gradient(image, edge, gradient)
+        spectrum = np.dot(np.dot(rows_matrix, gradient), cols_transposed)
+        following = .5*(1.0+math.sqrt(1.0+4.0*weight*weight))
+        push = (weight-1.0)/following
+        weight = following
+        for r in range(rows):
+            for c in range(cols):
+                value = ahead[r, c]-edge/64.0*spectrum[r, c]
+                low, high = start[r, c]-reach[r, c], start[r, c]+reach[r, c]
+                if value < low:
+                    value = low
+                elif value > high:
+                    value = high
+                ahead[r, c] = value+push*(value-current[r, c])
+                current[r, c] = value
+    return current.ravel()
+
+@njit(cache=True)
+def serpentine_encode_frame(hosts, guests, level, step, scale, compander, offset):
+    """Encode plain or rectangular-snake host/guest slots."""
+    n = len(hosts)
+    out = np.empty(n)
+    for i in range(n):
+        if level[i] != 0 and level[i] != 1:
+            raise ValueError('serpentine level must be 0 or 1')
+        if not math.isfinite(step[i]) or step[i] <= 0 or not math.isfinite(scale[i]) or scale[i] <= 0:
+            raise ValueError('step and scale must be finite and positive')
+        if not math.isfinite(offset[i]):
+            raise ValueError('offset must be finite')
+        if level[i] == 0:
+            out[i] = scale[i]*hosts[i]
+        else:
+            q = np.round((hosts[i]-offset[i])/step[i])
+            parity = 1.0 if q % 2.0 == 0.0 else -1.0
+            c = min(max(compress(compander, guests[i]), -1.0+1e-12), 1.0-1e-12)
+            out[i] = scale[i]*(offset[i]+step[i]*(q+0.5*parity*c))
+    return out
+
+
+@njit(cache=True)
+def serpentine_decode_frame(received, level, step, scale, inverse, offset):
+    """Deterministic geometric decode of rectangular-snake symbols."""
+    n = len(received)
+    hosts, guests = np.empty(n), np.zeros(n)
+    for i in range(n):
+        if level[i] != 0 and level[i] != 1:
+            raise ValueError('serpentine level must be 0 or 1')
+        if not math.isfinite(step[i]) or step[i] <= 0 or not math.isfinite(scale[i]) or scale[i] <= 0:
+            raise ValueError('step and scale must be finite and positive')
+        if not math.isfinite(offset[i]):
+            raise ValueError('offset must be finite')
+        value = received[i]/scale[i]
+        if level[i] == 0:
+            hosts[i] = value
+        else:
+            q = np.round((value-offset[i])/step[i])
+            parity = 1.0 if q % 2.0 == 0.0 else -1.0
+            residual = min(max(2.0*(value-offset[i]-q*step[i])/step[i], -1.0), 1.0)
+            hosts[i] = offset[i]+q*step[i]
+            guests[i] = expand(inverse, parity*residual)
+    return hosts, guests
+
+
+@njit(cache=True)
+def serpentine_stair_values(hosts, level, step, offset):
+    """Midpoint host stairs used consistently for activity normalization."""
+    out = hosts.copy()
+    for i in range(len(hosts)):
+        if level[i] != 0 and level[i] != 1:
+            raise ValueError('serpentine level must be 0 or 1')
+        if level[i] == 1:
+            out[i] = offset[i]+np.round((hosts[i]-offset[i])/step[i])*step[i]
+    return out
+
+
+@njit(cache=True)
+def serpentine_place_pair(out, left, right, host_position, host_mean, host_sd,
+                          ride, detail_position, factor):
+    """Place decoded normalized hosts as algebraic base/detail coefficients."""
+    for i in range(len(left)):
+        out[host_position[i]] = host_mean[i]+factor*host_sd[i]*0.5*(left[i]+right[i])
+        if ride[i] > 0:
+            out[detail_position[i]] = factor*host_sd[i]*(left[i]-right[i])/(2.0*ride[i])
+
+
+@njit(cache=True)
+def expand_exact(table, c):
+    """Invert ``compress``'s piecewise-linear map on the positive domain."""
+    n = len(table)
+    if n < 2:
+        raise ValueError('compander table must contain at least two values')
+    magnitude = abs(c)
+    if magnitude == 0.0:
+        return 0.0
+    if magnitude >= table[n-1]:
+        value = B_LIMIT
+    else:
+        lo, hi = 0, n-1
+        while hi-lo > 1:
+            mid = (lo+hi)//2
+            if table[mid] < magnitude:
+                lo = mid
+            else:
+                hi = mid
+        span = table[hi]-table[lo]
+        fraction = (magnitude-table[lo])/span
+        value = B_LIMIT*(lo+fraction)/(n-1)
+    return value if c > 0.0 else -value
+
+
+@njit(cache=True)
+def serpentine_decode_frame_exact(received, level, step, scale, compander, offset):
+    """Geometric serpentine decode with the exact forward-table inverse."""
+    n = len(received)
+    hosts, guests = np.empty(n), np.zeros(n)
+    for i in range(n):
+        if level[i] != 0 and level[i] != 1:
+            raise ValueError('serpentine level must be 0 or 1')
+        if not math.isfinite(step[i]) or step[i] <= 0 or not math.isfinite(scale[i]) or scale[i] <= 0:
+            raise ValueError('step and scale must be finite and positive')
+        if not math.isfinite(offset[i]):
+            raise ValueError('offset must be finite')
+        value = received[i]/scale[i]
+        if level[i] == 0:
+            hosts[i] = value
+        else:
+            q = np.round((value-offset[i])/step[i])
+            parity = 1.0 if q % 2.0 == 0.0 else -1.0
+            residual = min(max(2.0*(value-offset[i]-q*step[i])/step[i], -1.0), 1.0)
+            hosts[i] = offset[i]+q*step[i]
+            guests[i] = expand_exact(compander, parity*residual)
+    return hosts, guests
+
+
+@njit(cache=True)
+def adaptive_guest_peak(flat, positions, guest_sd, guest_scale, host_factor):
+    """Maximum normalized magnitude for actual guests in one leg.
+
+    Return (peak, status): status 1 denotes malformed/non-finite inputs.
+    ``positions`` and the corresponding vectors contain guests only.
+    """
+    if not math.isfinite(host_factor) or host_factor <= 0.0:
+        return 0.0, 1
+    if len(positions) != len(guest_sd) or len(positions) != len(guest_scale):
+        return 0.0, 1
+    peak = 0.0
+    for i in range(len(positions)):
+        position = positions[i]
+        if position < 0 or position >= len(flat):
+            return 0.0, 1
+        value, sd, scale = flat[position], guest_sd[i], guest_scale[i]
+        if (not math.isfinite(value) or not math.isfinite(sd) or sd <= 0.0
+                or not math.isfinite(scale) or scale <= 0.0):
+            return 0.0, 1
+        normalized = abs(value)/(sd*host_factor*scale)
+        if not math.isfinite(normalized):
+            return 0.0, 1
+        if normalized > peak:
+            peak = normalized
+    return peak, 0
+
+
+@njit(cache=True)
+def adaptive_guest_factor_from_peak(peak):
+    """Smallest power-of-two guest factor with strict compander headroom.
+
+    Keep the peak a little inside B_LIMIT so serpentine's defensive endpoint
+    clamp is not part of valid adaptive operation.
+    """
+    if not math.isfinite(peak) or peak < 0.0:
+        return 0.0
+    limit = B_LIMIT*(1.0-1e-6)
+    for factor in (1.0, 2.0, 4.0, 8.0, 16.0):
+        if peak/factor <= limit:
+            return factor
+    return 0.0
+
+
+@njit(cache=True)
+def adaptive_pilot_pattern(patterns, row, dithered):
+    """Copy one pilot row, applying the existing dither polarity."""
+    out = np.empty(patterns.shape[1], dtype=np.float64)
+    sign = -1.0 if dithered else 1.0
+    for i in range(patterns.shape[1]):
+        out[i] = patterns[row, i]*sign
+    return out

@@ -81,7 +81,7 @@ TABLE_FORMAT = 'v7-stereo-slices-3'
 MARKER_SLOTS = 8
 SIGNATURE_SLOTS = 16
 CHROMA_BASE = int(os.environ.get('SLICE_CHROMA', 110))                   # base (and detail) coefficients per colour plane
-LUMA_BASE = FRESH_SLOTS-MARKER_SLOTS-SIGNATURE_SLOTS-2*CHROMA_BASE      # 988
+LUMA_BASE = FRESH_SLOTS-MARKER_SLOTS-SIGNATURE_SLOTS-2*CHROMA_BASE      # 1,020 at default settings
 BASE = (LUMA_BASE, CHROMA_BASE, CHROMA_BASE)
 # The detail coefficient's strength in a slot. Lower: a channel heard alone
 # is cleaner; with both channels the detail is restored but its noise grows
@@ -776,4 +776,3 @@ def main(argv=None):
 
 if __name__ == '__main__':
     main()
-

@@ -36,6 +36,7 @@ from tools.v7_send_defaults import (DEFAULT_PROFILE, NESTED_BASE_PROFILES,
                                     kernel_profiles,
                                     PROFILE_DEFAULT_KERNELS, SENDER_DEFAULTS,
                                     default_kernel_for_profile)
+from tools.v7_nested_gui_patch import DEFAULT_TABLE_PATH
 
 
 # The profiles on offer: the two aspect profiles and the nested fold that is
@@ -127,7 +128,7 @@ DCT_SHARPEN_CHOICES = (
 DCT_PROFILES = FOLDED_PROFILES
 BOOL_FIELDS = ('video_live', 'dct_encode',
                'luma_adjust', 'luma_adjust_linear', 'pixel_encode',
-               'clip_aware')
+               'clip_aware', 'matched_nested_test')
 # Settings that take effect while the sender runs (the sender reads them
 # from its control pipe); everything else needs a stop and a new Start.
 LIVE_FIELDS = ('brightness', 'gamma')
@@ -243,6 +244,13 @@ FIELD_HELP = {
     'aspect_layout': ('Which coefficients the aspect profiles send: matched '
                       'to this picture shape. Not signalled; set the receiver '
                       'to the same layout.'),
+    'matched_nested_test': ('Opt-in matched experiment: serpentine mapping, adaptive '
+                            'guest range, quarter-step stairs and exact inverse. '
+                            'Stereo nested also enables chroma detail. It turns '
+                            'Luma adjustment off to match the validated chroma50 '
+                            'source setup. Enable both endpoints with the same '
+                            'table file. Test-only; not a production default.'),
+    'nested_test_tables': 'Experimental nested table .npz; select the same file at both ends.',
 }
 FIELD_LABELS = {
     'device': 'Audio output device',
@@ -279,6 +287,8 @@ FIELD_LABELS = {
     'dct_preshrink': 'DCT pre-shrink',
     'dct_chroma_gain': 'Chroma gain',
     'aspect_layout': 'Aspect layout',
+    'matched_nested_test': 'Matched nested test patch · opt-in',
+    'nested_test_tables': 'Matched nested tables (.npz)',
 }
 # DCT kernels: one file each in dct_kernels/ (see the README there),
 # read when the GUI starts and again on R. The kernel's own parameters are
@@ -530,6 +540,7 @@ SAVED_SETTING_FIELDS = (
     'aspect_layout', 'clip_aware', 'luma_adjust',
     'luma_adjust_linear', 'pixel_encode', 'pixel_detail', 'pixel_grid',
     'dct_kernel', 'dct_kernel_params', 'collapsed_sections',
+    'matched_nested_test', 'nested_test_tables',
 )
 
 
@@ -1531,6 +1542,12 @@ def build_command(settings, devices, sd_module=None, python=None,
         command.extend(('--device-name', checked['device'].name))
         if checked['device'].hostapi:
             command.extend(('--device-hostapi', checked['device'].hostapi))
+    if settings.get('matched_nested_test'):
+        if checked['profile'] not in ('aspect-mono-nested', 'stereo-nested'):
+            raise ValueError('The matched codec test requires a nested profile.')
+        from tools.v7_nested_gui_patch import wrap_sender
+        command = wrap_sender(command, settings.get('nested_test_tables'), True,
+                              checked['profile'])
     return command
 
 
@@ -1650,6 +1667,8 @@ class SenderGui:
         ('Source', ('source', 'capture_fps', 'preview', 'video_source',
                     'video_live', 'camera', 'screen_target')),
         ('Wire profile', ('profile', 'aspect_layout', 'mono_video_side')),
+        ('Experimental matched codec (both ends)',
+         ('matched_nested_test', 'nested_test_tables')),
         ('Source audio', ('source_audio', 'source_audio_device',
                           'source_audio_input_side', 'source_audio_gain',
                           'source_audio_delay_ms')),
@@ -1757,6 +1776,8 @@ class SenderGui:
             'collapsed_sections': [],
             'dct_kernel': default_kernel_for_profile(DEFAULT_PROFILE),
             'dct_kernel_params': {},
+            'matched_nested_test': False,
+            'nested_test_tables': str(DEFAULT_TABLE_PATH),
             'aspect_layout': 'auto',
         }
         self.notice = 'Choose an output device, capture source, and profile.'
@@ -2830,6 +2851,16 @@ class SenderGui:
                 self.settings['perceptual_resize'] = 'off'
             if value not in DCT_PROFILES:
                 self.settings['dct_encode'] = False
+        elif dest == 'matched_nested_test' and value:
+            # Experimental chroma grids do not yet have the sent-mask geometry
+            # required by the GUI's luma/chroma re-fit. This is also the source
+            # setting used by the validated chroma50 live candidate.
+            self.settings['luma_adjust'] = False
+        elif (dest == 'luma_adjust' and value and
+              self.settings.get('matched_nested_test')):
+            self.settings['luma_adjust'] = False
+            message = ('Luma adjustment stays off for the matched chroma50 '
+                       'test configuration.')
         elif dest == 'dct_encode' and value:
             # The direct encode replaces the resize the downscaler shapes.
             self.settings['perceptual_resize'] = 'off'

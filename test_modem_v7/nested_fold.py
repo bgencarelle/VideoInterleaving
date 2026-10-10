@@ -68,6 +68,7 @@ SIGNATURE_SLOTS = 16
 SCORE_MIN = .5                 # signature correlation that marks a nested packet
 DOUBTFUL = .5                  # equaliser confidence below which a slot's own noise is used
 LUMA = 96*80
+LEGACY_GRIDS = ((96, 80), (48, 40), (48, 40))
 # The three stair work-arounds below (dither, the held-picture average and
 # decoding inside the bounds) are OFF by default.  They hide stair error
 # without removing it, and they change the picture in ways that are not a
@@ -77,6 +78,7 @@ DITHER = os.environ.get('NESTED_FOLD_DITHER', '0') != '0'
 # The packet counter modulo this picks the offset set.  Seven is the cycle
 # both ends already share (the tail slice), forwards and in reverse.
 DITHER_PHASES = 7
+ADAPTIVE_GUEST_RANGE = False  # enabled only by the explicit experiment switch
 
 
 def hadamard():
@@ -130,6 +132,16 @@ class FrozenFold:
     PAIRED = ('detail_position', 'ride', 'common', 'differ')
 
     def __init__(self, arrays):
+        self.rows, self.cols = map(int, arrays.get('luma_grid', (96, 80)))
+        if self.rows <= 0 or self.cols <= 0:
+            raise ValueError('nested grid dimensions must be positive')
+        self.luma = self.rows*self.cols
+        chroma = tuple(map(int, arrays.get('chroma_grid', (48, 40))))
+        self.grids = ((self.rows, self.cols), chroma, chroma)
+        self.grid = None
+        if self.grids != LEGACY_GRIDS:
+            from nested_grid import FoldGrid
+            self.grid = FoldGrid(self.grids[0], chroma)
         # Table loading (once): every array is stored in the type and layout
         # the kernels take, so nothing is converted per packet.
         integers = ('model_index', 'host_position', 'level', 'host_sector', 'guest_position',
@@ -151,14 +163,14 @@ class FrozenFold:
         # Stair offsets, within half a step, one set per dither phase.
         self._dither = np.ascontiguousarray(np.random.default_rng(20261007).uniform(
             -.5, .5, (DITHER_PHASES, self.slots))*self.step*(self.level > 0))
-        mask = np.zeros(LUMA, bool)
+        mask = np.zeros(self.luma, bool)
         mask[self.host_position] = True
         mask[self.guest_position.ravel()] = True
         if self.paired:
             mask[self.detail_position[self.ride > 0]] = True
         mask.setflags(write=False)
         self.sent_mask = mask
-        rows, cols = sk.dct_matrix(96), sk.dct_matrix(LUMA//96)
+        rows, cols = sk.dct_matrix(self.rows), sk.dct_matrix(self.cols)
         self._transforms = (rows, np.ascontiguousarray(rows.T),
                             cols, np.ascontiguousarray(cols.T))
 
@@ -204,7 +216,7 @@ class FrozenFold:
         if self.paired and not joined:
             return None
         return sk.coefficient_room(
-            LUMA, self.host_position, self.level, self.step, self.host_sd, self.scale,
+            self.luma, self.host_position, self.level, self.step, self.host_sd, self.scale,
             _f8(sigma), RATIO**level, SMOOTH_ROOM if share is None else float(share),
             int(count), self.guest_position,
             self.ride, self.detail_position, self.paired)
@@ -214,8 +226,9 @@ class FrozenFold:
         passes = SMOOTH_PASSES if passes is None else int(passes)
         if passes <= 0 or room is None:
             return luma
-        return sk.smooth_within_room_fast(_f8(luma), room, 96, *self._transforms, passes,
-                                     SMOOTH_EDGE, SMOOTH_RATE)
+        edge = SMOOTH_EDGE if self.grid is None else SMOOTH_EDGE*self.grid.scales[0]
+        return sk.smooth_within_room_fast(_f8(luma), room, self.rows, *self._transforms, passes,
+                                     edge, SMOOTH_RATE)
 
     # --------------------------------------------------------------- sender
     def _normalised(self, plane, index, leg=0):
@@ -246,6 +259,14 @@ class FrozenFold:
     def choose_level(self, plane):
         """The ladder level with the least error in a trial decode at the
         noise that packet will meet (nearest-stair decode, fixed draw)."""
+        if self.paired:
+            return int(sk.choose_paired_level(
+                _f8(plane).ravel(), LOWEST, HIGHEST, RATIO, self.host_position, self.host_mean,
+                self.host_sd, self.level, self.step, self.scale, self.alpha, self.compander,
+                self.inverse, self.member, self.host_sector, self.sectors, self.law,
+                self.guest_sector, self.guest_band, self.limits[0], self.limits[1],
+                self.guest_position, self.guest_sd, self.guest_slot, self.noise, self._draw,
+                self.ride, self.detail_position))
         return int(sk.choose_level(
             _f8(plane).ravel(), LOWEST, HIGHEST, RATIO, self.host_position, self.host_mean,
             self.host_sd, self.level, self.step, self.scale, self.alpha, self.compander,
@@ -291,7 +312,7 @@ class FrozenFold:
         if self.paired:
             return self._decode_paired(
                 self.soften(readings, phase) if soft is None else soft, factor, averaged)
-        out = np.zeros(LUMA)
+        out = np.zeros(self.luma)
         if 'sum' in readings:
             # Opposite offsets on the two channels cancel in their sum.
             values, sigma = readings['sum']
@@ -319,7 +340,7 @@ class FrozenFold:
         stairs (``soften``); base and detail are separated as the stock
         slices profile does, weighted by what each channel's noise left of
         them."""
-        out = np.zeros(LUMA)
+        out = np.zeros(self.luma)
         shared = (self.host_position, self.host_mean, self.host_sd, self.common, self.differ,
                   self.ride, self.detail_position, factor)
         if 'sum' in got:
@@ -452,7 +473,8 @@ def table(family, layout, path=None):
                     prefix = f'{family}/{layout}/'
                     if prefix+'host_position' in data.files:
                         names = FrozenFold.FIELDS+tuple(
-                            name for name in FrozenFold.PAIRED if prefix+name in data.files)
+                            name for name in FrozenFold.PAIRED+('luma_grid', 'chroma_grid')
+                            if prefix+name in data.files)
                         fold = FrozenFold({name: data[prefix+name] for name in names})
             _cache[key] = fold
         return _cache[key]
@@ -562,7 +584,9 @@ def display_room(fold, level, sigma, count, joined):
     if SMOOTH_PASSES > 0 or DISPLAY_ROOM <= 0:
         return None
     room = fold.room(level, sigma, count, joined, share=DISPLAY_ROOM)
-    return None if room is None else room.reshape(96, -1)
+    if room is not None and fold.grid is not None:
+        room = sk.scaled_copy(room, 1.0/fold.grid.scales[0])
+    return None if room is None else room.reshape(fold.rows, fold.cols)
 
 
 _SENDING = threading.local()   # sender: counter of the packet being built
@@ -579,7 +603,10 @@ class NestedMonoCodec:
     def __init__(self, stock, fold, send=False):
         self.stock, self.fold, self.send = stock, fold, bool(send)
         index = fold.model_index
-        if not np.array_equal(np.asarray(stock.kept)[index], fold.host_position):
+        positions = np.asarray(stock.kept)[index]
+        if fold.grid is not None:
+            positions = fold.grid.positions[positions]
+        if not np.array_equal(positions, fold.host_position):
             raise ValueError('nested fold table does not match this layout')
         # Set-up, once per codec: slices of the stock model in the type and
         # layout the kernels take.
@@ -604,7 +631,11 @@ class NestedMonoCodec:
         self.held = Held()
         self.tail_slice = None          # receiver: tail slice of the packet in hand
         self.last_room = None           # receiver: display_room of the last picture
+        self.adaptive_guest_range = bool(getattr(fold, 'adaptive_guest_range', False))
+        self.adaptive_guest_factor = None
+        self._adaptive_last_full = None
         self._level_plane, self._level = _NONE, 0   # sender: last picture and its level
+        self.grid = stock.grid if fold.grid is None else fold.grid
 
     _display_room = staticmethod(lambda *args: display_room(*args))
 
@@ -619,7 +650,16 @@ class NestedMonoCodec:
         packets differ from one to the next by design, so their slot values
         must not be averaged over packets before the fold is undone."""
         self.tail_slice = tail_slice
-        score, _, _, stock_score, dithered = read_signature(self._unit(xhat, conf)[2])
+        score, level, _, stock_score, dithered = read_signature(self._unit(xhat, conf)[2])
+        if self.adaptive_guest_range:
+            # Never fuse before the strict per-packet factor pilot is checked.
+            try:
+                if score >= SCORE_MIN and score > stock_score:
+                    from tools.v7_adaptive_serpentine import factor_for_pilot_level
+                    factor_for_pilot_level(level)
+            except ValueError:
+                pass
+            return True
         if score >= SCORE_MIN and score > stock_score:
             return bool(dithered)
         return self.recognition.kind == 'nested' and self.recognition.dithered
@@ -632,54 +672,86 @@ class NestedMonoCodec:
 
     def encode_coefficients(self, values, full=None):
         if full is None:
-            full = self.stock.grid.forward(values)
-        coefficients = np.array(self.stock.encode_coefficients(values, full), np.float64)
+            full = self.grid.forward(values)
+        old_full = full if self.fold.grid is None else self.fold.grid.contract(full)
+        coefficients = np.array(self.stock.encode_coefficients(values, old_full), np.float64)
         if not self.send:
             return coefficients
-        plane = _f8(full)[:LUMA]
-        # A held picture is sent packet after packet: its level is chosen once.
-        if not sk.same_values(plane, self._level_plane):
-            self._level_plane, self._level = plane.copy(), self.fold.choose_level(plane)
-        level = self._level
+        plane = _f8(full)[:self.fold.luma]
         # Dithered only inside a packet whose counter is known (see
         # enable_mono); a bare call sends plain stairs.
         counter = getattr(_SENDING, 'counter', None) if DITHER else None
         phase = None if counter is None else int(counter) % DITHER_PHASES
-        coefficients[self.index] = sk.slot_coefficients(
-            self.mu, self.sd, self.fold.encode(plane, level, 0, phase))
+        guest_factor = 1.0
+        if self.adaptive_guest_range:
+            from tools.v7_adaptive_serpentine import pilot_level_for_factor
+            level = -1
+            guest_factor = self.fold.choose_guest_factor(plane, level, phase)
+            pilot_level = pilot_level_for_factor(guest_factor)
+        else:
+            # A held picture is sent packet after packet: its level is chosen once.
+            if not sk.same_values(plane, self._level_plane):
+                self._level_plane, self._level = plane.copy(), self.fold.choose_level(plane)
+            level = self._level
+            pilot_level = level
+        self.adaptive_guest_factor = guest_factor
+        symbols = (self.fold.encode(plane, level, 0, phase, guest_factor=guest_factor)
+                   if self.adaptive_guest_range else self.fold.encode(plane, level, 0, phase))
+        coefficients[self.index] = sk.slot_coefficients(self.mu, self.sd, symbols)
         coefficients[self.signature_index] = sk.signature_symbols(
             self.signature_mu, self.signature_sd, self.signature_unit, self.pattern,
-            HADAMARD[int(level)-LOWEST+1], -1.0 if phase is not None else 1.0)
+            HADAMARD[int(pilot_level)-LOWEST+1], -1.0 if phase is not None else 1.0)
         return coefficients
 
     def decode(self, coeffs, xhat, conf, fallback=True, metadata_confirmed=False):
         confidence, seen, unit = self._unit(xhat, conf)
         score, level, residual, stock_score, dithered = read_signature(unit)
-        self.last_nested, level = self.recognition.decide(
-            score, level, stock_score, dithered)
         tail_slice, self.tail_slice = self.tail_slice, None
         self.last_room = None
+        guest_factor = 1.0
+        if self.adaptive_guest_range:
+            from tools.v7_adaptive_serpentine import factor_for_pilot_level
+            self.last_nested = False
+            if score < SCORE_MIN or score <= stock_score:
+                return None if self._adaptive_last_full is None else self._adaptive_last_full.copy()
+            try:
+                guest_factor = factor_for_pilot_level(level)
+            except ValueError:
+                return None if self._adaptive_last_full is None else self._adaptive_last_full.copy()
+            self.last_nested = True
+            self.recognition.dithered = bool(dithered)
+            level = -1
+        else:
+            self.last_nested, level = self.recognition.decide(
+                score, level, stock_score, dithered)
         if not self.last_nested:
             self.held.reset()
-            return self.stock.decode(coeffs, xhat, conf, fallback=fallback,
+            full = self.stock.decode(coeffs, xhat, conf, fallback=fallback,
                                      metadata_confirmed=metadata_confirmed)
+            return full if full is None or self.fold.grid is None else self.fold.grid.expand(full)
         fold = self.fold
         relative = packet_noise(residual*self.signature_unit, self.design_signature_noise,
                                 sk.confidence_noise(confidence, self.signature_index))
         sigma = slot_noise(relative, fold.noise, sk.gather(confidence, self.index))
         full = self.stock.plain(coeffs)
+        if fold.grid is not None:
+            full = fold.grid.expand(full)
         self.last_dithered = self.recognition.dithered
         phase = self.recognition.phase(tail_slice) if self.last_dithered else None
+        readings = {0: (sk.gather_scaled(seen, self.index, self.sd, self._ones), sigma)}
+        decoded_luma = (fold.decode(readings, level, phase, guest_factor=guest_factor)
+                        if self.adaptive_guest_range else fold.decode(readings, level, phase))
         luma = self.held.update(
-            fold, fold.decode({0: (sk.gather_scaled(seen, self.index, self.sd, self._ones),
-                                   sigma)}, level, phase),
+            fold, decoded_luma,
             level, phase, sigma)
-        full[:LUMA] = fold.clean(luma, fold.room(level, sigma, self.held.last_count))
+        full[:fold.luma] = fold.clean(luma, fold.room(level, sigma, self.held.last_count))
         self.last_room = self._display_room(fold, level, sigma, self.held.last_count, True)
         self.stock.last_score = self.last_score = score
         self.stock.last_noise = self.last_noise = relative
         self.stock.last_unfolded_slots = self.last_unfolded_slots = self.folded_slots
         self.last_level = level
+        if self.adaptive_guest_range:
+            self._adaptive_last_full = full.copy()
         return full
 
 
@@ -702,6 +774,7 @@ def enable_mono(wire, send=False, path=None):
         for nested in wrapped.values():
             nested.recognition.reset()
             nested.held.reset()
+            nested._adaptive_last_full = None
 
     wire._codec = codec
     wire.nested_codecs = lambda: tuple(wrapped.values())
@@ -739,11 +812,17 @@ def _slice_wire_class():
             super().__init__(layout)
             self.send, self._path = bool(send), path
             self._level = (None, None)
+            self._level_layout = None
             self._counter = None
             self._prepared = {}
             self.last_room = None
             self.nested_fold = 'send' if send else 'receive'
             self.last_nested = False
+            self.adaptive_guest_range = ADAPTIVE_GUEST_RANGE
+            self._adaptive_factor_key = None
+            self._adaptive_factor = None
+            self._adaptive_last_values = None
+            self.last_grids = stock.v7.V7_GRIDS
             self.recognition = Recognition()
             self.held = Held()
 
@@ -751,12 +830,18 @@ def _slice_wire_class():
             super().reset()
             self.recognition.reset()
             self.held.reset()
+            self._adaptive_factor_key = None
+            self._adaptive_factor = None
+            self._adaptive_last_values = None
 
         def fold(self, layout):
             fold = table('slices', layout, self._path)
-            if fold is not None and not np.array_equal(
-                    fold.host_position, self.slots(layout).base[0]):
-                raise ValueError('nested fold table does not match this layout')
+            if fold is not None:
+                positions = self.slots(layout).base[0]
+                if fold.grid is not None:
+                    positions = fold.grid.positions[positions]
+                if not np.array_equal(fold.host_position, positions):
+                    raise ValueError('nested fold table does not match this layout')
             return fold
 
         def prepared(self, layout):
@@ -769,9 +854,22 @@ def _slice_wire_class():
                 amplitude = stock.SIGNATURE_STEPS*stock.FOLD_STEP/math.sqrt(stock.FOLD_POWER)
                 pattern = _f8(stock.SIGNATURE_PATTERN)
                 transforms = []
-                for rows, cols in stock.v7.V7_GRIDS:
+                grids = stock.v7.V7_GRIDS if fold is None else fold.grids
+                for rows, cols in grids:
                     transforms.append((np.ascontiguousarray(stock._dct_matrix(rows).T, np.float64),
                                        _f8(stock._dct_matrix(cols))))
+                base = [np.ascontiguousarray(index, np.int64) for index in slots.base]
+                detail = [np.ascontiguousarray(index, np.int64)
+                          for index in slots.detail]
+                if fold is not None and fold.grid is not None:
+                    for plane in (1, 2):
+                        old_start = fold.grid.old_off[plane]
+                        new_start = fold.grid.off[plane]
+                        mapped = fold.grid.positions[old_start+base[plane]]-new_start
+                        base[plane] = np.ascontiguousarray(mapped, np.int64)
+                        mapped = (fold.grid.positions[
+                            old_start+detail[plane]]-new_start)
+                        detail[plane] = np.ascontiguousarray(mapped, np.int64)
                 self._prepared[layout] = types.SimpleNamespace(
                     part=part, part_mu=_f8(slots.model_mu[part]),
                     part_sd=_f8(np.sqrt(slots.model_lam[part])),
@@ -783,8 +881,10 @@ def _slice_wire_class():
                     design=max(float(sk.root_mean_square(fold.signature_noise)), 1e-12)
                     if fold is not None else 1.0,
                     transforms=transforms,
-                    base=[np.ascontiguousarray(index, np.int64) for index in slots.base],
-                    pixels=sum(rows*cols for rows, cols in stock.v7.V7_GRIDS))
+                    base=base,
+                    detail=detail,
+                    grids=grids,
+                    pixels=sum(rows*cols for rows, cols in grids))
             return self._prepared[layout]
 
         def luma_sent_mask(self, layout):
@@ -795,6 +895,7 @@ def _slice_wire_class():
         def encode_packet(self, base_model, values, counter, *args, **kwargs):
             # Nested packets go out auto-levelled (see enable_mono).
             self._counter = counter
+            self._packet_layout = self.layout_for(kwargs.get('aspect_code', 0))
             try:
                 with stock.v7.body_auto_level(self.send):
                     return super().encode_packet(base_model, values, counter,
@@ -802,25 +903,60 @@ def _slice_wire_class():
             finally:
                 self._counter = None
 
+        def spectra(self, values):
+            fold = self.fold(self._packet_layout) if self.send else None
+            if fold is None or fold.grid is None:
+                return super().spectra(values)
+            full = fold.grid.forward(values)
+            return [full[a:b] for a, b in zip(fold.grid.off, fold.grid.off[1:])]
+
         def channel_coefficients(self, model, spectra, kind):
-            out = super().channel_coefficients(model, spectra, kind)
             layout = self._layout_of[id(model)]
             fold = self.fold(layout) if self.send else None
+            legacy = spectra
+            if fold is not None and fold.grid is not None:
+                old_full = sk.contract_grid_planes(
+                    spectra[0], spectra[1], spectra[2], fold.grid.positions,
+                    fold.grid.old_off, fold.grid.off, fold.grid.old_size)
+                legacy = [old_full[a:b] for a, b in zip(
+                    fold.grid.old_off[:-1], fold.grid.old_off[1:])]
+                # The source projection keeps canonical coefficient units by
+                # scaling each enlarged plane. Stock chroma ranks still use
+                # legacy units, so undo that scale before their fixed slots.
+                for plane in (1, 2):
+                    legacy[plane] = legacy[plane]/fold.grid.scales[plane]
+            out = super().channel_coefficients(model, legacy, kind)
             if fold is None:
                 return out
             ready = self.prepared(layout)
             plane = spectra[0]
             # Both channels of a frame share one level: choose it once.
-            if self._level[0] is not plane:
-                self._level = (plane, fold.choose_level(plane))
-            level = self._level[1]
+            if (self._level_layout != layout or self._level[0] is None or
+                    not sk.same_values(plane, self._level[0])):
+                self._level_layout = layout
+                self._level = (plane.copy(), -1 if self.adaptive_guest_range
+                               else fold.choose_level(plane))
+            level = -1 if self.adaptive_guest_range else self._level[1]
             phase = (int(self._counter) % DITHER_PHASES
                      if DITHER and self._counter is not None else None)
-            symbols = fold.encode(plane, level, stock.SIDES.index(kind), phase)
+            guest_factor = 1.0
+            pilot_level = level
+            if self.adaptive_guest_range:
+                from tools.v7_adaptive_serpentine import pilot_level_for_factor
+                key = (layout, self._counter)
+                if key != self._adaptive_factor_key:
+                    self._adaptive_factor = fold.choose_guest_factor(plane, -1, phase)
+                    self._adaptive_factor_key = key
+                guest_factor = self._adaptive_factor
+                pilot_level = pilot_level_for_factor(guest_factor)
+            symbols = (fold.encode(plane, level, stock.SIDES.index(kind), phase,
+                                   guest_factor=guest_factor)
+                       if self.adaptive_guest_range else
+                       fold.encode(plane, level, stock.SIDES.index(kind), phase))
             out[ready.part] = sk.slot_coefficients(ready.part_mu, ready.part_sd, symbols)
             out[ready.hosts] = sk.signature_symbols(
                 ready.host_mu, ready.host_sd, ready.amplitude, ready.pattern,
-                HADAMARD[int(level)-LOWEST+1], -1.0 if phase is not None else 1.0)
+                HADAMARD[int(pilot_level)-LOWEST+1], -1.0 if phase is not None else 1.0)
             return out
 
         # ---------------------------------------------------------- receiver
@@ -860,18 +996,49 @@ def _slice_wire_class():
             fold = self.fold(chosen[0].layout) if chosen else None
             signed = [getattr(half, 'signature', None) for half in chosen]
             level = 0
-            if fold is None or not signed or any(s is None for s in signed):
+            guest_factor = 1.0
+            if fold is None or not signed or (any(s is None for s in signed)
+                                               and not self.adaptive_guest_range):
                 self.last_nested = False
             else:
-                # The channel whose signature reads best speaks for the packet.
-                best = max(signed, key=lambda s: max(s[0], s[3]))
-                self.last_nested, level = self.recognition.decide(
-                    best[0], best[1], best[3], best[4])
+                if self.adaptive_guest_range:
+                    from tools.v7_adaptive_serpentine import factor_for_pilot_level
+                    valid = []
+                    for half, signature in zip(chosen, signed):
+                        if signature is None or signature[0] < SCORE_MIN or signature[0] <= signature[3]:
+                            continue
+                        try:
+                            candidate_factor = factor_for_pilot_level(signature[1])
+                        except ValueError:
+                            continue
+                        valid.append((half, signature, candidate_factor))
+                    if valid:
+                        _, best, guest_factor = max(valid, key=lambda item: item[1][0])
+                        matching = [(half, signature) for half, signature, factor in valid
+                                    if factor == guest_factor]
+                        chosen = [item[0] for item in matching]
+                        signed = [item[1] for item in matching]
+                        self.last_nested = True
+                    else:
+                        self.last_nested = False
+                    if self.last_nested:
+                        self.recognition.dithered = bool(best[4])
+                        level = -1
+                else:
+                    # The channel whose signature reads best speaks for the packet.
+                    best = max(signed, key=lambda s: max(s[0], s[3]))
+                    self.last_nested, level = self.recognition.decide(
+                        best[0], best[1], best[3], best[4])
             self.last_room = None
             if not self.last_nested:
+                if self.adaptive_guest_range:
+                    return (None if self._adaptive_last_values is None
+                            else self._adaptive_last_values.copy())
                 self.held.reset()
+                self.last_grids = stock.v7.V7_GRIDS
                 return super().values(halves)
             ready = self.prepared(chosen[0].layout)
+            self.last_grids = ready.grids
             lam, unit_scale, design = ready.lam, ready.amplitude, ready.design
             kinds = [half.kind for half in chosen]
             leak = self.nested_crosstalk(chosen) if sorted(kinds) == sorted(stock.SIDES) else 0.0
@@ -892,11 +1059,16 @@ def _slice_wire_class():
             phase = (self.recognition.phase(named[0] if named else None)
                      if self.recognition.dithered else None)
             soft = fold.soften(readings, phase)
+            decode_with_factor = (lambda averaged=False: fold.decode(
+                readings, level, phase, averaged=averaged, soft=soft,
+                guest_factor=guest_factor)) if self.adaptive_guest_range else (
+                lambda averaged=False: fold.decode(
+                    readings, level, phase, averaged=averaged, soft=soft))
             luma = self.held.update(
-                fold, fold.decode(readings, level, phase, soft=soft), level, phase,
+                fold, decode_with_factor(), level, phase,
                 next(iter(readings.values()))[1],
                 key=(chosen[0].layout, tuple(sorted(map(str, readings)))),
-                averaged=lambda: fold.decode(readings, level, phase, averaged=True, soft=soft))
+                    averaged=lambda: decode_with_factor(averaged=True))
             worst = None
             for _, sigma in readings.values():
                 worst = sigma if worst is None else sk.larger(worst, sigma)
@@ -906,11 +1078,28 @@ def _slice_wire_class():
                                           len(readings) == 2)
             out = np.empty(ready.pixels)
             start = 0
-            for plane, ((base, _), (rows, cols)) in enumerate(
-                    zip(self.estimate(chosen), stock.v7.V7_GRIDS)):
-                spectrum = _f8(luma) if plane == 0 else sk.scatter(
-                    rows*cols, ready.base[plane], _f8(base))
-                start = sk.inverse_plane(spectrum, out, start, *ready.transforms[plane])
+            for plane, ((base, detail), (rows, cols)) in enumerate(
+                    zip(self.estimate(chosen), ready.grids)):
+                if plane == 0:
+                    spectrum = _f8(luma)
+                elif detail is None:
+                    spectrum = sk.scatter(rows*cols, ready.base[plane],
+                                          _f8(base))
+                else:
+                    spectrum = sk.scatter_pair(
+                        rows*cols, ready.base[plane], _f8(base),
+                        ready.detail[plane], _f8(detail))
+                if plane == 0 and fold.grid is not None:
+                    # Stored luma coefficients are in the legacy grid's units.
+                    start = sk.inverse_plane_scaled(spectrum, out, start,
+                        *ready.transforms[plane], 1.0/fold.grid.scales[0])
+                elif fold is not None and fold.grid is not None:
+                    start = sk.inverse_plane_scaled(spectrum, out, start,
+                        *ready.transforms[plane], 1.0/fold.grid.scales[plane])
+                else:
+                    start = sk.inverse_plane(spectrum, out, start, *ready.transforms[plane])
+            if self.adaptive_guest_range:
+                self._adaptive_last_values = out.copy()
             return out
 
     return NestedSliceWire

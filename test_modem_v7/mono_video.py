@@ -339,8 +339,11 @@ class MonoFreshFoldWire:
         full = codec.decode(
             coeffs, xhat, conf, fallback=True,
             metadata_confirmed=True)
+        if full is None:
+            return None
         # A nested fold's account of its coefficients, for the display.
         result.diag['luma_room'] = getattr(codec, 'last_room', None)
+        result.diag['display_grids'] = codec.grid.grids
         return codec.grid.inverse(full)
 
 
