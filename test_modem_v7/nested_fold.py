@@ -79,6 +79,12 @@ DITHER = os.environ.get('NESTED_FOLD_DITHER', '0') != '0'
 # both ends already share (the tail slice), forwards and in reverse.
 DITHER_PHASES = 7
 ADAPTIVE_GUEST_RANGE = False  # enabled only by the explicit experiment switch
+# Slot mapping of the stock nested tables. Serpentine: stair q carries its
+# guest within half a stair, running the other way on odd stairs, so the
+# symbol is continuous across stair edges (V7_SERPENTINE_MATH.md); decoded by
+# posterior mean at the measured noise like the stock mapping.
+# NESTED_FOLD_SERPENTINE=0 restores the stock mapping (both ends).
+SERPENTINE = os.environ.get('NESTED_FOLD_SERPENTINE', '1') != '0'
 
 
 def hadamard():
@@ -160,6 +166,9 @@ class FrozenFold:
         self.sectors = self.law.shape[0]
         self.legs = self.guest_position.shape[0]
         self._draw = np.random.default_rng(20261006).standard_normal(self.slots)
+        # Serpentine mapping: plain stairs and an all-plain level map.
+        self._zero = np.zeros(self.slots)
+        self._plain = np.zeros(self.slots, np.int64)
         # Stair offsets, within half a step, one set per dither phase.
         self._dither = np.ascontiguousarray(np.random.default_rng(20261007).uniform(
             -.5, .5, (DITHER_PHASES, self.slots))*self.step*(self.level > 0))
@@ -192,11 +201,19 @@ class FrozenFold:
 
     def _stairs(self, hosts, offset=None):
         """Host values as a slip-free receiver decodes them."""
+        if SERPENTINE:
+            return sk.serpentine_stair_values(
+                _f8(hosts), self.level, self.step,
+                self._zero if offset is None else offset)
         if offset is not None:
             return sk.stair_values_dithered(_f8(hosts), self.level, self.step, offset)
         return sk.stair_values(_f8(hosts), self.level, self.step)
 
     def _soft(self, values, sigma, density, offset=None):
+        if SERPENTINE:
+            return sk.serpentine_soft_decode_frame(
+                _f8(values), self.level, self.step, self.scale, _f8(sigma), density,
+                self.compander, self._zero if offset is None else offset, 1.0)
         if offset is not None:
             return sk.soft_decode_frame_dithered(
                 _f8(values), self.level, self.step, self.scale, self.alpha, _f8(sigma),
@@ -250,6 +267,10 @@ class FrozenFold:
         scale = self._guest_scale(self._activity(self._stairs(hosts, offset)), leg)
         guests = sk.normalised_guests(flat, self.guest_position[leg], self.guest_sd[leg],
                                       self.guest_slot, scale, factor, self.slots)
+        if SERPENTINE:
+            return sk.serpentine_encode_frame(
+                hosts, guests, self.level, self.step, self.scale, self.compander,
+                self._zero if offset is None else offset)
         if offset is not None:
             return sk.encode_frame_dithered(hosts, guests, self.level, self.step,
                                             self.scale, self.alpha, self.compander, offset)
@@ -266,14 +287,14 @@ class FrozenFold:
                 self.inverse, self.member, self.host_sector, self.sectors, self.law,
                 self.guest_sector, self.guest_band, self.limits[0], self.limits[1],
                 self.guest_position, self.guest_sd, self.guest_slot, self.noise, self._draw,
-                self.ride, self.detail_position))
+                self.ride, self.detail_position, SERPENTINE))
         return int(sk.choose_level(
             _f8(plane).ravel(), LOWEST, HIGHEST, RATIO, self.host_position, self.host_mean,
             self.host_sd, self.level, self.step, self.scale, self.alpha, self.compander,
             self.inverse, self.member, self.host_sector, self.sectors, self.law,
             self.guest_sector[0], self.guest_band, self.limits[0], self.limits[1],
             self.guest_position[0], self.guest_sd[0], self.guest_slot, self.noise, self._draw,
-            self.ride, self.detail_position, 1.0 if self.paired else 0.0))
+            self.ride, self.detail_position, 1.0 if self.paired else 0.0, SERPENTINE))
 
     # ------------------------------------------------------------- receiver
     def _place_guests(self, out, leg, hosts, guests, factor):
@@ -316,7 +337,13 @@ class FrozenFold:
         if 'sum' in readings:
             # Opposite offsets on the two channels cancel in their sum.
             values, sigma = readings['sum']
-            hosts, _ = self._soft(values, sigma, self.density_sum)
+            if SERPENTINE:
+                # A sum of two serpentine symbols is not one: read it plainly.
+                hosts, _ = sk.serpentine_soft_decode_frame(
+                    _f8(values), self._plain, self.step, self.scale, _f8(sigma),
+                    self.density, self.compander, self._zero, 1.0)
+            else:
+                hosts, _ = self._soft(values, sigma, self.density_sum)
             guests = {}
         elif len(readings) == 2 and phase is not None:
             raise ValueError('shared-host tables are not sent dithered')

@@ -1109,10 +1109,11 @@ def choose_level(flat, lowest, highest, ratio, host_position, host_mean, host_sd
                  level, step, scale, alpha, compander, inverse, member, host_sector,
                  sectors, law, guest_sector, guest_band, limit_low, limit_high,
                  guest_position, guest_sd, guest_slot, noise, draw, ride,
-                 detail_position, sign):
+                 detail_position, sign, serpentine=False):
     """The ladder level with the least error in a trial decode at the noise
     that packet will meet (nearest-stair decode, fixed draw).  ``ride``,
-    ``detail_position``, ``sign``: as ``normalised_hosts``."""
+    ``detail_position``, ``sign``: as ``normalised_hosts``.  ``serpentine``:
+    trial the serpentine slot mapping instead of the stock one."""
     slots = len(host_position)
     nothing = np.zeros(slots)
     best, chosen = np.inf, 0
@@ -1121,17 +1122,27 @@ def choose_level(flat, lowest, highest, ratio, host_position, host_mean, host_sd
         hosts = normalised_hosts(flat, host_position, host_mean, host_sd, factor,
                                  ride, detail_position, sign)
         sent_scale = guest_scales(
-            sector_activity(stair_values(hosts, level, step), member, host_sector, sectors),
+            sector_activity(serpentine_stair_values(hosts, level, step, nothing)
+                            if serpentine else stair_values(hosts, level, step),
+                            member, host_sector, sectors),
             law, guest_sector, guest_band, limit_low, limit_high)
         guests = normalised_guests(flat, guest_position, guest_sd, guest_slot, sent_scale,
                                    factor, slots)
-        symbols = encode_frame(hosts, guests, nothing, level, step, scale, alpha, 3, .25,
-                               compander, 1.0)
+        if serpentine:
+            symbols = serpentine_encode_frame(hosts, guests, level, step, scale,
+                                              compander, nothing)
+        else:
+            symbols = encode_frame(hosts, guests, nothing, level, step, scale, alpha, 3,
+                                   .25, compander, 1.0)
         loud = loudness(symbols)
         received = np.empty(slots)
         for i in range(slots):
             received[i] = symbols[i]+loud*noise[i]*draw[i]
-        got_hosts, got = hard_decode_frame(received, level, step, scale, alpha, inverse)
+        if serpentine:
+            got_hosts, got = serpentine_decode_frame_exact(received, level, step, scale,
+                                                           compander, nothing)
+        else:
+            got_hosts, got = hard_decode_frame(received, level, step, scale, alpha, inverse)
         got_scale = guest_scales(
             sector_activity(got_hosts, member, host_sector, sectors),
             law, guest_sector, guest_band, limit_low, limit_high)
@@ -1152,7 +1163,7 @@ def choose_paired_level(flat, lowest, highest, ratio, host_position, host_mean, 
                         level, step, scale, alpha, compander, inverse, member, host_sector,
                         sectors, law, guest_sector, guest_band, limit_low, limit_high,
                         guest_position, guest_sd, guest_slot, noise, draw, ride,
-                        detail_position):
+                        detail_position, serpentine=False):
     """One stereo ladder level, scored against both channels' actual guests.
 
     The channels share the level, not their guest coefficients. Looking only
@@ -1170,17 +1181,28 @@ def choose_paired_level(flat, lowest, highest, ratio, host_position, host_mean, 
             hosts = normalised_hosts(flat, host_position, host_mean, host_sd, factor,
                                      ride, detail_position, sign)
             sent_scale = guest_scales(
-                sector_activity(stair_values(hosts, level, step), member, host_sector, sectors),
+                sector_activity(serpentine_stair_values(hosts, level, step, nothing)
+                            if serpentine else stair_values(hosts, level, step),
+                            member, host_sector, sectors),
                 law, guest_sector[leg], guest_band, limit_low, limit_high)
             guests = normalised_guests(flat, guest_position[leg], guest_sd[leg], guest_slot,
                                        sent_scale, factor, slots)
-            symbols = encode_frame(hosts, guests, nothing, level, step, scale, alpha, 3, .25,
-                                   compander, 1.0)
+            if serpentine:
+                symbols = serpentine_encode_frame(hosts, guests, level, step, scale,
+                                                  compander, nothing)
+            else:
+                symbols = encode_frame(hosts, guests, nothing, level, step, scale, alpha,
+                                       3, .25, compander, 1.0)
             loud = loudness(symbols)
             received = np.empty(slots)
             for i in range(slots):
                 received[i] = symbols[i]+loud*noise[i]*draw[i]
-            got_hosts, got = hard_decode_frame(received, level, step, scale, alpha, inverse)
+            if serpentine:
+                got_hosts, got = serpentine_decode_frame_exact(received, level, step, scale,
+                                                               compander, nothing)
+            else:
+                got_hosts, got = hard_decode_frame(received, level, step, scale, alpha,
+                                                   inverse)
             got_scale = guest_scales(
                 sector_activity(got_hosts, member, host_sector, sectors),
                 law, guest_sector[leg], guest_band, limit_low, limit_high)
