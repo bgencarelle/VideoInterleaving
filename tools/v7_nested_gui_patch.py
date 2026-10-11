@@ -24,9 +24,26 @@ def install_receiver(live, table_path, profile=None):
     from tools.v7_nested_experiment import install
     install(live, table, set_default=False)
     from tools.v7_adaptive_serpentine import install as install_codec
-    install_codec(step_factor=0.25, exact_inverse=True,
+    from tools.v7_adaptive_pipeline import SERPENTINE_STEP_FACTOR, EXACT_INVERSE
+    install_codec(step_factor=SERPENTINE_STEP_FACTOR,
+                  exact_inverse=EXACT_INVERSE,
                   isolated_path=table)
     return table, True
+
+
+def install_sender(live, table_path='', profile=None):
+    """Install the identical adaptive tables and codec for direct CLI sends."""
+    if profile not in ('adaptive-mono-nested', 'adaptive-stereo-nested'):
+        raise ValueError('Adaptive sender setup requires an adaptive profile.')
+    table = resolve_table_path(table_path)
+    from tools.v7_nested_experiment import install
+    install(live, table, set_default=False)
+    from tools.v7_adaptive_pipeline import (
+        SERPENTINE_STEP_FACTOR, EXACT_INVERSE)
+    from tools.v7_adaptive_serpentine import install as install_codec
+    install_codec(step_factor=SERPENTINE_STEP_FACTOR,
+                  exact_inverse=EXACT_INVERSE, isolated_path=table)
+    return table
 
 
 def launcher_prefix(table_path, enabled, profile=None):
@@ -41,12 +58,13 @@ def launcher_prefix(table_path, enabled, profile=None):
         raise ValueError('Matched codec requires a nested wire profile.')
     table = resolve_table_path(table_path)
     root = ROOT
+    from tools.v7_adaptive_pipeline import SERPENTINE_STEP_FACTOR
     result = [
         str(root/'tools'/'v7_nested_experiment.py'),
         '--tables', str(table),
         '--mapping', 'serpentine',
         '--adaptive-guest-range',
-        '--step-factor', '0.25',
+        '--step-factor', str(SERPENTINE_STEP_FACTOR),
         '--exact-inverse',
     ]
     if profile in ('stereo-nested', 'adaptive-stereo-nested'):

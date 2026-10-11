@@ -35,6 +35,51 @@ import math
 import numpy as np
 from numba import njit
 
+
+@njit(cache=True)
+def adaptive_body_filtfilt(packet, taps, zi):
+    """Compiled FIR forward/backward filter with scipy's odd extension."""
+    edge = 3 * taps.size
+    n = packet.shape[0] + 2 * edge
+    channels = packet.shape[1]
+    extended = np.empty((n, channels), np.float64)
+    for c in range(channels):
+        for i in range(edge):
+            extended[i, c] = 2.0 * packet[0, c] - packet[edge-i, c]
+        for i in range(packet.shape[0]):
+            extended[edge+i, c] = packet[i, c]
+        for i in range(edge):
+            extended[edge+packet.shape[0]+i, c] = (
+                2.0 * packet[-1, c] - packet[packet.shape[0]-2-i, c])
+    extended_forward = n + taps.size - 1
+    forward = np.zeros((extended_forward, channels), np.float64)
+    for c in range(channels):
+        for i in range(extended_forward):
+            value = 0.0
+            for k in range(taps.size):
+                j = i-k
+                if j >= 0 and j < n:
+                    value += taps[k] * extended[j, c]
+            if i < taps.size-1:
+                value += zi[i] * extended[0, c]
+            forward[i, c] = value
+    backward = np.zeros((extended_forward, channels), np.float64)
+    for c in range(channels):
+        for i in range(extended_forward):
+            value = 0.0
+            for k in range(taps.size):
+                j = n-1-i+k
+                if j >= 0 and j < n:
+                    value += taps[k] * forward[j, c]
+            if i < taps.size-1:
+                value += zi[i] * forward[n-1, c]
+            backward[i, c] = value
+    result = np.empty(packet.shape, np.float32)
+    for i in range(packet.shape[0]):
+        for c in range(channels):
+            result[i, c] = backward[n-1-(edge+i), c]
+    return result
+
 LUT = 513                      # receiver conditional-mean table size
 COMPANDER = 1025               # compander table size
 B_LIMIT = 16.0                 # compander domain, guest standard deviations

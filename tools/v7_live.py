@@ -599,7 +599,8 @@ def _values(model, frame, encode_filter='nearest', brightness=1.05, gamma=1.0,
             perceptual_resize='off', perceptual_detail_strength=0.25,
             dct_encode=False, dct_options=None, return_resized=False,
             fit_aspect=None, chroma_sent_for=None, kernel_masks_for=None,
-            defer_kernel_gain=False, deferred_gains_out=None):
+            defer_kernel_gain=False, deferred_gains_out=None,
+            adaptive_source_area=False):
     """(values, aspect code[, preview]) for one source frame.
 
     With ``fit_aspect`` (a V7 aspect code: the sender's fixed aspect layout)
@@ -646,6 +647,27 @@ def _values(model, frame, encode_filter='nearest', brightness=1.05, gamma=1.0,
         # The kernel's non-linear refit goes last, after luma adjustment, so
         # nothing re-fits the luma it just cleaned.
         values = kernel_frame[0].post(values, model.coder.grids)
+    if adaptive_source_area and (selection is None or
+                                 selection.kernel.name == 'reference'):
+        # Match the validated adaptive sender preparation: positive-area
+        # integration from the actual source RGB onto the table's exact Y/Cb/Cr
+        # grids. Reference has no enhancement to preserve. Other kernels keep
+        # their complete source conversion, prefilter, gain and post pipeline;
+        # replacing their output here would silently discard the selection.
+        from tools.v7_adaptive_pipeline import source_values
+        source_rgb = getattr(frame, 'rgb', frame)
+        if isinstance(source_rgb, Image.Image):
+            source_image = source_rgb.convert('RGB')
+        else:
+            source_image = Image.fromarray(
+                np.ascontiguousarray(np.asarray(source_rgb, dtype=np.uint8)), 'RGB')
+        if brightness != 1.0:
+            source_image = ImageEnhance.Brightness(source_image).enhance(brightness)
+        if gamma != 1.0:
+            toned = np.asarray(source_image, np.float32) / 255.0
+            source_image = Image.fromarray(
+                np.uint8(np.rint(np.clip(toned, 0, 1)**(1.0/gamma)*255)), 'RGB')
+        values = source_values(np.asarray(source_image, dtype=np.uint8))
     if deferred_gains_out is not None:
         deferred_gains_out.append(deferred_gains)
     extra = tuple(out[2:])
@@ -1038,7 +1060,8 @@ def _validate_tone_controls(brightness, gamma):
 
 def _encode_pulse_frame_coeffs(model, coeffs, counter, aspect_code=0,
                                source_index=None,
-                               pilot_values=None, pulse_profile_code=1):
+                               pilot_values=None, pulse_profile_code=1,
+                               adaptive_body=False):
     """Build one folded pulse packet without an inverse/forward DCT round trip."""
     if source_index is None:
         source_index = int(counter)-1
@@ -1046,7 +1069,7 @@ def _encode_pulse_frame_coeffs(model, coeffs, counter, aspect_code=0,
         model, np.asarray(coeffs), counter, aspect_code=aspect_code,
         source_index=source_index, pilot_tones=False,
         pilot_values=pilot_values,
-        pulse_profile_code=pulse_profile_code)
+        pulse_profile_code=pulse_profile_code, adaptive_body=adaptive_body)
 
 
 def _add_coded_pilots(audio, start_counter, fold_slots, mode=None):
@@ -1317,6 +1340,14 @@ def _run_send_session(args):
         query_device_snapshot)
 
     _apply_profile_option(args)
+    if (getattr(args, 'adaptive_nested_family', False) and
+            not getattr(args, 'adaptive_nested_installed', False)):
+        from tools.v7_nested_gui_patch import install_sender
+        table = install_sender(
+            sys.modules[__name__],
+            getattr(args, 'adaptive_nested_table', ''), args.profile)
+        args.adaptive_nested_table = str(table)
+        args.adaptive_nested_installed = True
     kernel_profile = _kernel_defaults_profile(args)
     slots = _fold_slots(args)
     mono_fold_profile = bool(getattr(args, 'experimental_mono_fold', False))
@@ -1446,6 +1477,12 @@ def _run_send_session(args):
         warmup_resize((2, 2), args.perceptual_resize,
                       args.perceptual_detail_strength)
     model = _model(args.fixture, args.encode_filter)
+    if getattr(args, 'adaptive_nested_family', False):
+        from dataclasses import replace
+        from animation_modem.v7_core import SourceCoder
+        from tools.v7_adaptive_pipeline import LUMA_SHAPE, CHROMA_SHAPE
+        model = replace(model, coder=SourceCoder(
+            model.coder.shapes, grids=(LUMA_SHAPE, CHROMA_SHAPE, CHROMA_SHAPE)))
     slices_profile = getattr(args, 'slices', None)
     slice_wire = None
     if slices_profile:
@@ -1462,6 +1499,8 @@ def _run_send_session(args):
             import nested_fold
             slice_wire = nested_fold.slice_wire(
                 getattr(args, 'aspect_layout', 'auto'), send=True,
+                path=(getattr(args, 'adaptive_nested_table', None)
+                      if getattr(args, 'adaptive_nested_family', False) else None),
                 adaptive_guest_range=bool(getattr(
                     args, 'adaptive_nested_family', False)),
                 chroma_detail=bool(getattr(args,
@@ -1492,7 +1531,7 @@ def _run_send_session(args):
                 import nested_fold
                 nested_fold.enable_mono(
                     mono_wire, send=True,
-                    path=(nested_fold.TABLES if getattr(
+                    path=(getattr(args, 'adaptive_nested_table', None) if getattr(
                         args, 'adaptive_nested_family', False) else None))
                 if getattr(args, 'adaptive_nested_family', False):
                     wire_mode = ADAPTIVE_PROFILES[args.profile]['mode']
@@ -1811,7 +1850,9 @@ def _run_send_session(args):
                     kernel_masks_for=kernel_masks_for,
                     defer_kernel_gain=(fold is not None and
                                        not luma_adjusted and not clip_aware),
-                    deferred_gains_out=deferred_gains)
+                    deferred_gains_out=deferred_gains,
+                    adaptive_source_area=bool(getattr(
+                        args, 'adaptive_nested_family', False)))
                 report_kernel(frame_options.get('kernel'))
                 if image_preview_port is not None:
                     value, aspect, resized_preview = processed

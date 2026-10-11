@@ -5,13 +5,15 @@ import math
 
 import numpy as np
 from tools import v7_sk_fold as sk
+from tools.v7_adaptive_pipeline import (
+    ADAPTIVE_GUEST_FACTORS, ADAPTIVE_HOST_LEVEL)
 
 
-FACTORS = (1.0, 2.0, 4.0, 8.0, 16.0)
+FACTORS = tuple(float(factor) for factor in ADAPTIVE_GUEST_FACTORS)
 # Explicit, symmetric codebook. The remaining signature levels are reserved.
 PILOT_LEVEL_TO_FACTOR = {-3: 1.0, -2: 2.0, -1: 4.0, 0: 8.0, 1: 16.0}
 FACTOR_TO_PILOT_LEVEL = {value: key for key, value in PILOT_LEVEL_TO_FACTOR.items()}
-HOST_LEVEL = -1
+HOST_LEVEL = ADAPTIVE_HOST_LEVEL
 
 
 def select_guest_factor(flat, guest_positions, guest_sd, guest_scale, host_factor):

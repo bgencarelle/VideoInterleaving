@@ -83,7 +83,7 @@ def main():
                               'serpentine sender; receiver reads level from packets'))
     parser.add_argument('--codec-report', type=Path, default=None,
                         help='optional metadata folder for the selected codec')
-    parser.add_argument('--step-factor', type=float, default=1.0,
+    parser.add_argument('--step-factor', type=float, default=None,
                         help='matched serpentine host stair multiplier (0, 1]')
     parser.add_argument('--guest-factor', type=float, default=1.0,
                         help='matched serpentine guest normalization multiplier >=1')
@@ -98,6 +98,14 @@ def main():
     parser.add_argument('--chroma-detail', action='store_true',
                         help='enable the experimental slice chroma-detail plane at both ends')
     args, remaining = parser.parse_known_args()
+    if args.step_factor is None:
+        if args.adaptive_guest_range:
+            from tools.v7_adaptive_pipeline import (
+                SERPENTINE_STEP_FACTOR, EXACT_INVERSE)
+            args.step_factor = SERPENTINE_STEP_FACTOR
+            args.exact_inverse = EXACT_INVERSE
+        else:
+            args.step_factor = 1.0
     if args.luma_range_passes < 0 or (args.range_host_cells and args.luma_range_passes == 0):
         parser.error('--range-host-cells requires positive --luma-range-passes')
     if args.luma_range_passes and args.mapping != 'serpentine':
@@ -139,6 +147,8 @@ def main():
             install_codec(args.codec_report, step_factor=args.step_factor,
                           exact_inverse=args.exact_inverse,
                           isolated_path=args.tables)
+            options.adaptive_nested_installed = True
+            options.adaptive_nested_table = str(args.tables.resolve())
         else:
             from tools.v7_serpentine_codec import install as install_codec
             install_codec(args.codec_report, fixed_level=args.fold_level,

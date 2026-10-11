@@ -220,7 +220,8 @@ class MonoFreshFoldWire:
             mono_model, coeffs, counter, aspect_code=aspect_code,
             source_index=source_index,
             pilot_values=MONO_PILOT_VALUES,
-            pulse_profile_code=self.status_mode)
+            pulse_profile_code=self.status_mode,
+            adaptive_body=self.status_mode == 2)
         packet = tone_code.add_tone_code(
             packet, int(counter), tone_code.encode_status(self.status_mode))
         # Tone/status pilots are overlaid after pulse encoding and must also be

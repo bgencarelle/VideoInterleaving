@@ -564,7 +564,8 @@ class SliceWire:
             source_index=source_index, pilot_tones=False,
             pilot_values=MONO_PILOT_VALUES,
             pulse_profile_code=self.pulse_profile_code,
-            right_coeffs=coefficients[1] if len(carried) == 2 else None)
+            right_coeffs=coefficients[1] if len(carried) == 2 else None,
+            adaptive_body=self.pulse_profile_code == 4)
         packet = tone_code.add_tone_code(
             packet, int(counter), tone_code.encode_status(self.status_mode))
         for index, kind in enumerate(sides):

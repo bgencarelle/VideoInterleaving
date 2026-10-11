@@ -10,6 +10,7 @@ from tools.v7_nested_gui_patch import (DEFAULT_TABLE_PATH, launcher_prefix,
 from tools.v7_send_gui import OutputDevice, SenderGui, build_command
 from tools import v7_live
 from tools.v7_receiver_gui import ReceiverGui, _receive_parser
+from tools.v7_adaptive_pipeline import SERPENTINE_STEP_FACTOR, EXACT_INVERSE
 
 
 class MatchedNestedGuiPatchTests(unittest.TestCase):
@@ -37,10 +38,14 @@ class MatchedNestedGuiPatchTests(unittest.TestCase):
             mono = wrap_sender(command, tables, True, 'adaptive-mono-nested')
 
         self.assertTrue(stereo[1].endswith('v7_nested_experiment.py'))
-        for flag in ('--mapping', 'serpentine', '--adaptive-guest-range',
-                     '--step-factor', '0.25', '--exact-inverse'):
-            self.assertIn(flag, stereo)
-            self.assertIn(flag, mono)
+        for command in (stereo, mono):
+            self.assertIn('--mapping', command)
+            self.assertIn('serpentine', command)
+            self.assertIn('--adaptive-guest-range', command)
+            self.assertIn('--step-factor', command)
+            self.assertEqual(command[command.index('--step-factor') + 1],
+                             str(SERPENTINE_STEP_FACTOR))
+            self.assertEqual('--exact-inverse' in command, EXACT_INVERSE)
         self.assertIn('--chroma-detail', stereo)
         self.assertNotIn('--chroma-detail', mono)
 

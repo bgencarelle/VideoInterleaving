@@ -360,6 +360,12 @@ def shape_emission(packet, ceiling_hz, rate=REFERENCE_RATE, taps=EMIT_TAPS):
     if not ceiling_hz or ceiling_hz >= rate/2:
         return packet
     window, zi = _emission_design(int(taps), float(ceiling_hz), float(rate))
+    if int(taps) == 17 and packet.ndim == 2:
+        # The adaptive profile's bandwidth-preserving short FIR is a compiled
+        # transport kernel; keep the established scipy path for stock shaping.
+        from tools.v7_sk_fold import adaptive_body_filtfilt
+        return adaptive_body_filtfilt(
+            np.ascontiguousarray(packet, dtype=np.float32), window, zi)
     if packet.ndim == 2 and len(packet) > 3*len(window):
         return np.asarray(_fir_filtfilt(window, zi, packet), np.float32)
     return np.asarray(filtfilt(window, [1.0], packet, axis=0), np.float32)

@@ -1190,7 +1190,7 @@ def encode_pulse_frame_coeffs(model, coeffs, counter, aspect_code=0,
                               pilot_tone_gate_preamble=False,
                               pilot_values=None,
                               pulse_profile_code=1, right_coeffs=None,
-                              extra_tone_mixer=None):
+                              extra_tone_mixer=None, adaptive_body=False):
     """Pulse-frame transformed source coefficients without another DCT pass.
     ``right_coeffs``: see encode_frame_coeffs (two mono wires, one packet).
     ``extra_tone_mixer``, when supplied, adds deterministic body-RMS-scaled
@@ -1219,7 +1219,13 @@ def encode_pulse_frame_coeffs(model, coeffs, counter, aspect_code=0,
     # cannot smear the preceding image symbol across its pilots/data. The
     # header level is fixed per profile. The packet gets a final-mix limiter
     # below, after marker and timing-tone contributions are present.
-    shaped = shape_emission(out, EMISSION_EDGE_HZ, RATE)
+    adaptive_profile = bool(adaptive_body)
+    if adaptive_profile:
+        from tools.v7_adaptive_pipeline import BODY_FILTER_TAPS
+        shaped = shape_emission(out, EMISSION_EDGE_HZ, RATE,
+                                taps=BODY_FILTER_TAPS)
+    else:
+        shaped = shape_emission(out, EMISSION_EDGE_HZ, RATE)
     # Start the body at the header's peak; the final-mix limiter below then
     # brings it to exactly BODY_BELOW_EOF_DB under the lower framing peak.
     peak = float(np.max(np.abs(shaped)))
@@ -1235,7 +1241,11 @@ def encode_pulse_frame_coeffs(model, coeffs, counter, aspect_code=0,
     header_region = slice(0, PULSE.SYNC_LEN)
     metadata_region = slice(meta_start, meta_start+META_SYMBOL)
     eof_region = slice(EOF_MARKER_OFFSET, PULSE_FRAME)
-    body_ratio = 10**(-BODY_BELOW_EOF_DB/20)
+    body_below_eof_db = BODY_BELOW_EOF_DB
+    if adaptive_profile:
+        from tools.v7_adaptive_pipeline import BODY_LEVEL_BELOW_EOF_DB
+        body_below_eof_db = BODY_LEVEL_BELOW_EOF_DB
+    body_ratio = 10**(-body_below_eof_db/20)
     metadata_ratio = 10**(-METADATA_BELOW_BODY_DB/20)
 
     def assemble_unmixed(body_gain, metadata_gain):
