@@ -1294,8 +1294,8 @@ class ReceiverGui:
                 args.adaptive_nested_installed = True
                 print('V7 adaptive nested profiles: mono ID 2, stereo ID 4; '
                       'adaptive signature validation remains required; legacy profile IDs remain '
-                      'separate; serpentine adaptive_guest_range=factors[1,2,4,8,16] '
-                      f'host_level=-1 step_factor=0.25 exact_inverse chroma_detail={detail}',
+                      'separate; stock serpentine nested fold, level per picture, '
+                      f'chroma_detail={detail}',
                       flush=True)
                 with contextlib.redirect_stdout(writer), \
                         contextlib.redirect_stderr(writer):
@@ -1367,18 +1367,7 @@ class ReceiverGui:
             self.dirty = True
             return
         field.value = value
-        if field.dest == 'device':
-            self.unavailable_input_identity = None
-            try:
-                self.input_device_identity = _device_identity(value, 'input')
-            except Exception:
-                self.input_device_identity = None
-        elif field.dest == 'audio_output_device':
-            self.unavailable_output_identity = None
-            try:
-                self.audio_output_identity = _device_identity(value, 'output')
-            except Exception:
-                self.audio_output_identity = None
+        self._record_device_choice(field)
         if field.dest == 'experimental_fold':
             self._clear_other_profiles(field.dest)
         self.dropdown = None
@@ -1404,6 +1393,22 @@ class ReceiverGui:
             elif item.dest == 'experimental_mono_fold':
                 item.value = False
 
+    def _record_device_choice(self, field):
+        """The chosen input/output device becomes the remembered one, however
+        it was chosen (drop-down or arrow keys)."""
+        if field.dest == 'device':
+            self.unavailable_input_identity = None
+            try:
+                self.input_device_identity = _device_identity(field.value, 'input')
+            except Exception:
+                self.input_device_identity = None
+        elif field.dest == 'audio_output_device':
+            self.unavailable_output_identity = None
+            try:
+                self.audio_output_identity = _device_identity(field.value, 'output')
+            except Exception:
+                self.audio_output_identity = None
+
     def _adjust_field(self, field, direction):
         if self._runtime_locked(field):
             self.notice = ('Receiver options are locked while receiving; '
@@ -1423,6 +1428,7 @@ class ReceiverGui:
             except ValueError:
                 index = -1
             field.value = values[(index+direction) % len(values)]
+            self._record_device_choice(field)
             if field.dest == 'experimental_fold':
                 self._clear_other_profiles(field.dest)
             if field.label == 'Display upscaler':
@@ -1434,7 +1440,8 @@ class ReceiverGui:
             self.notice = ('Pixel display: on · the other display choices '
                            'are off while it is on')
         self._update_runtime_option(field)
-        if field.dest in ('audio_muted', 'audio_volume', 'freewheel_seconds',
+        if field.dest in ('device', 'audio_output_device', 'audio_muted',
+                          'audio_volume', 'freewheel_seconds',
                           'show_sync_warning'):
             self._persist_preferences()
         self.dirty = True
@@ -1969,6 +1976,22 @@ class ReceiverGui:
         viewport_y = fb_height-viewport_top-viewport_height
         return viewport_x, viewport_y, viewport_width, viewport_height
 
+    def _idle_message(self):
+        """What the empty picture area says while not receiving."""
+        field = next((field for field in self.fields
+                      if field.dest == 'device'), None)
+        if self.ever_started and (self.receiver_stop is not None and
+                                  self.receiver_stop.is_set()):
+            return 'Receiver stopped. Press Start to receive again.'
+        if self.ever_started:
+            reason = next((line for line in reversed(self.lines)
+                           if line and not line.startswith('[receiver thread')), '')
+            return ('Receiver stopped: '+reason[:90]) if reason else (
+                'Receiver stopped; see the information panel.')
+        if field is None or field.value is None:
+            return 'Choose an input in Setup, then press Start.'
+        return 'Press Start to receive.'
+
     def _render_info(self, image, draw, font, small, mono):
         width, height = image.size
         fullscreen_image = self._video_fullscreen()
@@ -1977,7 +2000,7 @@ class ReceiverGui:
             draw.rectangle((left, top, left+picture_w, top+picture_h),
                            fill=(14, 19, 24), outline=(49, 69, 83), width=1)
         if not fullscreen_image and self.current_frame is None and not self.started:
-            label = 'Choose an input in Setup, then press Start.'
+            label = self._idle_message()
             message_y = top+(58 if self.live_sync_warning else 18)
             draw.text((left+18, message_y), label,
                       fill=(205, 219, 229), font=font)
