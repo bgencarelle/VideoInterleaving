@@ -358,6 +358,12 @@ class FrozenFold:
         return out
 
 
+def _adaptive_host_level():
+    """The adaptive profiles' fixed host ladder level (both ends)."""
+    from tools.v7_adaptive_pipeline import ADAPTIVE_HOST_LEVEL
+    return int(ADAPTIVE_HOST_LEVEL)
+
+
 def _NOTHING(slots, _made={}):
     """A zero array of ``slots`` values (the unused second guest)."""
     if slots not in _made:
@@ -697,7 +703,7 @@ class NestedMonoCodec:
         guest_factor = 1.0
         if self.adaptive_guest_range:
             from tools.v7_adaptive_serpentine import pilot_level_for_factor
-            level = -1
+            level = _adaptive_host_level()
             guest_factor = self.fold.choose_guest_factor(plane, level, phase)
             pilot_level = pilot_level_for_factor(guest_factor)
         else:
@@ -732,7 +738,7 @@ class NestedMonoCodec:
                 return None if self._adaptive_last_full is None else self._adaptive_last_full.copy()
             self.last_nested = True
             self.recognition.dithered = bool(dithered)
-            level = -1
+            level = _adaptive_host_level()
         else:
             self.last_nested, level = self.recognition.decide(
                 score, level, stock_score, dithered)
@@ -951,9 +957,11 @@ def _slice_wire_class():
             if (self._level_layout != layout or self._level[0] is None or
                     not sk.same_values(plane, self._level[0])):
                 self._level_layout = layout
-                self._level = (plane.copy(), -1 if self.adaptive_guest_range
+                self._level = (plane.copy(), _adaptive_host_level()
+                               if self.adaptive_guest_range
                                else fold.choose_level(plane))
-            level = -1 if self.adaptive_guest_range else self._level[1]
+            level = (_adaptive_host_level() if self.adaptive_guest_range
+                     else self._level[1])
             phase = (int(self._counter) % DITHER_PHASES
                      if DITHER and self._counter is not None else None)
             guest_factor = 1.0
@@ -962,7 +970,8 @@ def _slice_wire_class():
                 from tools.v7_adaptive_serpentine import pilot_level_for_factor
                 key = (layout, self._counter)
                 if key != self._adaptive_factor_key:
-                    self._adaptive_factor = fold.choose_guest_factor(plane, -1, phase)
+                    self._adaptive_factor = fold.choose_guest_factor(
+                        plane, _adaptive_host_level(), phase)
                     self._adaptive_factor_key = key
                 guest_factor = self._adaptive_factor
                 pilot_level = pilot_level_for_factor(guest_factor)
@@ -1040,7 +1049,7 @@ def _slice_wire_class():
                         self.last_nested = False
                     if self.last_nested:
                         self.recognition.dithered = bool(best[4])
-                        level = -1
+                        level = _adaptive_host_level()
                 else:
                     # The channel whose signature reads best speaks for the packet.
                     best = max(signed, key=lambda s: max(s[0], s[3]))

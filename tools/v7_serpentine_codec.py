@@ -32,13 +32,16 @@ def install(out=None, fixed_level=None, step_factor=1.0, guest_factor=1.0,
     import nested_fold as nf
 
     step_factor, guest_factor = float(step_factor), float(guest_factor)
-    if not math.isfinite(step_factor) or not 0 < step_factor <= 1:
-        raise ValueError('step factor must be finite and in (0, 1]')
+    if not math.isfinite(step_factor) or not 0 < step_factor <= 4:
+        raise ValueError('step factor must be finite and in (0, 4]')
     if not math.isfinite(guest_factor) or guest_factor < 1:
         raise ValueError('guest factor must be finite and at least 1')
     adaptive_guest_range = bool(adaptive_guest_range)
-    if adaptive_guest_range and (fixed_level != -1 or guest_factor != 1.0):
-        raise ValueError('adaptive guest range fixes host level -1 and static guest factor 1')
+    from tools.v7_adaptive_pipeline import ADAPTIVE_HOST_LEVEL
+    host_level = int(ADAPTIVE_HOST_LEVEL)
+    if adaptive_guest_range and (fixed_level != host_level or guest_factor != 1.0):
+        raise ValueError(f'adaptive guest range fixes host level {host_level} '
+                         'and static guest factor 1')
     configuration = (fixed_level, step_factor, guest_factor, bool(exact_inverse),
                      adaptive_guest_range)
     isolated_key = None
@@ -165,8 +168,8 @@ def install(out=None, fixed_level=None, step_factor=1.0, guest_factor=1.0,
         return sk.serpentine_stair_values(_f8(hosts), self.level, self.step, off)
 
     def encode(self, plane, index, leg=0, phase=None, guest_factor=1.0):
-        if adaptive_guest_range and int(index) != -1:
-            raise ValueError('adaptive guest range fixes the host ladder at level -1')
+        if adaptive_guest_range and int(index) != host_level:
+            raise ValueError(f'adaptive guest range fixes the host ladder at level {host_level}')
         hosts, flat, factor = self._normalised(plane, index, leg)
         offset = self._serpentine_zero if phase is None else self.offset(phase, leg)
         activity = self._activity(self._stairs(hosts, offset))
@@ -234,8 +237,8 @@ def install(out=None, fixed_level=None, step_factor=1.0, guest_factor=1.0,
 
     if adaptive_guest_range:
         def choose_guest_factor(self, plane, index, phase=None):
-            if int(index) != -1:
-                raise ValueError('adaptive guest range fixes the host ladder at level -1')
+            if int(index) != host_level:
+                raise ValueError(f'adaptive guest range fixes the host ladder at level {host_level}')
             flat = _f8(plane).ravel()
             host_factor = nf.RATIO**int(index)
             peak = 0.0
@@ -270,8 +273,8 @@ def install(out=None, fixed_level=None, step_factor=1.0, guest_factor=1.0,
 
     def decode(self, readings, index, phase=None, averaged=False, soft=None,
                guest_factor=1.0):
-        if adaptive_guest_range and int(index) != -1:
-            raise ValueError('adaptive guest range fixes the host ladder at level -1')
+        if adaptive_guest_range and int(index) != host_level:
+            raise ValueError(f'adaptive guest range fixes the host ladder at level {host_level}')
         if not self.paired and len(readings) > 1 and 'sum' not in readings:
             raise ValueError('serpentine mono pilot does not support paired-host readings')
         if not adaptive_guest_range:
