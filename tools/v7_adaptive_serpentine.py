@@ -86,7 +86,8 @@ def pilot_pattern(level, hadamard, dithered=False):
     return sk.adaptive_pilot_pattern(hadamard, row, bool(dithered))
 
 
-def install(out=None, step_factor=1.0, exact_inverse=False):
+def install(out=None, step_factor=1.0, exact_inverse=False,
+            isolated_path=None):
     """Install live adaptive serpentine hooks with host level fixed at -1."""
     import sys
     from pathlib import Path
@@ -101,7 +102,10 @@ def install(out=None, step_factor=1.0, exact_inverse=False):
     host_factor_for_ratio(nf.RATIO)
     from tools.v7_serpentine_codec import install as install_serpentine
 
-    return install_serpentine(out=out, fixed_level=HOST_LEVEL,
-                              step_factor=step_factor, guest_factor=1.0,
-                              exact_inverse=exact_inverse,
-                              adaptive_guest_range=True)
+    options = dict(out=out, fixed_level=HOST_LEVEL,
+                   step_factor=step_factor, guest_factor=1.0,
+                   exact_inverse=exact_inverse,
+                   adaptive_guest_range=True)
+    if isolated_path is not None:
+        options['isolated_path'] = isolated_path
+    return install_serpentine(**options)

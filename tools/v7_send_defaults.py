@@ -10,7 +10,9 @@ DEFAULT_PROFILE = 'aspect-fold-500'
 
 # Nested-fold modes ride on these wires and share their kernel settings.
 NESTED_BASE_PROFILES = {'aspect-mono-nested': 'aspect-mono-500',
-                        'stereo-nested': 'stereo-slices'}
+                        'stereo-nested': 'stereo-slices',
+                        'adaptive-mono-nested': 'aspect-mono-500',
+                        'adaptive-stereo-nested': 'stereo-slices'}
 
 # Picture encode: straight from the source to the wire's DCT grid, with the
 # luma re-fit.
@@ -29,6 +31,7 @@ PROFILE_DEFAULT_KERNELS = {
     # its base wire's kernel, the stereo fold with this one.  The stock
     # stereo-slices wire gains nothing from either and stays on the reference.
     'stereo-nested': 'upscale_precomp',
+    'adaptive-stereo-nested': 'upscale_precomp',
 }
 
 

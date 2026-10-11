@@ -24,6 +24,9 @@ PROFILE_DEFAULTS = {
     'stereo-nested': {'upscaler': 0, 'strength': 1.0, 'noise': 0.15,
                       'max_gain': 2.2, 'tame': 6, 'luma_mix': 1.0,
                       'chroma_mix': 1.0},
+    'adaptive-stereo-nested': {'upscaler': 0, 'strength': 1.0, 'noise': 0.15,
+                               'max_gain': 2.2, 'tame': 6, 'luma_mix': 1.0,
+                               'chroma_mix': 1.0},
 }
 
 _X = np.linspace(-2.0, 2.0, 1025)

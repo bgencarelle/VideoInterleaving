@@ -1,6 +1,5 @@
 """Matched GUI launch settings for the opt-in nested codec experiment."""
 from pathlib import Path
-import os
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_TABLE_PATH = Path('test_modem_v7/experimental_tables/chroma50.npz')
@@ -19,21 +18,15 @@ def resolve_table_path(table_path=''):
     return table.resolve()
 
 
-def install_receiver(live, table_path, profile):
-    """Install the same matched codec used by the receiver GUI Start action."""
-    if profile not in ('aspect-mono-nested', 'stereo-nested'):
-        raise ValueError('Matched codec test requires a nested wire profile.')
+def install_receiver(live, table_path, profile=None):
+    """Prepare both matched families; packet ID and metadata select the wire."""
     table = resolve_table_path(table_path)
     from tools.v7_nested_experiment import install
-    install(live, table)
+    install(live, table, set_default=False)
     from tools.v7_adaptive_serpentine import install as install_codec
-    install_codec(step_factor=0.25, exact_inverse=True)
-    detail = profile == 'stereo-nested'
-    if detail:
-        os.environ['SLICE_CHROMA_DETAIL'] = '1'
-    else:
-        os.environ.pop('SLICE_CHROMA_DETAIL', None)
-    return table, detail
+    install_codec(step_factor=0.25, exact_inverse=True,
+                  isolated_path=table)
+    return table, True
 
 
 def launcher_prefix(table_path, enabled, profile=None):
@@ -43,8 +36,9 @@ def launcher_prefix(table_path, enabled, profile=None):
     """
     if not enabled:
         return []
-    if profile not in ('aspect-mono-nested', 'stereo-nested'):
-        raise ValueError('Matched codec test requires a nested wire profile.')
+    if profile not in ('aspect-mono-nested', 'stereo-nested',
+                       'adaptive-mono-nested', 'adaptive-stereo-nested'):
+        raise ValueError('Matched codec requires a nested wire profile.')
     table = resolve_table_path(table_path)
     root = ROOT
     result = [
@@ -55,7 +49,7 @@ def launcher_prefix(table_path, enabled, profile=None):
         '--step-factor', '0.25',
         '--exact-inverse',
     ]
-    if profile == 'stereo-nested':
+    if profile in ('stereo-nested', 'adaptive-stereo-nested'):
         result.append('--chroma-detail')
     return result
 

@@ -19,7 +19,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 
-def install(live, tables):
+def install(live, tables, set_default=True):
     """Select explicit tables and adapt source analysis to their plane grids."""
     import numpy as np
     live._ensure_test_modem_path()
@@ -41,16 +41,21 @@ def install(live, tables):
     if len(chroma_shapes) > 1:
         raise ValueError('an experiment needs one consistent chroma grid in its tables')
     chroma = chroma_shapes.pop() if chroma_shapes else (48, 40)
-    nested_fold.TABLES = Path(tables).resolve()
+    if set_default:
+        nested_fold.TABLES = Path(tables).resolve()
     grids = (shape, chroma, chroma)
-    if shape != (96, 80) or chroma != (48, 40):
+    if set_default and (shape != (96, 80) or chroma != (48, 40)):
         models = {}
         def source_model(model):
-            if id(model) not in models:
-                models[id(model)] = replace(model, coder=SourceCoder(
+            key = (id(model), grids)
+            if key not in models:
+                models[key] = replace(model, coder=SourceCoder(
                     model.coder.shapes, grids=grids))
-            return models[id(model)]
-        real_values, real_warm = live._values, live._warm_kernels
+            return models[key]
+        real_values = getattr(live, '_v7_nested_base_values', live._values)
+        real_warm = getattr(live, '_v7_nested_base_warm', live._warm_kernels)
+        live._v7_nested_base_values = real_values
+        live._v7_nested_base_warm = real_warm
         def values(model, *args, **kwargs):
             return real_values(source_model(model), *args, **kwargs)
         def warm(model, *args, **kwargs):
@@ -127,7 +132,8 @@ def main():
         if args.adaptive_guest_range:
             from tools.v7_adaptive_serpentine import install as install_codec
             install_codec(args.codec_report, step_factor=args.step_factor,
-                          exact_inverse=args.exact_inverse)
+                          exact_inverse=args.exact_inverse,
+                          isolated_path=args.tables)
         else:
             from tools.v7_serpentine_codec import install as install_codec
             install_codec(args.codec_report, fixed_level=args.fold_level,

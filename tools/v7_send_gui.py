@@ -37,19 +37,14 @@ from tools.v7_send_defaults import (DEFAULT_PROFILE, NESTED_BASE_PROFILES,
                                     PROFILE_DEFAULT_KERNELS, SENDER_DEFAULTS,
                                     default_kernel_for_profile)
 from tools.v7_nested_gui_patch import DEFAULT_TABLE_PATH
+from tools.v7_profile_registry import SEND_PROFILES as PROFILE_CHOICES
 
 
-# The profiles on offer: the two aspect profiles and the nested fold that is
-# being tested against each.  Fold 500, mono colour Fold 500 and stereo
+# The selectable profiles: the legacy-compatible aspect wires and the matched
+# adaptive nested mono/stereo pair. Fold 500, mono colour Fold 500 and stereo
 # slices are deprecated and no longer selectable (DEPRECATED_PROFILES); their
 # wires remain in the code because the nested folds ride on them and the
 # receiver still reads them.
-PROFILE_CHOICES = (
-    ('Aspect Fold 500 · stereo · recommended', 'aspect-fold-500'),
-    ('Mono video · aspect colour Fold 500', 'aspect-mono-500'),
-    ('Mono video · nested fold · more detail · experimental', 'aspect-mono-nested'),
-    ('Stereo redundant · nested fold · experimental', 'stereo-nested'),
-)
 DEPRECATED_PROFILES = ('fold-500', 'mono-fold-500', 'mono-colour-500', 'stereo-slices')
 
 
@@ -60,12 +55,15 @@ def valid_profiles():
     allowed = os.environ.get('V7_ALLOW_DEPRECATED_PROFILES', '') not in ('', '0')
     return tuple(value for _label, value in PROFILE_CHOICES)+(
         DEPRECATED_PROFILES if allowed else ())
-MONO_PROFILES = ('mono-colour-500', 'aspect-mono-500', 'aspect-mono-nested')
+MONO_PROFILES = ('mono-colour-500', 'aspect-mono-500', 'aspect-mono-nested',
+                 'adaptive-mono-nested')
 FOLDED_PROFILES = ('fold-500', 'mono-colour-500', 'aspect-fold-500',
                    'aspect-mono-500', 'stereo-slices', 'aspect-mono-nested',
-                   'stereo-nested')
+                   'stereo-nested', 'adaptive-mono-nested',
+                   'adaptive-stereo-nested')
 ASPECT_PROFILES = ('aspect-fold-500', 'aspect-mono-500', 'stereo-slices',
-                   'aspect-mono-nested', 'stereo-nested')
+                   'aspect-mono-nested', 'stereo-nested',
+                   'adaptive-mono-nested', 'adaptive-stereo-nested')
 ASPECT_LAYOUT_CHOICES = (
     ('Auto · source aspect', 'auto'),
     ('1:1', '1:1'), ('4:3', '4:3'), ('3:2', '3:2'), ('16:9', '16:9'),
@@ -128,7 +126,7 @@ DCT_SHARPEN_CHOICES = (
 DCT_PROFILES = FOLDED_PROFILES
 BOOL_FIELDS = ('video_live', 'dct_encode',
                'luma_adjust', 'luma_adjust_linear', 'pixel_encode',
-               'clip_aware', 'matched_nested_test')
+               'clip_aware')
 # Settings that take effect while the sender runs (the sender reads them
 # from its control pipe); everything else needs a stop and a new Start.
 LIVE_FIELDS = ('brightness', 'gamma')
@@ -244,13 +242,6 @@ FIELD_HELP = {
     'aspect_layout': ('Which coefficients the aspect profiles send: matched '
                       'to this picture shape. Not signalled; set the receiver '
                       'to the same layout.'),
-    'matched_nested_test': ('Opt-in matched experiment: serpentine mapping, adaptive '
-                            'guest range, quarter-step stairs and exact inverse. '
-                            'Stereo nested also enables chroma detail. It turns '
-                            'Luma adjustment off to match the validated chroma50 '
-                            'source setup. Enable both endpoints with the same '
-                            'table file. Test-only; not a production default.'),
-    'nested_test_tables': 'Experimental nested table .npz; select the same file at both ends.',
 }
 FIELD_LABELS = {
     'device': 'Audio output device',
@@ -287,8 +278,6 @@ FIELD_LABELS = {
     'dct_preshrink': 'DCT pre-shrink',
     'dct_chroma_gain': 'Chroma gain',
     'aspect_layout': 'Aspect layout',
-    'matched_nested_test': 'Matched nested test patch · opt-in',
-    'nested_test_tables': 'Matched nested tables (.npz)',
 }
 # DCT kernels: one file each in dct_kernels/ (see the README there),
 # read when the GUI starts and again on R. The kernel's own parameters are
@@ -565,6 +554,11 @@ def _restore_sender_settings(target, saved):
         if key not in saved:
             continue
         value = saved[key]
+        if key == 'profile' and saved.get('matched_nested_test'):
+            value = {
+                'aspect-mono-nested': 'adaptive-mono-nested',
+                'stereo-nested': 'adaptive-stereo-nested',
+            }.get(value, value)
         if key == 'screen_target':
             if isinstance(value, dict):
                 try:
@@ -1127,6 +1121,9 @@ def validate_settings(settings, devices, sd_module=None, audio_devices=()):
     source = settings.get('source')
     if source not in dict(SOURCE_CHOICES).values():
         raise ValueError('Choose a capture source before starting.')
+    profile = settings.get('profile')
+    if profile not in valid_profiles():
+        raise ValueError('Choose a supported wire profile.')
     channels = 2
     if device.channels < channels:
         raise ValueError(
@@ -1147,9 +1144,6 @@ def validate_settings(settings, devices, sd_module=None, audio_devices=()):
         raise ValueError(
             f'{device.name} cannot open {channels} channel(s) at {sample_text}: {exc}') from exc
 
-    profile = settings.get('profile')
-    if profile not in valid_profiles():
-        raise ValueError('Choose a supported wire profile.')
     mono_profile = profile in MONO_PROFILES
     mono_video_side = (settings.get('mono_video_side', 'right')
                        if mono_profile else 'right')
@@ -1382,7 +1376,9 @@ def validate_settings(settings, devices, sd_module=None, audio_devices=()):
         'perceptual_detail_strength': perceptual_strength,
         'dct_encode': dct_encode,
         'clip_aware': bool(settings.get('clip_aware', False)),
-        'luma_adjust': bool(settings.get('luma_adjust', True)),
+        'luma_adjust': (bool(settings.get('luma_adjust', True)) and
+                        profile not in ('adaptive-mono-nested',
+                                        'adaptive-stereo-nested')),
         'luma_adjust_linear': bool(settings.get('luma_adjust_linear', False)),
         'pixel_encode': bool(settings.get('pixel_encode', False)),
         'pixel_detail': pixel_detail,
@@ -1542,9 +1538,12 @@ def build_command(settings, devices, sd_module=None, python=None,
         command.extend(('--device-name', checked['device'].name))
         if checked['device'].hostapi:
             command.extend(('--device-hostapi', checked['device'].hostapi))
-    if settings.get('matched_nested_test'):
-        if checked['profile'] not in ('aspect-mono-nested', 'stereo-nested'):
-            raise ValueError('The matched codec test requires a nested profile.')
+    if checked['profile'] in ('adaptive-mono-nested',
+                               'adaptive-stereo-nested'):
+        if checked['profile'] not in ('adaptive-mono-nested',
+                                      'adaptive-stereo-nested',
+                                      'aspect-mono-nested', 'stereo-nested'):
+            raise ValueError('The matched codec requires a nested profile.')
         from tools.v7_nested_gui_patch import wrap_sender
         command = wrap_sender(command, settings.get('nested_test_tables'), True,
                               checked['profile'])
@@ -1667,8 +1666,6 @@ class SenderGui:
         ('Source', ('source', 'capture_fps', 'preview', 'video_source',
                     'video_live', 'camera', 'screen_target')),
         ('Wire profile', ('profile', 'aspect_layout', 'mono_video_side')),
-        ('Experimental matched codec (both ends)',
-         ('matched_nested_test', 'nested_test_tables')),
         ('Source audio', ('source_audio', 'source_audio_device',
                           'source_audio_input_side', 'source_audio_gain',
                           'source_audio_delay_ms')),
@@ -2851,16 +2848,6 @@ class SenderGui:
                 self.settings['perceptual_resize'] = 'off'
             if value not in DCT_PROFILES:
                 self.settings['dct_encode'] = False
-        elif dest == 'matched_nested_test' and value:
-            # Experimental chroma grids do not yet have the sent-mask geometry
-            # required by the GUI's luma/chroma re-fit. This is also the source
-            # setting used by the validated chroma50 live candidate.
-            self.settings['luma_adjust'] = False
-        elif (dest == 'luma_adjust' and value and
-              self.settings.get('matched_nested_test')):
-            self.settings['luma_adjust'] = False
-            message = ('Luma adjustment stays off for the matched chroma50 '
-                       'test configuration.')
         elif dest == 'dct_encode' and value:
             # The direct encode replaces the resize the downscaler shapes.
             self.settings['perceptual_resize'] = 'off'

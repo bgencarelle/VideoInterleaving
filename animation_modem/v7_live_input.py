@@ -215,6 +215,14 @@ class LiveInput:
     def buffered(self):
         return sum(len(block) for block in self._blocks)
 
+    def audio_snapshot(self):
+        """Return the current rolling samples without advancing packet state."""
+        if not self._blocks:
+            return None
+        if len(self._blocks) == 1:
+            return self._blocks[0]
+        return np.concatenate(self._blocks)
+
     def reset(self):
         """Discontinuity (dropped input block): never stitch across it."""
         self._blocks.clear()

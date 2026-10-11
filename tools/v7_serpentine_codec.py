@@ -16,7 +16,8 @@ _ADAPTIVE = threading.local()
 
 
 def install(out=None, fixed_level=None, step_factor=1.0, guest_factor=1.0,
-            exact_inverse=False, adaptive_guest_range=False):
+            exact_inverse=False, adaptive_guest_range=False,
+            isolated_path=None):
     """Install codec; optionally write metadata and pin sender level."""
     import sys
     repo = Path(__file__).resolve().parents[1]
@@ -35,10 +36,19 @@ def install(out=None, fixed_level=None, step_factor=1.0, guest_factor=1.0,
         raise ValueError('adaptive guest range fixes host level -1 and static guest factor 1')
     configuration = (fixed_level, step_factor, guest_factor, bool(exact_inverse),
                      adaptive_guest_range)
+    isolated_key = None
+    if isolated_path is not None:
+        isolated_key = str(Path(isolated_path).resolve())
+        registry = getattr(nf, '_isolated_serpentine_registry', {})
+        previous = registry.get(isolated_key)
+        if previous is not None:
+            if previous != configuration:
+                raise ValueError('isolated table already has another serpentine configuration')
+            return nf
 
-    if nf._cache:
+    if isolated_path is None and nf._cache:
         raise RuntimeError('install serpentine probe before any target fold is cached')
-    if getattr(nf, '_serpentine_codec_installed', False):
+    if isolated_path is None and getattr(nf, '_serpentine_codec_installed', False):
         if nf._serpentine_codec_configuration != configuration:
             raise ValueError('serpentine codec is already installed with different parameters')
         return nf
@@ -92,7 +102,11 @@ def install(out=None, fixed_level=None, step_factor=1.0, guest_factor=1.0,
         sk.adaptive_guest_factor_from_peak(peak)
         sk.adaptive_pilot_pattern(nf.HADAMARD, 1, False)
 
-    original_init = nf.FrozenFold.__init__
+    if isolated_path is None:
+        fold_class = nf.FrozenFold
+    else:
+        fold_class = type('SerpentineFrozenFold', (nf.FrozenFold,), {})
+    original_init = fold_class.__init__
 
     def init(self, arrays):
         # Private setup arrays: keep the file and caller-owned tables intact.
@@ -199,12 +213,12 @@ def install(out=None, fixed_level=None, step_factor=1.0, guest_factor=1.0,
                 self._place_guests(out_plane, leg, hosts, guests, factor)
         return out_plane
 
-    nf.FrozenFold.__init__ = init
-    nf.FrozenFold._stairs = stairs
-    nf.FrozenFold.encode = encode
-    nf.FrozenFold._soft = soft
-    nf.FrozenFold.soften = soften
-    nf.FrozenFold._decode_paired = decode_paired
+    fold_class.__init__ = init
+    fold_class._stairs = stairs
+    fold_class.encode = encode
+    fold_class._soft = soft
+    fold_class.soften = soften
+    fold_class._decode_paired = decode_paired
 
     if adaptive_guest_range:
         def choose_guest_factor(self, plane, index, phase=None):
@@ -229,18 +243,18 @@ def install(out=None, fixed_level=None, step_factor=1.0, guest_factor=1.0,
                 raise OverflowError('frame exceeds adaptive guest factor 16')
             return factor
 
-        nf.FrozenFold.choose_guest_factor = choose_guest_factor
+        fold_class.choose_guest_factor = choose_guest_factor
 
-        original_place_guests = nf.FrozenFold._place_guests
+        original_place_guests = fold_class._place_guests
 
         def place_guests(self, out_plane, leg, hosts, guests, factor):
             guest_factor = getattr(_ADAPTIVE, 'guest_factor', 1.0)
             return original_place_guests(self, out_plane, leg, hosts, guests,
                                          factor*guest_factor)
 
-        nf.FrozenFold._place_guests = place_guests
+        fold_class._place_guests = place_guests
 
-    original_decode = nf.FrozenFold.decode
+    original_decode = fold_class.decode
 
     def decode(self, readings, index, phase=None, averaged=False, soft=None,
                guest_factor=1.0):
@@ -257,7 +271,7 @@ def install(out=None, fixed_level=None, step_factor=1.0, guest_factor=1.0,
         finally:
             _ADAPTIVE.guest_factor = previous
 
-    nf.FrozenFold.decode = decode
+    fold_class.decode = decode
 
     def choose_level(self, plane):
         del plane
@@ -265,7 +279,13 @@ def install(out=None, fixed_level=None, step_factor=1.0, guest_factor=1.0,
             return int(fixed_level)
         raise RuntimeError('serpentine pilot requires the matched harness to pin a level')
 
-    nf.FrozenFold.choose_level = choose_level
+    fold_class.choose_level = choose_level
+    if isolated_path is not None:
+        nf.register_fold_class(isolated_path, fold_class)
+        registry = getattr(nf, '_isolated_serpentine_registry', {})
+        registry[isolated_key] = configuration
+        nf._isolated_serpentine_registry = registry
+        return nf
     nf._serpentine_codec_installed = True
     nf._serpentine_codec_configuration = configuration
     nf.ADAPTIVE_GUEST_RANGE = adaptive_guest_range

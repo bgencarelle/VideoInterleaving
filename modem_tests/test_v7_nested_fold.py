@@ -653,6 +653,9 @@ class LiveReceiverReverseTests(unittest.TestCase):
         audio = np.concatenate([np.zeros((4800, 2), np.float32), np.asarray(audio, np.float32),
                                 np.zeros((9600, 2), np.float32)])
         stop_event, frames = threading.Event(), []
+        initial_frame = v7_live.FRAME_BUFFER.snapshot()
+        initial_generation = (0 if initial_frame is None else
+                              initial_frame.generation)
 
         class SoundDevice:
             devices = [{'name': 'in', 'hostapi': 0, 'max_input_channels': 2,
@@ -672,15 +675,36 @@ class LiveReceiverReverseTests(unittest.TestCase):
 
                 def start(self):
                     def feed():
-                        callback, seen = self.kwargs['callback'], 0
+                        callback = self.kwargs['callback']
+                        seen = initial_generation
                         for start in range(0, len(audio), 1024):
-                            callback(audio[start:start+1024], 1024, None, None)
-                            time.sleep(.012)
+                            block = audio[start:start+1024]
+                            callback(block, len(block), None, None)
                             frame = v7_live.FRAME_BUFFER.snapshot()
                             if frame is not None and frame.generation != seen:
                                 seen = frame.generation
                                 frames.append(np.asarray(frame.values, float)[:LUMA])
-                        time.sleep(.4)
+                            # Model a 48-kHz callback clock. Feeding faster
+                            # than real time can overflow the receiver queue
+                            # and make reversed captures lose different blocks.
+                            time.sleep(len(block)/48000.0)
+                        # Let the receiver consume all queued blocks and publish
+                        # the final complete packets. Stop on an actual quiet
+                        # publication interval, with a bounded wait for errors.
+                        deadline = time.monotonic()+5.0
+                        stable_since = None
+                        while time.monotonic() < deadline:
+                            frame = v7_live.FRAME_BUFFER.snapshot()
+                            if frame is not None and frame.generation != seen:
+                                seen = frame.generation
+                                frames.append(np.asarray(frame.values, float)[:LUMA])
+                                stable_since = time.monotonic()
+                            elif stable_since is None and seen > initial_generation:
+                                stable_since = time.monotonic()
+                            elif (stable_since is not None and
+                                  time.monotonic()-stable_since >= .5):
+                                break
+                            time.sleep(.01)
                         stop_event.set()
                     threading.Thread(target=feed, daemon=True).start()
 
@@ -713,8 +737,10 @@ class LiveReceiverReverseTests(unittest.TestCase):
         single = error(self._receive(one[::-1].copy()))
         # Reversed in memory and read as usual, both channels joined: the
         # forward picture, and clearly better than one channel alone.
-        self.assertLess(abs(backward-forward), .05*forward)
-        self.assertLess(backward, .95*single)
+        self.assertLess(abs(backward-forward), .05*forward,
+                        (forward, backward, single))
+        self.assertLess(backward, .95*single,
+                        (forward, backward, single))
 
 
 class SenderTests(unittest.TestCase):
@@ -793,15 +819,15 @@ class SenderTests(unittest.TestCase):
     def test_the_sender_gui_offers_both_options(self):
         from tools import v7_send_gui as gui
         names = dict((value, label) for label, value in gui.PROFILE_CHOICES)
-        for profile in ('aspect-mono-nested', 'stereo-nested'):
+        for profile in ('adaptive-mono-nested', 'adaptive-stereo-nested'):
             self.assertIn(profile, names)
-            self.assertIn('experimental', names[profile])
+            self.assertIn('Adaptive nested', names[profile])
             self.assertIn(profile, gui.FOLDED_PROFILES)
             self.assertIn(profile, gui.ASPECT_PROFILES)
             # Each fold's default downscale kernel is the benchmark winner
             # through its own chain; the sender CLI agrees with the GUI.
-            expected = {'aspect-mono-nested': 'viewer_solve',
-                        'stereo-nested': 'upscale_precomp'}[profile]
+            expected = {'adaptive-mono-nested': 'viewer_solve',
+                        'adaptive-stereo-nested': 'upscale_precomp'}[profile]
             self.assertEqual(gui.default_kernel_for_profile(profile), expected)
             self.assertEqual(v7_live._default_kernel_for_profile(profile), expected)
             # Kernel values shown, saved and sent are the base wire's.
@@ -809,8 +835,8 @@ class SenderTests(unittest.TestCase):
                 self.assertEqual(
                     gui._kernel_values({}, gui.kernel_registry().get(kernel), profile),
                     gui.kernel_registry().get(kernel).defaults(gui.NESTED_BASE_PROFILES[profile]))
-        self.assertIn('aspect-mono-nested', gui.MONO_PROFILES)
-        self.assertNotIn('stereo-nested', gui.MONO_PROFILES)
+        self.assertIn('adaptive-mono-nested', gui.MONO_PROFILES)
+        self.assertNotIn('adaptive-stereo-nested', gui.MONO_PROFILES)
 
 
 if __name__ == '__main__':

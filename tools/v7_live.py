@@ -1107,8 +1107,10 @@ def _mix_mono_video_audio(modem, frames, source, delay, video_side,
 # Sender profiles on offer.  mono-fold-500, fold-500, mono-colour-500 and
 # stereo-slices are deprecated: no longer valid choices, though their wires
 # stay (the nested folds ride on them and the receiver still reads them).
-SEND_PROFILES = ('aspect-fold-500', 'aspect-mono-500',
-                 'aspect-mono-nested', 'stereo-nested')
+from tools.v7_profile_registry import (ADAPTIVE_NESTED_MODE,
+                                       SEND_PROFILES as PROFILE_REGISTRY)
+
+SEND_PROFILES = tuple(value for _label, value in PROFILE_REGISTRY)
 DEPRECATED_SEND_PROFILES = ('mono-fold-500', 'fold-500', 'mono-colour-500',
                             'stereo-slices')
 
@@ -1154,14 +1156,23 @@ def _apply_profile_option(args):
     elif profile == 'stereo-slices':
         args.slices = 'stereo'
     elif profile == 'aspect-mono-nested':
-        # aspect-mono-500's wire with the nested luma fold (experimental).
+        # Compatibility alias for earlier saved GUI settings.
         args.experimental_mono_fold = True
         args.aspect_mono = True
         args.nested_fold = True
+    elif profile == 'adaptive-mono-nested':
+        args.experimental_mono_fold = True
+        args.aspect_mono = True
+        args.nested_fold = True
+        args.adaptive_nested_family = True
     elif profile == 'stereo-nested':
-        # stereo-slices' wire, each channel a nested-fold mono picture.
+        # Compatibility alias for earlier saved GUI settings.
         args.slices = 'stereo'
         args.nested_fold = True
+    elif profile == 'adaptive-stereo-nested':
+        args.slices = 'stereo'
+        args.nested_fold = True
+        args.adaptive_nested_family = True
 
 
 def _kernel_defaults_profile(args):
@@ -1442,7 +1453,14 @@ def _run_send_session(args):
         if getattr(args, 'nested_fold', False):
             import nested_fold
             slice_wire = nested_fold.slice_wire(
-                getattr(args, 'aspect_layout', 'auto'), send=True)
+                getattr(args, 'aspect_layout', 'auto'), send=True,
+                adaptive_guest_range=bool(getattr(
+                    args, 'adaptive_nested_family', False)),
+                chroma_detail=bool(getattr(args,
+                                           'adaptive_nested_family', False)))
+            if getattr(args, 'adaptive_nested_family', False):
+                slice_wire.status_mode = ADAPTIVE_NESTED_MODE
+                slice_wire.pulse_profile_code = ADAPTIVE_NESTED_MODE
         # Build every layout model the sender may need before audio starts.
         for layout in ((slice_wire.layout,) if slice_wire.layout != 'auto' else
                        tuple(dict.fromkeys(
@@ -1463,7 +1481,13 @@ def _run_send_session(args):
                 layout=getattr(args, 'aspect_layout', 'auto'))
             if getattr(args, 'nested_fold', False):
                 import nested_fold
-                nested_fold.enable_mono(mono_wire, send=True)
+                nested_fold.enable_mono(
+                    mono_wire, send=True,
+                    path=(nested_fold.TABLES if getattr(
+                        args, 'adaptive_nested_family', False) else None))
+                if getattr(args, 'adaptive_nested_family', False):
+                    mono_wire.status_mode = ADAPTIVE_NESTED_MODE
+                    mono_wire.pulse_profile_code = ADAPTIVE_NESTED_MODE
         else:
             wire_class = (MonoColourFoldWire
                           if getattr(args, 'experimental_mono_colour', False)
@@ -2331,6 +2355,7 @@ class _ProfileStatusProbe:
         self.side_index = int(side_index)
         self.last_position = None
         self.audio = None
+        self._audio_windows = []
 
     def add(self, block):
         self.input.add(block)
@@ -2339,6 +2364,43 @@ class _ProfileStatusProbe:
         self.input.reset()
         self.last_position = None
         self.audio = None
+        self._audio_windows.clear()
+
+    def window_for(self, absolute_position):
+        """Recent unconsumed probe audio covering a paired packet position."""
+        absolute_position = float(absolute_position)
+        windows = sorted(self._audio_windows,
+                         key=lambda item: (item[0], item[0]+len(item[1])))
+        starts = [index for index, (origin, audio, _hits) in enumerate(windows)
+                  if origin <= absolute_position < origin+len(audio)]
+        for start_index in starts:
+            origin, audio, hits = windows[start_index]
+            end = origin+len(audio)
+            chunks = [audio]
+            merged_hits = list(hits)
+            # The probe can consume a packet between the primary and paired
+            # decoders. Adjacent rolling windows overlap; join that overlap so
+            # the companion packet retains its EOF samples as well as header.
+            for next_origin, next_audio, next_hits in windows[start_index+1:]:
+                next_end = next_origin+len(next_audio)
+                if next_origin > end or next_end <= end:
+                    continue
+                overlap = end-next_origin
+                chunks.append(next_audio[max(0, overlap):])
+                merged_hits.extend(next_hits)
+                end = next_end
+            audio = chunks[0] if len(chunks) == 1 else np.concatenate(chunks)
+            relative_hits = tuple((position-origin, scale, confidence, direction)
+                                  for position, scale, confidence, direction in
+                                  dict.fromkeys(merged_hits))
+            return audio, origin, relative_hits
+        audio = self.input.audio_snapshot()
+        if audio is None:
+            return None, None, ()
+        origin = self.input.total-len(audio)
+        if not origin <= absolute_position < origin+len(audio):
+            return None, None, ()
+        return audio, origin, self.input.pulse_hits(audio)
 
     def scan(self, now):
         """Return one status observation per distinct complete packet."""
@@ -2346,12 +2408,20 @@ class _ProfileStatusProbe:
         if self.audio is None:
             return ()
         audio_start = self.input.total-len(self.audio)
+        hits = self.input.pulse_hits(self.audio)
+        self._audio_windows.append((audio_start,
+                                    np.array(self.audio, copy=True),
+                                    tuple((audio_start+position, scale,
+                                           confidence, direction)
+                                          for position, scale, confidence, direction
+                                          in hits)))
+        if len(self._audio_windows) > 4:
+            del self._audio_windows[:-4]
         profile_by_position = {
             int(round(position)): mode
             for position, mode in self.input.pulse_profile_hits(self.audio)}
         events = []
-        for position, scale, confidence, direction in self.input.pulse_hits(
-                self.audio):
+        for position, scale, confidence, direction in hits:
             absolute = int(round(audio_start+position))
             if (self.last_position is not None and
                     absolute <= self.last_position):
@@ -2393,7 +2463,7 @@ class _AdaptiveProfileDecoder:
     PIXEL_RETRY_EVERY = 4
 
     def __init__(self, fold, base_model, preferred_side='auto',
-                 aspect_layout='auto'):
+                 aspect_layout='auto', nested_table_path=None):
         from animation_modem import v7
         _ensure_test_modem_path()
         from live_fold import LiveFold
@@ -2417,6 +2487,12 @@ class _AdaptiveProfileDecoder:
         import nested_fold
         nested_fold.enable_mono(self.aspect_mono_wire)
         self.aspect_mono_mode = self.aspect_mono_wire.status_mode
+        self.nested_table_path = nested_table_path
+        self.adaptive_mono_wire = AspectMonoWire(
+            base_model, side='both', layout=aspect_layout)
+        nested_fold.enable_mono(self.adaptive_mono_wire,
+                                path=nested_table_path,
+                                require_nested=True)
         self.mono_wires = {
             MONO_500: MonoFreshFoldWire(base_model, side='both'),
             MONO_1000: MonoColourFoldWire(base_model, side='both'),
@@ -2444,7 +2520,16 @@ class _AdaptiveProfileDecoder:
         # Stereo slices: each channel its own mono wire, under the aspect
         # mono status with the metadata model bit set to nearest.
         self.slice_wire = nested_fold.slice_wire(aspect_layout)
+        self.adaptive_slice_wire = nested_fold.slice_wire(
+            aspect_layout, path=nested_table_path, adaptive_guest_range=True,
+            chroma_detail=True)
         self._last_slices = False
+        # ID 2 was reserved for the removed Fold-1000. It now identifies only
+        # the matched adaptive nested family; the metadata model bit selects
+        # its mono or stereo-slices interpretation.
+        self.adaptive_mode = ADAPTIVE_NESTED_MODE
+        self.mono_wires[self.adaptive_mode] = self.adaptive_mono_wire
+        self.mono_status_modes = frozenset(self.mono_wires)
         self.supported_modes = frozenset(
             (FOLD_500, self.aspect_mode, *self.mono_wires))
         self._mode_names = {
@@ -2453,6 +2538,7 @@ class _AdaptiveProfileDecoder:
             MONO_500: 'mono-fold-500',
             MONO_1000: 'mono-colour-500',
             self.aspect_mono_mode: 'aspect-mono-500',
+            self.adaptive_mode: 'adaptive-mono-nested',
         }
         self.active_mode = FOLD_500
         self.active_side = None
@@ -2482,6 +2568,9 @@ class _AdaptiveProfileDecoder:
 
     @property
     def profile_name(self):
+        if self.active_mode == getattr(self, 'adaptive_mode', None):
+            return ('adaptive-stereo-nested' if self._last_slices else
+                    'adaptive-mono-nested')
         if (self.active_mode == getattr(self, 'aspect_mono_mode', None) and
                 getattr(self, '_last_slices', False)):
             return self.slice_wire.wire_profile
@@ -2499,6 +2588,11 @@ class _AdaptiveProfileDecoder:
         REQUIRED_STREAK agreeing packets. False if the name is unknown."""
         modes = {name: mode for mode, name in self._mode_names.items()}
         mode = modes.get(profile_name)
+        if profile_name == 'adaptive-stereo-nested':
+            mode = getattr(self, 'adaptive_mode', None)
+            self._last_slices = True
+        elif profile_name == 'adaptive-mono-nested':
+            self._last_slices = False
         if mode is None:
             return False
         self.active_mode = mode
@@ -2527,7 +2621,13 @@ class _AdaptiveProfileDecoder:
         wire = getattr(self, 'slice_wire', None)
         if wire is not None:
             wire.reset()
+        wire = getattr(self, 'adaptive_slice_wire', None)
+        if wire is not None:
+            wire.reset()
         mono = getattr(self, 'aspect_mono_wire', None)
+        if mono is not None and hasattr(mono, 'reset_nested'):
+            mono.reset_nested()
+        mono = getattr(self, 'adaptive_mono_wire', None)
         if mono is not None and hasattr(mono, 'reset_nested'):
             mono.reset_nested()
 
@@ -2630,6 +2730,8 @@ class _AdaptiveProfileDecoder:
                 self.candidate_scale = scale
                 if self.streak >= self.REQUIRED_STREAK:
                     self.active_mode, self.active_side = key
+                    if self.active_mode == getattr(self, 'adaptive_mode', None):
+                        self._last_slices = False
                     self.reset_candidate()
                     if self.on_switch is not None:
                         self.on_switch(self._mode_names[self.active_mode],
@@ -2766,11 +2868,14 @@ class _AdaptiveProfileDecoder:
             # The fixed tail arrives whole in every packet: no tail memory.
             prev_tail = profile_model.mu
         slices = False
-        if mode == getattr(self, 'aspect_mono_mode', None):
+        if mode in (getattr(self, 'aspect_mono_mode', None),
+                    getattr(self, 'adaptive_mode', None)):
             slices = hint.get('encoding_type')
             slices = (self._last_slices if slices is None else
                       int(slices) == self.pixel_encoding_type)
-            aspect_layout = self.aspect_mono_wire.layout_for(
+            mono_wire = (self.adaptive_mono_wire if mode == self.adaptive_mode
+                         else self.aspect_mono_wire)
+            aspect_layout = mono_wire.layout_for(
                 hint.get('aspect_code'))
             if aspect_layout is None:
                 aspect_layout = self._last_layouts.get(mode)
@@ -2780,7 +2885,8 @@ class _AdaptiveProfileDecoder:
         if mode in self.mono_status_modes:
             try:
                 profile_model = (
-                    self.slice_wire.model_for(model, aspect_layout)
+                    (self.adaptive_slice_wire if mode == self.adaptive_mode
+                     else self.slice_wire).model_for(model, aspect_layout)
                     if slices else
                     self.mono_wires[mode].model_for(model, aspect_layout)
                     if aspect_layout is not None else
@@ -2841,7 +2947,9 @@ class _AdaptiveProfileDecoder:
                 codec = aspect_wire.codec(profile_model)
                 equalized = result.diag.get('fold_eq')
             else:
-                codec = self.aspect_mono_wire._codec(profile_model)
+                mono_wire = (self.adaptive_mono_wire if mode == self.adaptive_mode
+                             else self.aspect_mono_wire)
+                codec = mono_wire._codec(profile_model)
                 equalized = self._local.equalized
             score = (codec.signature_score(*equalized[:2])
                      if equalized is not None else None)
@@ -2853,13 +2961,16 @@ class _AdaptiveProfileDecoder:
             if aspect_wire is not None and (
                     not aspect_wire.pixel or pixel_signed):
                 self._last_pixel = aspect_wire.pixel
-            if mode == getattr(self, 'aspect_mono_mode', None):
+            if mode in (getattr(self, 'aspect_mono_mode', None),
+                        getattr(self, 'adaptive_mode', None)):
                 self._last_slices = slices
         if result is not None:
             result.diag['coded_status_mode'] = mode
             result.diag['profile_mode'] = mode
-            result.diag['wire_profile'] = (self.slice_wire.wire_profile
-                                           if slices else self._mode_names[mode])
+            result.diag['wire_profile'] = (
+                (self.adaptive_slice_wire if mode == self.adaptive_mode else
+                 self.slice_wire).wire_profile if slices else
+                self._mode_names[mode])
             result.diag['slices'] = slices
             if aspect_layout is not None:
                 result.diag['aspect_layout'] = aspect_layout
@@ -2875,13 +2986,16 @@ class _AdaptiveProfileDecoder:
         layout = result.diag.get('aspect_layout')
         if not result.diag.get('slices') or layout is None:
             return None
-        wire = self.slice_wire
+        wire = (self.adaptive_slice_wire if result.diag.get('profile_mode') ==
+                getattr(self, 'adaptive_mode', None) else self.slice_wire)
         return wire.half(wire.model_for(model, layout), result, channel)
 
     def slice_values(self, halves, result=None):
         """Grid values from one or two stereo-slices channels; notes on
         ``result`` what was shown."""
-        wire = self.slice_wire
+        wire = (self.adaptive_slice_wire if result is not None and
+                result.diag.get('profile_mode') == getattr(self, 'adaptive_mode', None)
+                else self.slice_wire)
         used = wire.choose(halves)
         if result is not None:
             result.diag['slices_shown'] = '+'.join(sorted(
@@ -2910,6 +3024,12 @@ class _AdaptiveProfileDecoder:
             if layout is None:
                 return self.v7.values_from(model, result.coeffs)
             wire = self.aspect_mono_wire
+            return wire.values(wire.model_for(model, layout), result)
+        if mode == getattr(self, 'adaptive_mode', None):
+            if result.diag.get('slices'):
+                return self.slice_values([self.slice_half(model, result)], result)
+            wire = self.adaptive_mono_wire
+            layout = result.diag.get('aspect_layout')
             return wire.values(wire.model_for(model, layout), result)
         if mode in self.mono_status_modes:
             wire = self.mono_wires[mode]
@@ -2993,7 +3113,7 @@ def _detect_mono_fold_side(args, timeout=2.0, wait_for_signal=False):
     stop = getattr(args, 'stop_event', None)
 
     def confirmed_profile():
-        for candidate in (MONO_1000, MONO_500):
+        for candidate in (ADAPTIVE_NESTED_MODE, MONO_1000, MONO_500):
             side = _mono_fold_input_side(observed_modes, candidate)
             if side is not None:
                 return side, candidate
@@ -3103,12 +3223,19 @@ def _make_auto_profile_decoder(args, fold):
         fold, _model(args.fixture, 'box'),
         preferred_side=getattr(args, 'mono_video_side', 'auto'),
         aspect_layout=getattr(args, 'aspect_layout', 'auto'),
+        nested_table_path=getattr(args, 'adaptive_nested_table', None),
         )
 
 
 def run_receive(args):
     if getattr(args, 'image_only', False) and getattr(args, 'headless', False):
         raise ValueError('--image-only cannot be combined with --headless')
+    if not getattr(args, 'adaptive_nested_installed', False):
+        from tools.v7_nested_gui_patch import (DEFAULT_TABLE_PATH,
+                                                install_receiver)
+        table, _ = install_receiver(sys.modules[__name__], DEFAULT_TABLE_PATH)
+        args.adaptive_nested_table = str(table)
+        args.adaptive_nested_installed = True
     if getattr(args, 'nested_smooth', None) is not None:
         if args.nested_smooth < 0:
             raise ValueError('--nested-smooth must be 0 or more')
@@ -3367,7 +3494,7 @@ def _run_receive_session(args, fold, mono_wire=None, adaptive_profile=None,
     _ensure_test_modem_path()
     from tone_code import FOLD_500, FOLD_OFF, MONO_500, MONO_1000, MONO_OFF
     # MONO_OFF is aspect-mono-500 under packet-profile dispatch.
-    mono_status = ((MONO_500, MONO_1000, MONO_OFF)
+    mono_status = ((MONO_500, MONO_1000, MONO_OFF, ADAPTIVE_NESTED_MODE)
                    if adaptive_profile is not None else
                    MONO_1000 if getattr(mono_wire, 'wire_profile', None) ==
                    'mono-colour-500' else MONO_500)
@@ -4177,11 +4304,19 @@ def _run_receive_session(args, fold, mono_wire=None, adaptive_profile=None,
                  any(result.diag.get('slices') for result in results))):
             slice_side = adaptive_profile.dispatch_side
             other_probe = profile_probes[1-slice_side]
-            other_audio = other_probe.audio
-            other_hits = (other_probe.input.pulse_hits(other_audio)
-                          if other_audio is not None and
-                          other_probe.input is not decode_input else ())
-            if other_hits:
+            if packet_direction < 0:
+                other_audio, other_origin, other_hits = other_probe.window_for(
+                    audio_start+float(packet_start))
+            else:
+                other_audio = other_probe.audio
+                other_origin = (other_probe.input.total-len(other_audio)
+                                if other_audio is not None else None)
+                other_hits = (other_probe.input.pulse_hits(other_audio)
+                              if other_audio is not None and
+                              other_probe.input is not decode_input else ())
+            if other_audio is not None and other_probe.input is not decode_input:
+                current_source = (results[-1].diag.get('source_index')
+                                  if results else None)
                 other_options = dict(
                     input_gain=other_probe.input.gain, models=models,
                     model_factory=model_factory,
@@ -4195,9 +4330,8 @@ def _run_receive_session(args, fold, mono_wire=None, adaptive_profile=None,
                         # packet reversed: take its reverse hit nearest this
                         # one in time and decode it the same way, so reverse
                         # playback joins both channels as forward does.
-                        other_origin = other_probe.input.total-len(other_audio)
-                        backwards = [hit for hit in other_hits if hit[3] < 0]
                         other_results = []
+                        backwards = [hit for hit in other_hits if hit[3] < 0]
                         if backwards:
                             start, scale, _, _ = min(
                                 backwards, key=lambda hit: abs(
@@ -4205,6 +4339,31 @@ def _run_receive_session(args, fold, mono_wire=None, adaptive_profile=None,
                             other_results, _ = P.decode_reverse_packet(
                                 model, other_audio, start, scale,
                                 **other_options)
+                        companion_matches = bool(
+                            other_results and
+                            other_results[-1].status in ('received', 'verified') and
+                            other_results[-1].diag.get('slices') and
+                            (current_source is None or
+                             other_results[-1].diag.get('source_index') == current_source))
+                        # Header scanning can miss a pulse on one M/S leg even
+                        # when the synchronous leg measured it. Reuse the
+                        # paired leg's capture-time anchor, while still asking
+                        # decode_reverse_packet to remeasure the pulse and
+                        # independently validate EOF and metadata on this leg.
+                        # A nearby but stale header can decode a different
+                        # packet; only accept the same source index on both legs.
+                        if not companion_matches:
+                            paired_start = audio_start+float(packet_start)-other_origin
+                            if 0 <= paired_start < len(other_audio):
+                                paired_results, _ = P.decode_reverse_packet(
+                                    model, other_audio, paired_start,
+                                    packet_scale, **other_options)
+                                if (paired_results and
+                                        paired_results[-1].status in ('received', 'verified') and
+                                        paired_results[-1].diag.get('slices') and
+                                        (current_source is None or
+                                         paired_results[-1].diag.get('source_index') == current_source)):
+                                    other_results = paired_results
                     else:
                         other_results, _ = P.decode_pulse_stream(
                             model, other_audio, latest_only=True,
@@ -4213,7 +4372,9 @@ def _run_receive_session(args, fold, mono_wire=None, adaptive_profile=None,
                             **other_options)
                 except Exception:
                     other_results = []
-                if other_results and other_results[-1].diag.get('slices'):
+                if (other_results and other_results[-1].diag.get('slices') and
+                        (packet_direction >= 0 or current_source is None or
+                         other_results[-1].diag.get('source_index') == current_source)):
                     slice_other = other_results[-1]
                     slice_other.diag['playback_direction'] = (
                         -1 if packet_direction < 0 else 1)

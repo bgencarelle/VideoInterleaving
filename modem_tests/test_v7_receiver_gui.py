@@ -212,17 +212,19 @@ class ReceiverGuiOptionTests(unittest.TestCase):
         diagnostics = next(field for field in gui.fields
                            if field.dest == 'show_diagnostics')
         diagnostics.value = True
-        gui.v7_live = SimpleNamespace(run_receive=Mock())
+        gui.v7_live = v7_live
         gui._prepare_input_device = Mock(return_value=True)
         terminal = io.StringIO()
 
-        with patch('tools.v7_receiver_gui.sys.stdout', terminal):
+        with patch('tools.v7_receiver_gui.sys.stdout', terminal), \
+                patch.object(v7_live, 'run_receive', Mock()) as run_receive:
             gui._start_receiver()
             gui.receiver_thread.join(timeout=2)
 
-        args = gui.v7_live.run_receive.call_args.args[0]
+        args = run_receive.call_args.args[0]
         self.assertTrue(args.runtime_options.snapshot()['audio_diagnostics'])
         self.assertIs(args.audio_diagnostics_stream, terminal)
+        self.assertTrue(args.adaptive_nested_installed)
         gui.receiver_stop.set()
 
     def test_audio_diagnostics_are_off_until_the_details_button_is_enabled(self):
@@ -233,17 +235,19 @@ class ReceiverGuiOptionTests(unittest.TestCase):
                       if field.action is not None and
                       field.action.dest == 'audio_output_device')
         output.value = 4
-        gui.v7_live = SimpleNamespace(run_receive=Mock())
+        gui.v7_live = v7_live
         gui._prepare_input_device = Mock(return_value=True)
         terminal = io.StringIO()
 
-        with patch('tools.v7_receiver_gui.sys.stdout', terminal):
+        with patch('tools.v7_receiver_gui.sys.stdout', terminal), \
+                patch.object(v7_live, 'run_receive', Mock()) as run_receive:
             gui._start_receiver()
             gui.receiver_thread.join(timeout=2)
 
-        args = gui.v7_live.run_receive.call_args.args[0]
+        args = run_receive.call_args.args[0]
         self.assertFalse(args.runtime_options.snapshot()['audio_diagnostics'])
         self.assertIs(args.audio_diagnostics_stream, terminal)
+        self.assertTrue(args.adaptive_nested_installed)
         gui._set_show_diagnostics(True)
         self.assertTrue(args.runtime_options.snapshot()['audio_diagnostics'])
         gui._set_show_diagnostics(False)
@@ -1577,7 +1581,25 @@ class ReceiverGuiButtonLayoutTests(unittest.TestCase):
         self.assertEqual(notes, ['Stop to change the settings below'])
         gui.started = False
         self.assertFalse(any(gui._runtime_locked(field)
-                             for field in gui.fields))
+                              for field in gui.fields))
+
+    def test_adaptive_table_path_is_locked_while_receiving(self):
+        gui = self._gui()
+        field = gui._field('Adaptive profile tables (.npz)')
+        original = field.value
+        gui.started = True
+        index = gui.fields.index(field)
+        self._click(gui, self._show(gui, index))
+        self.assertFalse(gui.editing)
+        self.assertIn('locked', gui.notice)
+
+        # If editing began before the receiver started, committing it must
+        # also fail closed rather than changing the next-start table setting.
+        gui.editing = True
+        gui.edit_buffer = 'tmp/other-table.npz'
+        self.assertFalse(gui._finish_edit(field))
+        self.assertEqual(field.value, original)
+        self.assertIn('locked', gui.notice)
 
     def test_grid_collapses_to_one_column_in_a_narrow_window(self):
         gui = self._gui()

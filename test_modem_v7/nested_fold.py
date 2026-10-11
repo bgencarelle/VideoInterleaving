@@ -458,6 +458,16 @@ SMOOTH_RATE = .25              # descent step, as a share of SMOOTH_EDGE
 
 _lock = threading.Lock()
 _cache = {}
+_fold_classes = {}
+
+
+def register_fold_class(path, fold_class):
+    """Bind a codec implementation to one frozen table file."""
+    resolved = str(Path(path).resolve())
+    with _lock:
+        if any(key[0] == resolved for key in _cache):
+            raise RuntimeError('cannot change a fold class after its table was loaded')
+        _fold_classes[resolved] = fold_class
 
 
 def table(family, layout, path=None):
@@ -475,7 +485,8 @@ def table(family, layout, path=None):
                         names = FrozenFold.FIELDS+tuple(
                             name for name in FrozenFold.PAIRED+('luma_grid', 'chroma_grid')
                             if prefix+name in data.files)
-                        fold = FrozenFold({name: data[prefix+name] for name in names})
+                        fold_class = _fold_classes.get(str(path.resolve()), FrozenFold)
+                        fold = fold_class({name: data[prefix+name] for name in names})
             _cache[key] = fold
         return _cache[key]
 
@@ -600,8 +611,9 @@ class NestedMonoCodec:
     packets the stock decoder.
     """
 
-    def __init__(self, stock, fold, send=False):
+    def __init__(self, stock, fold, send=False, require_nested=False):
         self.stock, self.fold, self.send = stock, fold, bool(send)
+        self.require_nested = bool(require_nested)
         index = fold.model_index
         positions = np.asarray(stock.kept)[index]
         if fold.grid is not None:
@@ -726,6 +738,8 @@ class NestedMonoCodec:
                 score, level, stock_score, dithered)
         if not self.last_nested:
             self.held.reset()
+            if self.require_nested:
+                return None
             full = self.stock.decode(coeffs, xhat, conf, fallback=fallback,
                                      metadata_confirmed=metadata_confirmed)
             return full if full is None or self.fold.grid is None else self.fold.grid.expand(full)
@@ -755,7 +769,7 @@ class NestedMonoCodec:
         return full
 
 
-def enable_mono(wire, send=False, path=None):
+def enable_mono(wire, send=False, path=None, require_nested=False):
     """Make an ``AspectMonoWire`` read nested-fold packets (and send them
     with ``send``).  Layouts without a table are left on the stock codec."""
     real = wire._codec
@@ -767,7 +781,8 @@ def enable_mono(wire, send=False, path=None):
         if fold is None:
             return stock
         if id(stock) not in wrapped:
-            wrapped[id(stock)] = NestedMonoCodec(stock, fold, send)
+            wrapped[id(stock)] = NestedMonoCodec(
+                stock, fold, send, require_nested=require_nested)
         return wrapped[id(stock)]
 
     def forget():
@@ -808,8 +823,9 @@ def _slice_wire_class():
         """Stereo slices whose channels are nested-fold mono pictures with
         shared hosts and different guests.  Reads stock slices unchanged."""
 
-        def __init__(self, layout='auto', send=False, path=None):
-            super().__init__(layout)
+        def __init__(self, layout='auto', send=False, path=None,
+                     adaptive_guest_range=None, chroma_detail=None):
+            super().__init__(layout, chroma_detail=chroma_detail)
             self.send, self._path = bool(send), path
             self._level = (None, None)
             self._level_layout = None
@@ -818,7 +834,8 @@ def _slice_wire_class():
             self.last_room = None
             self.nested_fold = 'send' if send else 'receive'
             self.last_nested = False
-            self.adaptive_guest_range = ADAPTIVE_GUEST_RANGE
+            self.adaptive_guest_range = (ADAPTIVE_GUEST_RANGE
+                if adaptive_guest_range is None else bool(adaptive_guest_range))
             self._adaptive_factor_key = None
             self._adaptive_factor = None
             self._adaptive_last_values = None
@@ -1105,7 +1122,10 @@ def _slice_wire_class():
     return NestedSliceWire
 
 
-def slice_wire(layout='auto', send=False, path=None):
+def slice_wire(layout='auto', send=False, path=None,
+               adaptive_guest_range=None, chroma_detail=None):
     """A stereo-slices wire that reads nested-fold packets (and sends them
     with ``send``)."""
-    return _slice_wire_class()(layout, send=send, path=path)
+    return _slice_wire_class()(layout, send=send, path=path,
+                               adaptive_guest_range=adaptive_guest_range,
+                               chroma_detail=chroma_detail)

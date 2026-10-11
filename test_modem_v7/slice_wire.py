@@ -169,7 +169,7 @@ def slice_positions(layout):
     return planes, ring
 
 
-def _layout_tables(layout, curves, phase):
+def _layout_tables(layout, curves, phase, chroma_detail=None):
     """One channel's slots for ``layout``.
 
     The coefficient vector is: luma slots, SIGNATURE_SLOTS filler, the
@@ -200,7 +200,10 @@ def _layout_tables(layout, curves, phase):
         paired = np.empty(len(far), int)
         paired[by_base] = by_detail
         riding = np.zeros(len(far))
-        riding[by_base[:len(far)-guests]] = PLANE_DETAIL[plane]
+        colour_detail = (CHROMA_DETAIL if chroma_detail is None else
+                         bool(chroma_detail))
+        riding[by_base[:len(far)-guests]] = (
+            DETAIL if plane == 0 or colour_detail else 0.0)
         ride.append(riding)
         if plane == 0:
             hosts = by_base[len(far)-guests:]
@@ -304,13 +307,16 @@ def _frozen():
 
 
 @lru_cache(maxsize=16)
-def layout_tables(layout):
+def layout_tables(layout, chroma_detail=None):
     if any(name in os.environ for name in
            ('SLICE_DETAIL', 'SLICE_GUESTS', 'SLICE_STEP', 'SLICE_CHROMA',
             'SLICE_CHROMA_DETAIL')):
         # A measurement run with other settings: built here, not frozen.
         return _layout_tables(layout, _canonical_curves(),
-                              v7._frozen_tables()['phase'])
+                              v7._frozen_tables()['phase'], chroma_detail)
+    if chroma_detail is not None:
+        return _layout_tables(layout, _canonical_curves(),
+                              v7._frozen_tables()['phase'], chroma_detail)
     prefix = f'{_slug(layout)}/'
     tables = {key[len(prefix):]: value for key, value in _frozen().items()
               if key.startswith(prefix)}
@@ -428,10 +434,12 @@ class SliceWire:
     disable_tail_memory = True
     fold_slots = 0
 
-    def __init__(self, layout='auto'):
+    def __init__(self, layout='auto', chroma_detail=None):
         if layout not in LAYOUT_CHOICES:
             raise ValueError(f'unknown aspect layout {layout!r}; choose {LAYOUT_CHOICES}')
         self.layout = layout
+        self.chroma_detail = (CHROMA_DETAIL if chroma_detail is None else
+                              bool(chroma_detail))
         self._models = {}
         self._slots = {}
         self._layout_of = {}
@@ -453,7 +461,8 @@ class SliceWire:
 
     def slots(self, layout):
         if layout not in self._slots:
-            self._slots[layout] = _Slots(layout, layout_tables(layout))
+            self._slots[layout] = _Slots(
+                layout, layout_tables(layout, self.chroma_detail))
         return self._slots[layout]
 
     def model_for(self, base_model, layout):
@@ -465,7 +474,7 @@ class SliceWire:
             if key not in self._models:
                 name = v7.ENCODING_FILTERS[int(base_model.encoding_type)]
                 canonical = float(v7._frozen_tables()[f'{name}/unit_rms'])
-                model = _assemble(layout_tables(layout), base_model.phase,
+                model = _assemble(layout_tables(layout, self.chroma_detail), base_model.phase,
                                   float(base_model.scale)*canonical,
                                   template=base_model)
                 model._mono_wire_profile = self.wire_profile

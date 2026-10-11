@@ -567,14 +567,8 @@ def _make_fields(receive_parser, device_choices, audio_output_choices=()):
     fields.append(OptionField(
         None, RECOMMENDED_CHROMA_MODE, 'Colour detail', 'choice',
         tuple((CHROMA_LABELS[name], name) for name in CHROMA_MODES)))
-    fields.append(OptionField(None, False, 'Matched nested test patch · opt-in',
-                              'bool'))
-    fields.append(OptionField(
-        None, 'stereo-nested', 'Matched nested profile', 'choice',
-        (('Stereo nested · chroma detail enabled', 'stereo-nested'),
-         ('Aspect mono nested · chroma detail omitted', 'aspect-mono-nested'))))
     fields.append(OptionField(None, str(DEFAULT_TABLE_PATH),
-                              'Matched nested tables (.npz)', 'text'))
+                              'Adaptive profile tables (.npz)', 'text'))
     return fields
 
 
@@ -1236,14 +1230,10 @@ class ReceiverGui:
         parsed = self.root_parser.parse_args(words)
         parsed.headless = True
         parsed.fullscreen = False
-        parsed.matched_nested_test = bool(self._field(
-            'Matched nested test patch · opt-in').value)
         parsed.nested_test_tables = str(self._field(
-            'Matched nested tables (.npz)').value or '').strip()
-        parsed.nested_test_profile = self._field('Matched nested profile').value
-        if parsed.matched_nested_test:
-            parsed.nested_test_tables = str(
-                resolve_table_path(parsed.nested_test_tables))
+            'Adaptive profile tables (.npz)').value or '').strip()
+        parsed.nested_test_tables = str(resolve_table_path(parsed.nested_test_tables))
+        parsed.adaptive_nested_table = parsed.nested_test_tables
         return parsed
 
     def _notify_ui(self):
@@ -1318,15 +1308,16 @@ class ReceiverGui:
         def receive():
             writer = QueueWriter(self.output, self._notify_ui)
             try:
-                if args.matched_nested_test:
-                    from tools.v7_nested_gui_patch import install_receiver
-                    _table, detail = install_receiver(
-                        self.v7_live, args.nested_test_tables,
-                        args.nested_test_profile)
-                    print('V7 nested mapping=serpentine adaptive_guest_range=factors[1,2,4,8,16] '
-                          'host_level=-1 step_factor=0.25 exact_inverse '
-                          f'chroma_detail={"on" if detail else "off"} '
-                          f'profile={args.nested_test_profile} matched-test-only', flush=True)
+                from tools.v7_nested_gui_patch import install_receiver
+                _table, detail = install_receiver(
+                    self.v7_live, args.nested_test_tables)
+                args.adaptive_nested_table = str(_table)
+                args.adaptive_nested_installed = True
+                print('V7 adaptive nested profiles: ID 2; mono/stereo selected by '
+                      'validated signature and metadata; legacy profile IDs remain '
+                      'separate; serpentine adaptive_guest_range=factors[1,2,4,8,16] '
+                      f'host_level=-1 step_factor=0.25 exact_inverse chroma_detail={detail}',
+                      flush=True)
                 with contextlib.redirect_stdout(writer), \
                         contextlib.redirect_stderr(writer):
                     self.v7_live.run_receive(args)
@@ -1386,8 +1377,7 @@ class ReceiverGui:
         self.dirty = True
 
     def _select_choice(self, field, value):
-        if (self.started and field.action is not None and
-                field.dest not in LIVE_RUNTIME_DESTS):
+        if self._runtime_locked(field):
             self.dropdown = None
             self.notice = ('Receiver options are locked while receiving; '
                            'close and relaunch to change them.')
@@ -1436,8 +1426,7 @@ class ReceiverGui:
                 item.value = False
 
     def _adjust_field(self, field, direction):
-        if (self.started and field.action is not None and
-                field.dest not in LIVE_RUNTIME_DESTS):
+        if self._runtime_locked(field):
             self.notice = ('Receiver options are locked while receiving; '
                            'close and relaunch to change them.')
             self.dirty = True
@@ -2303,7 +2292,11 @@ class ReceiverGui:
 
     def _runtime_locked(self, field):
         """True for an option that cannot change while receiving."""
-        return (self.started and field.action is not None and
+        if not self.started:
+            return False
+        if field.dest == 'Adaptive profile tables (.npz)':
+            return True
+        return (field.action is not None and
                 field.dest not in LIVE_RUNTIME_DESTS)
 
     def _config_room(self, size=None):
@@ -2701,6 +2694,12 @@ class ReceiverGui:
             self.dirty = True
 
     def _finish_edit(self, field):
+        if self._runtime_locked(field):
+            self.editing = False
+            self.notice = ('Receiver options are locked while receiving; '
+                           'close and relaunch to change them.')
+            self.dirty = True
+            return False
         value = self.edit_buffer.strip()
         if field.dest in ('freewheel_seconds', 'audio_volume'):
             try:

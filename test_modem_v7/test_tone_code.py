@@ -36,7 +36,9 @@ class ToneCodeTests(unittest.TestCase):
                 v7.prepare_image(image.convert('RGB'), 'box'), v7.V7_GRIDS, 'box')
 
     def test_distance_six_status_code_corrects_two_errors_and_five_erasures(self):
-        expected_slots = {FOLD_OFF: 0, FOLD_500: 500, FOLD_1000: 1000}
+        # Code 2 remains recognisable for fail-closed compatibility, but no
+        # longer advertises a Fold-1000 codec.
+        expected_slots = {FOLD_OFF: 0, FOLD_500: 500, FOLD_1000: None}
         words = [encode_status(mode) for mode in expected_slots]
         distance = min(sum(left != right for left, right in zip(a, b))
                        for index, a in enumerate(words)

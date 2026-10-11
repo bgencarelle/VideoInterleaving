@@ -23,22 +23,25 @@ import numpy as np
 from scipy.signal import savgol_filter
 
 from common import RATE as CAPTURE_RATE, v7
+from tools.v7_profile_registry import ADAPTIVE_NESTED_MODE
 
 # Code 0 ("fold off") is no longer emitted by a live sender; live V7 now
 # uses it for the experimental aspect-fold-500 profile (aspect_fold.py).
 # Offline benches still use it for unfolded V7 packets.
 FOLD_OFF = 0
 FOLD_500 = 1
-# Code 2 is reserved and unused: the Fold 1000 profile was removed. The ID
-# and its status word stay defined so the code is never reused.
-FOLD_1000 = 2
+# Code 2's old Fold-1000 status codeword is retained for exact wire signalling;
+# the sender/receiver now assign that reserved identity to adaptive nested.
+# It deliberately has no Fold-1000 slot mapping.
+FOLD_1000 = ADAPTIVE_NESTED_MODE  # historical symbol name; wire ID is reused
+ADAPTIVE_NESTED = ADAPTIVE_NESTED_MODE
 # Code 3 was the retired rotating-tail mono wire's "mono fold off". The
 # receiver dispatches it as aspect-mono-500 (aspect_mono.py) or, with the
 # metadata model bit "nearest", stereo-slices (slice_wire.py).
 MONO_OFF = 3
 MONO_500 = 4
 MONO_1000 = 5
-FOLD_MODE_TO_SLOTS = {FOLD_OFF: 0, FOLD_500: 500, FOLD_1000: 1000}
+FOLD_MODE_TO_SLOTS = {FOLD_OFF: 0, FOLD_500: 500}
 STATUS_MODES = (FOLD_OFF, FOLD_500, FOLD_1000,
                 MONO_OFF, MONO_500, MONO_1000)
 

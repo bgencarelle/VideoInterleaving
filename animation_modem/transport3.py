@@ -14,6 +14,7 @@ from .v7_core import _sample_at
 SYNC_LEN = 288
 HALF = 8
 PREAMBLE_BITS = (0, 0, 0, 0, 0, 0, 1, 0, 0, 1, 0, 1, 1, 1, 0, 0)
+ADAPTIVE_NESTED_MODE = 2
 PREAMBLE_AMPLITUDE = 0.55
 SHORT, LONG = HALF, 2 * HALF
 EDGE_HYSTERESIS = 0.2
@@ -30,7 +31,7 @@ HEADER_ARRIVAL_PEAK = 10**(-1/20)
 PROFILE_PREAMBLE_BITS = {
     0: (0, 1, 1, 1, 0, 1, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0),  # Fold-off / aspect-fold-500
     1: PREAMBLE_BITS,                                        # Fold-500
-    2: (0, 1, 0, 0, 1, 0, 0, 0, 0, 0, 1, 1, 0, 0, 1, 0),  # reserved, unused (was Fold-1000)
+    ADAPTIVE_NESTED_MODE: (0, 1, 0, 0, 1, 0, 0, 0, 0, 0, 1, 1, 0, 0, 1, 0),  # adaptive nested mono/stereo
     3: (0, 1, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1, 0),  # Mono-off / aspect-mono-500
     4: (0, 1, 0, 0, 0, 1, 1, 0, 0, 0, 0, 0, 0, 1, 1, 0),  # Mono-500
     5: (0, 0, 1, 0, 0, 0, 1, 1, 0, 1, 1, 0, 0, 0, 0, 0),  # Mono-1000

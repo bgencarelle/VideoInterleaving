@@ -913,7 +913,7 @@ receiver holds the last picture for an unknown or unconfirmed status.
 |---:|---|---|
 | 0 | `FOLD_OFF` | `aspect-fold-500`; with the metadata model bit `nearest`, a pixel grid |
 | 1 | `FOLD_500` | `fold-500` |
-| 2 | `FOLD_1000` | Reserved, unused (was `fold-1000`, removed) |
+| 2 | `ADAPTIVE_NESTED` (historical status word `FOLD_1000`) | Adaptive nested mono or stereo-slices; metadata model bit selects the family |
 | 3 | `MONO_OFF` | `aspect-mono-500`; with the metadata model bit `nearest`, `stereo-slices` |
 | 4 | `MONO_500` | `mono-fold-500` |
 | 5 | `MONO_1000` | `mono-colour-500` |
@@ -932,10 +932,22 @@ The default receiver (`_AdaptiveProfileDecoder`) works as follows.
    consecutive packets that show it; those packets are held. An unreadable ID
    clears the count. A switch resets the tail memory and the last verified
    metadata.
-3. It dispatches IDs 0, 1, 3, 4 and 5. The reserved ID 2 and the unfolded
-   wire are not dispatched.
+3. It dispatches IDs 0, 1, 2, 3, 4 and 5. ID 2 selects the adaptive nested
+    family; the metadata model bit selects mono or stereo-slices. The matched
+    adaptive-table signature is required before display. The former Fold-1000
+    profile has no codec dispatch and is rejected by the adaptive signature
+    check. This keeps ID 2's historical status codeword while preventing an
+    old Fold-1000 body from being interpreted as adaptive nested data.
 4. Before the body is interpreted, the decoded tone status must equal the
-   dispatched ID and the active profile. Otherwise the packet is held.
+    dispatched ID and the active profile. Otherwise the packet is held.
+
+Legacy profile IDs 0 and 3 retain their existing codec dispatch and table
+semantics; adaptive ID-2 codec installation is table-scoped and does not
+replace their cached mono/stereo tables or the default legacy table path.
+The 2026-10-11 live GUI/Pulse smoke exercised legacy → ID 2 → legacy → ID 2
+switching in the same receiver process, alongside the adaptive signature
+check. See `docs/V7_GUI_TEST_PATCH.md` for the sources, route settings and
+artifact directory.
 
 ### 14.2 Fold 500
 
@@ -1086,8 +1098,11 @@ Receiver:
   actually sent, the squared error is 0.2 (clean) to 0.7 (white noise at
   -40 to -30 dBFS) of what the confidence implies, so noisy slots are shrunk
   slightly more than they need to be.
-- **Reverse playback joins only one stereo-slices channel.** The second
-  channel is decoded only for forward packets.
+- **Reverse stereo-slices pairing requires matching packet metadata.** The
+  live receiver now retains overlapping companion-channel capture windows and
+  joins reverse-playback legs only when both decode to the same source index;
+  the regression check covers a reversed stereo waveform. Physical-medium
+  behavior remains unvalidated.
 - **A partly damaged slices channel is not mixed per slot.** It is dropped
   whole in favour of the clean channel.
 - **The body is sent quieter when the picture is loud.** A packet whose
@@ -1127,7 +1142,9 @@ Decided and done:
 - The user-facing no-fold options were retired: `send --baseline`,
   `receive --baseline` and `main.py --modem-baseline`. The transport can still
   encode and decode a packet without a fold.
-- Fold 1000 was removed for now. Its status and preamble ID 2 stay reserved.
+- The former Fold-1000 codec was removed. ID 2 now names the adaptive nested
+  family; the old status codeword is unchanged, and the adaptive signature
+  prevents old Fold-1000 data from being displayed as the new mapping.
 - The continuous clock-track code (`encode_stream`, `decode_stream`,
   `receive --refine`) was deleted from `v7.py`. `clock_word` is kept;
   `decode_frame` uses it for its cancellation template.
