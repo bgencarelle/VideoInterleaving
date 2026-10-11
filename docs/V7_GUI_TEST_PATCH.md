@@ -84,7 +84,7 @@ Run focused, device-free checks from the repository root:
   tools/v7_nested_gui_patch.py tools/v7_nested_experiment.py
 ```
 
-Table SHA-256: `bc02a63d491fe1c6a9aef2a5f61541048967a57db6d79de9f38c9426ddf1dd3e`.
+Table SHA-256: `2d4d7f097353cef1bd90755d48c17fbfbd3f26daf6e3ad4a5648011c704e0c3c`.
 The archive includes the original table validation manifest, provenance, and
 the separate live GUI trial summary. The receiver GUI's **Colour detail**
 display control is a separate reconstruction option; keep it matched during

@@ -76,12 +76,13 @@ class MatchedNestedGuiPatchTests(unittest.TestCase):
         self.assertEqual(Path(nested_fold.TABLES).resolve(), default_path)
         self.assertIs(legacy, legacy_before)
         self.assertIs(legacy_stereo, legacy_stereo_before)
-        self.assertIsNot(type(legacy), type(adaptive))
-        self.assertIsNot(type(legacy_stereo), type(adaptive_stereo))
-        self.assertFalse(getattr(legacy, 'adaptive_guest_range', False))
-        self.assertFalse(getattr(legacy_stereo, 'adaptive_guest_range', False))
-        self.assertTrue(adaptive.adaptive_guest_range)
-        self.assertTrue(adaptive_stereo.adaptive_guest_range)
+        # The adaptive tables run on the stock serpentine nested fold (level
+        # per picture by trial decode); no separate codec is installed, but
+        # they stay distinct tables.
+        self.assertIsNot(legacy, adaptive)
+        self.assertIsNot(legacy_stereo, adaptive_stereo)
+        self.assertEqual((adaptive.rows, adaptive.cols), (120, 100))
+        self.assertEqual((legacy.rows, legacy.cols), (96, 80))
 
     def test_rejects_non_nested_sender_profile(self):
         with self.assertRaisesRegex(ValueError, 'requires a nested wire profile'):

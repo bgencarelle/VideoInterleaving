@@ -240,16 +240,21 @@ class TableTests(unittest.TestCase):
             self.assertEqual(choose.call_count, 2)
 
     def test_stereo_level_choice_protects_right_guests_and_is_leg_symmetric(self):
-        fold = nested_fold.table('slices', '16:9')
+        # Detail guests ride on the first channel only, so symmetry is
+        # checked on the plain guest arrangement.
+        table = nested_fold.table('slices', '16:9')
+        arrays = {name: getattr(table, name).copy()
+                  for name in table.FIELDS+table.PAIRED}
+        mirror = dict(arrays)
+        for name in ('guest_position', 'guest_sd', 'guest_sector'):
+            mirror[name] = np.ascontiguousarray(arrays[name][::-1])
+        with mock.patch.object(nested_fold, 'DETAIL_GUESTS', False):
+            fold = nested_fold.FrozenFold(arrays)
+            mirrored = nested_fold.FrozenFold(mirror)
         plane = np.zeros(fold.luma)
         plane[fold.host_position] = fold.host_mean
         plane[fold.guest_position[1, 0]] = 20*fold.guest_sd[1, 0]
         chosen = fold.choose_level(plane)
-        arrays = {name: getattr(fold, name).copy()
-                  for name in fold.FIELDS+fold.PAIRED}
-        for name in ('guest_position', 'guest_sd', 'guest_sector'):
-            arrays[name] = np.ascontiguousarray(arrays[name][::-1])
-        mirrored = nested_fold.FrozenFold(arrays)
         self.assertEqual(chosen, mirrored.choose_level(plane))
         self.assertGreater(chosen, nested_fold.LOWEST)
 
@@ -520,7 +525,9 @@ class HeldPictureTests(unittest.TestCase):
             # The first packet of a picture is shown as decoded, at about the
             # plain-stair error; once the cycle is in, the error is lower.
             self.assertLess(dithered[0], 1.1*plain[0], mode)
-            self.assertLess(dithered[-1], .7*plain[-1], mode)
+            # Stereo: the detail guests already remove most of the stair
+            # error the cycle averages out, so less is left to gain.
+            self.assertLess(dithered[-1], (.95 if 'stereo' in mode else .7)*plain[-1], mode)
             self.assertAlmostEqual(plain[0], plain[-1], delta=.02*plain[0], msg=mode)
 
     def test_the_average_can_be_switched_off(self):
@@ -576,7 +583,10 @@ class BoundedDecodeTests(unittest.TestCase):
             np.testing.assert_allclose(room[fold.host_position][folded],
                                        (.5*nested_fold.SMOOTH_ROOM*fold.step*fold.host_sd)[folded])
             self.assertTrue(np.all(room[fold.host_position][~folded] == 0))
-            self.assertTrue(np.all(room[fold.guest_position.ravel()] == 0))
+            # Detail guests are also read off the hosts and blended: not exact.
+            plain_guests = np.concatenate((fold.guest_position[0][~fold.detail_guest],
+                                           fold.guest_position[1:].ravel()))
+            self.assertTrue(np.all(room[plain_guests] == 0))
             self.assertTrue(np.all(np.isinf(room[~fold.sent_mask])))
             self.assertTrue(np.all(np.isfinite(room[fold.sent_mask])))
             # A level up the ladder is 1.5 times the room; seven averaged

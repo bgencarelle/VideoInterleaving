@@ -53,9 +53,12 @@ DECKS = {
     # Chrome/high-bias cassette (IEC type II, 70 us), 4 dB under.
     'cassette-ii': Deck('cassette-ii', eq_us=70, shelf_db=10, knee_db=5,
                         gap_hz=15000, drive_db=-4, hiss_dbfs=-52),
-    # Ferric cassette recorded 4 dB hot, as an over-eager record level.
+    # The same ferric cassette recorded 4 dB hotter than 'cassette-i': an
+    # over-eager record level ("oops, a bit too hot"). It was +4 dB against
+    # the wire, which with the record boost drove the tape 14 dB past its
+    # maximum: a hard clip, not a hot recording.
     'cassette-i-hot': Deck('cassette-i-hot', eq_us=120, shelf_db=12,
-                           knee_db=6, gap_hz=12000, drive_db=4,
+                           knee_db=6, gap_hz=12000, drive_db=-4,
                            hiss_dbfs=-48),
     # Reel-to-reel at 15 ips (50 us), properly aligned: much more headroom,
     # little head loss, little hiss.

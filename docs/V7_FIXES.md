@@ -76,6 +76,46 @@ Copy this and fill it in. Leave out what is not known; do not guess lines.
 - Where: not located yet.
 - How it was found: live run on the sharpness charts.
 - What "fixed" looks like: the cause is named and shown by switching it off.
+- Report (stereo nested and adaptive stereo; not reviewed by owner): one
+  cause found. In the two-channel tables each host is base plus or minus a
+  0.35 share of a detail coefficient; on the 420 folded hosts both channels
+  are rounded to stairs about one host spread wide, and the receiver reads
+  the detail as the difference of the two rounded hosts over 0.35. The stair
+  error of both channels comes back about three times larger in the detail:
+  with no channel noise at all the detail on folded slots came back with
+  error 0.16 on a signal of 0.26 (adaptive), 0.11 on 0.21 (stock). That is
+  the mid-frequency mesh and the beaded lines. Fix: on folded slots the first
+  channel's guest now carries the detail itself (its old guest is no longer
+  sent); the receiver blends the guest reading, the difference reading and
+  the prior by their variances (`sk.blend_detail`), and the level trial does
+  not score those guests (the difference reading backs them). Detail error
+  on folded slots drops to 0.01 with no noise. Luma PSNR of the fold alone
+  (face): stock stereo nested 30.8/30.3/28.0/23.8 -> 31.2/30.8/29.1/25.9 dB
+  at noise 0/.03/.1/.3, adaptive stereo 29.4/29.1/27.5/25.5 ->
+  29.7/29.3/27.8/25.7. Live clean loopback: beads and horizontal stripes
+  gone from the line chart, face mesh much reduced. `NESTED_FOLD_DETAIL_GUESTS=0`
+  restores the old guests (both ends). Mono nested is not affected (no
+  riding detail). Also found: the adaptive tables send the same 2,880 luma
+  coefficients at nearly the same picture frequencies as the stock tables,
+  so their larger grid cannot be sharper as built.
+- Second cause named (not fixed): on flat areas the grain is mostly the
+  coefficients that are not sent. On the flattest patch of the face, the
+  decoded luma varies 0.021 against 0.007 in the source, and 0.020 of that is
+  the cut-off high frequencies of edges elsewhere spreading as ripple; stair
+  error, details, guests and noise add about 0.006 each. The receiver's
+  smoothing within the room (NESTED_FOLD_SMOOTH=20) flattens it (0.009, luma
+  +1.3 to +1.5 dB) but the owner judged the pictures worse by eye: it stays
+  off.
+- Found on other pictures (adaptive tables only): a hard cross through a
+  Siemens star and vertical streaks in a flat sky, made by the fold alone.
+  The chroma50 table's luma guests ran out in thin strips (two columns to
+  the last row, ten rows almost to the last column): fine detail in one
+  direction only, drawn as full-width and full-height lines. Reshaped
+  (`tools/v7_reshape_guests.py`, guests fill outward from the hosts by
+  radius): live at 96 kHz the cross is gone; face +0.2/+0.4 dB, coins
+  +0.2/+0.5, star +0.3/0 (stereo/mono), rocket -0.3/-0.4 (thin towers a
+  little fainter). Some streaking in the rocket's sky remains (chroma,
+  not reshaped).
 
 ### 28. Levels are too low: the picture data sits far under the ceiling
 - Status: not fixed yet (levels, EOF and leveler done; peak reduction built,
@@ -132,6 +172,36 @@ Copy this and fill it in. Leave out what is not known; do not guess lines.
   (test frame: no pictures; face 49 to 43 pictures since item 31). Peak
   reduction stays off.
 - Second pass: header and EOF peak at -1.2 to -1.6 and -1.3 to -1.9 dBFS at 96 kHz (the sender's resampler holds back the inter-sample peaks, so some packets land a little under the 1 to 1.5 dB aim); data average -15.0 dBFS (face). Hiss 30 dB down and type I cassette: every packet shown. The hot cassette is still the one bad case (face 58 of 70 at 23.6 dB, test frame none).
+- Third pass (not reviewed by owner): the hot case was not a hot recording.
+  It recorded +4 dB against the wire, and with the deck's record boost (up to
+  12 dB on our 1.5-12.75 kHz carriers) that put the tape 14 dB past its
+  maximum, 57% of samples over the knee: a hard clip. That is why tilting the
+  top carriers (3 and 6 dB) and peak clipping (9 dB) changed nothing or made
+  it worse. `tools/v7_tape.py` now records it 4 dB hotter than 'cassette-i'
+  (-4 dB against the wire: 18% over the knee, squash error 15 dB under the
+  signal). Through it, live at 96 kHz with the default gates: face 66 of 66
+  shown at 28.9 dB, test frame 56 of 56 at 14.3 dB (clean line 14.6).
+  Peak clipping at 9 dB, retried on a clean line: no packets dropped now
+  (69 of 69, 14.5 dB); it stays off.
+- Next (owner, general transmission problems, not tape alone):
+  1. The receiver learns and cancels the chain's own distortion. It fits the
+     chain (bend, response, phase, timing) from what it knows exactly
+     (headers, pilot tones, EOF, metadata), rebuilds the packet from the
+     carriers it trusts most by their measured noise plus everything known,
+     runs the rebuild through the fitted chain, subtracts the predicted
+     distortion and decodes again, widening the trusted set each round.
+     Scratch prototype (test frame, live 96 kHz, default gates; the chain
+     assumed known, rebuild by the real sender from the receiver's raw
+     equalised carriers, three rounds): 8 dB over a normal cassette 11.3 ->
+     12.5 dB and visibly sharper (text readable, colour back); 12 dB over: 0
+     -> 52 of 56 packets shown at 10.8 dB, shapes recognisable. Rebuilding
+     from decoded picture values instead does nothing: the Hadamard spread
+     carries the bad carriers into every value. Not for plain noise.
+  2. A codec map for lossy codecs: noise pictures through the codec offline,
+     compared with a clean channel, give per carrier and level what survives.
+     The receiver weights carriers by it; the sender keeps important carriers
+     above what the codec drops. The pilot tones already serve as the
+     calibration signal; no new packet.
 
 
 ### 13. The photo score marks a sharper picture as worse
@@ -324,6 +394,19 @@ Copy this and fill it in. Leave out what is not known; do not guess lines.
   second run 70 of 70 from the first packet; switching the sender to mono,
   the next run confirmed mono after three packets as before and saved it;
   the run after that showed every packet from the first.
+
+### 35. The body peaks about 2 dB under the header and EOF, not 1 to 1.5
+- Status: open
+- What is wrong: item 28 set every packet's body 1 to 1.5 dB under its
+  framing. Measured on the sender's own output at 96 kHz (aspect-fold-500,
+  median over 50-60 packets): header peak -1.4 dBFS, body peak -3.4 dBFS, a
+  2.1 dB gap on both the face and the test frame. (On average level the gap
+  is about 11 dB; that is the body's crest factor, not a level setting.)
+- Where: `animation_modem/v7.py`, `body_auto_level` and the leveller; the
+  sender's resampler may also hold back the body's inter-sample peaks.
+- How it was found: measuring header against body on the waveform.
+- What "fixed" looks like: body peak 1 to 1.5 dB under the header peak,
+  measured the same way.
 
 ## Deleted items
 

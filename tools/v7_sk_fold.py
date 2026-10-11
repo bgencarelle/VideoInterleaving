@@ -1162,8 +1162,12 @@ def choose_paired_level(flat, lowest, highest, ratio, host_position, host_mean, 
                         level, step, scale, alpha, compander, inverse, member, host_sector,
                         sectors, law, guest_sector, guest_band, limit_low, limit_high,
                         guest_position, guest_sd, guest_slot, noise, draw, ride,
-                        detail_position, serpentine=False):
+                        detail_position, serpentine=False, backed=None):
     """One stereo ladder level, scored against both channels' actual guests.
+
+    ``backed``: first-channel guests that carry a riding detail, which the
+    receiver also reads from the two hosts; their clipping costs little, so
+    they are left out of the score.
 
     The channels share the level, not their guest coefficients. Looking only
     at the left guests can pick the quietest level while right-only detail
@@ -1207,6 +1211,8 @@ def choose_paired_level(flat, lowest, highest, ratio, host_position, host_mean, 
             for i in range(slots):
                 error += (host_sd[i]*(got_hosts[i]-hosts[i]))**2
             for i in range(len(guest_position[leg])):
+                if leg == 0 and backed is not None and backed[i]:
+                    continue
                 slot = guest_slot[i]
                 error += (guest_sd[leg,i]*(got[slot]*got_scale[i]-
                                          guests[slot]*sent_scale[i]))**2
@@ -1938,3 +1944,38 @@ def adaptive_pilot_pattern(patterns, row, dithered):
     for i in range(patterns.shape[1]):
         out[i] = patterns[row, i]*sign
     return out
+
+
+@njit(cache=True)
+def blend_detail(out, left, right, guests, sigma_left, sigma_right, carries, guest_slot,
+                 guest_position, guest_sd, guest_scale, host_sd, ride, level, step, scale,
+                 differ, compander, factor):
+    """Two-channel tables, details sent both ways (riding on the hosts and as
+    the first channel's guest, ``carries``): the inverse-variance blend of
+    the difference reading, the guest reading and the table's prior.  On a
+    quiet link the guest wins; as noise grows the guest fades and the
+    difference reading takes over.  ``guest_position``/``guest_sd``/
+    ``guest_scale``: the first channel's, per guest."""
+    h = 1e-3
+    for i in range(len(guest_slot)):
+        if not carries[i]:
+            continue
+        slot = guest_slot[i]
+        unit = host_sd[slot]/ride[slot]*factor
+        # A packet's own reading carries its stair error even when packets
+        # are averaged; only the mean over the dither cycle loses it.
+        quantised = step[slot]*step[slot]/12.0 if level[slot] > 0 else 0.0
+        noise_left = sigma_left[slot]/scale[slot]
+        noise_right = sigma_right[slot]/scale[slot]
+        pair = .5*(left[slot]-right[slot])*unit
+        pair_var = max(.25*(noise_left*noise_left+noise_right*noise_right+2.0*quantised)
+                       * unit*unit, 1e-30)
+        # The guest's noise through the serpentine stair (c = 2 x residual /
+        # step) and the compander's local slope.
+        b = guests[slot]
+        slope = max((compress(compander, b+h)-compress(compander, b-h))/(2.0*h), 1e-6)
+        g = 2.0*noise_left/step[slot]/slope*guest_scale[i]*guest_sd[i]*factor
+        guest_var = max(g*g, 1e-30)
+        prior = max(differ[slot]/(ride[slot]*ride[slot])*factor*factor, 1e-30)
+        where = guest_position[i]
+        out[where] = (pair/pair_var+out[where]/guest_var)/(1.0/pair_var+1.0/guest_var+1.0/prior)

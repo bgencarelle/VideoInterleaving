@@ -85,6 +85,10 @@ ADAPTIVE_GUEST_RANGE = False  # enabled only by the explicit experiment switch
 # posterior mean at the measured noise like the stock mapping.
 # NESTED_FOLD_SERPENTINE=0 restores the stock mapping (both ends).
 SERPENTINE = os.environ.get('NESTED_FOLD_SERPENTINE', '1') != '0'
+# Two-channel tables: folded slots' riding details also travel as the first
+# channel's guests (FrozenFold.__init__).  NESTED_FOLD_DETAIL_GUESTS=0 restores
+# the old guests.
+DETAIL_GUESTS = os.environ.get('NESTED_FOLD_DETAIL_GUESTS', '1') != '0'
 
 
 def hadamard():
@@ -172,6 +176,22 @@ class FrozenFold:
         # Stair offsets, within half a step, one set per dither phase.
         self._dither = np.ascontiguousarray(np.random.default_rng(20261007).uniform(
             -.5, .5, (DITHER_PHASES, self.slots))*self.step*(self.level > 0))
+        # Two-channel tables: a detail riding on a folded host comes back as
+        # the difference of two stair-rounded hosts over its share, i.e. the
+        # stair error of both channels amplified ~3x (more error than
+        # signal).  So on those slots the first channel's guest carries the
+        # detail itself; the receiver blends it with the difference reading
+        # by how much each can be trusted (``_blend_detail``).
+        self.detail_guest = np.zeros(self.guest_position.shape[1], np.bool_)
+        if self.paired and DETAIL_GUESTS:
+            slot = self.guest_slot
+            carries = (self.ride[slot] > 0) & (self.level[slot] > 0)
+            self.guest_position = self.guest_position.copy()
+            self.guest_sd = self.guest_sd.copy()
+            self.guest_position[0, carries] = self.detail_position[slot[carries]]
+            self.guest_sd[0, carries] = (np.sqrt(self.differ[slot[carries]]) /
+                                         self.ride[slot[carries]])
+            self.detail_guest = carries
         mask = np.zeros(self.luma, bool)
         mask[self.host_position] = True
         mask[self.guest_position.ravel()] = True
@@ -285,7 +305,7 @@ class FrozenFold:
                 self.inverse, self.member, self.host_sector, self.sectors, self.law,
                 self.guest_sector, self.guest_band, self.limits[0], self.limits[1],
                 self.guest_position, self.guest_sd, self.guest_slot, self.noise, self._draw,
-                self.ride, self.detail_position, SERPENTINE))
+                self.ride, self.detail_position, SERPENTINE, self.detail_guest))
         return int(sk.choose_level(
             _f8(plane).ravel(), LOWEST, HIGHEST, RATIO, self.host_position, self.host_mean,
             self.host_sd, self.level, self.step, self.scale, self.alpha, self.compander,
@@ -380,7 +400,21 @@ class FrozenFold:
         for leg, (hosts, guests, _) in got.items():
             if leg != 'sum':
                 self._place_guests(out, leg, hosts, guests, factor)
+        if len(got) == 2 and 'sum' not in got and self.detail_guest.any():
+            self._blend_detail(out, got[0], got[1], factor)
         return out
+
+    def _blend_detail(self, out, first, second, factor):
+        """Details sent both ways (riding on the hosts and as the first
+        channel's guest): the inverse-variance blend of the two readings and
+        the table's prior.  On a quiet link the guest wins; as noise grows
+        the guest fades and the difference reading takes over."""
+        (left, guests, sigma_left), (right, _, sigma_right) = first, second
+        sk.blend_detail(out, left, right, _f8(guests), _f8(sigma_left), _f8(sigma_right),
+                        self.detail_guest, self.guest_slot, self.guest_position[0],
+                        self.guest_sd[0], self._guest_scale(self._activity(left), 0),
+                        self.host_sd, self.ride, self.level, self.step, self.scale,
+                        self.differ, self.compander, float(factor))
 
 
 def _adaptive_host_level():
