@@ -201,10 +201,8 @@ class FrozenFold:
 
     def _stairs(self, hosts, offset=None):
         """Host values as a slip-free receiver decodes them."""
-        if SERPENTINE:
-            return sk.serpentine_stair_values(
-                _f8(hosts), self.level, self.step,
-                self._zero if offset is None else offset)
+        # Both mappings cut the same stairs: the stair centroid is what the
+        # (soft) decoder reads on a quiet link, for either mapping.
         if offset is not None:
             return sk.stair_values_dithered(_f8(hosts), self.level, self.step, offset)
         return sk.stair_values(_f8(hosts), self.level, self.step)

@@ -104,6 +104,7 @@ def install(out=None, fixed_level=None, step_factor=1.0, guest_factor=1.0,
     sk.serpentine_encode_frame(tiny, tiny, level, ones, ones, table, tiny)
     decoder(tiny, level, ones, ones, table if exact_inverse else inverse, tiny)
     sk.serpentine_stair_values(tiny, level, ones, tiny)
+    sk.serpentine_stair_centroids(tiny, level, ones, tiny, 1.0)
     sk.serpentine_soft_decode_frame(tiny, level, ones, ones, ones,
                                     np.ones(sk.SOFT_POINTS), table, tiny, 1.0)
     sk.serpentine_place_pair(np.zeros(2), tiny, tiny, np.array([0]), tiny, ones,
@@ -170,7 +171,12 @@ def install(out=None, fixed_level=None, step_factor=1.0, guest_factor=1.0,
         record_case(self.mapping_metadata)
 
     def stairs(self, hosts, offset=None):
+        # What the receiver decodes on a quiet link: the stair centroid
+        # (soft decode) or the stair middle (plain geometric read).
         off = self._serpentine_zero if offset is None else offset
+        if SOFT_DECODE:
+            return sk.serpentine_stair_centroids(_f8(hosts), self.level, self.step,
+                                                 off, host_factor)
         return sk.serpentine_stair_values(_f8(hosts), self.level, self.step, off)
 
     def encode(self, plane, index, leg=0, phase=None, guest_factor=1.0):

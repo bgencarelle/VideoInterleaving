@@ -1122,9 +1122,7 @@ def choose_level(flat, lowest, highest, ratio, host_position, host_mean, host_sd
         hosts = normalised_hosts(flat, host_position, host_mean, host_sd, factor,
                                  ride, detail_position, sign)
         sent_scale = guest_scales(
-            sector_activity(serpentine_stair_values(hosts, level, step, nothing)
-                            if serpentine else stair_values(hosts, level, step),
-                            member, host_sector, sectors),
+            sector_activity(stair_values(hosts, level, step), member, host_sector, sectors),
             law, guest_sector, guest_band, limit_low, limit_high)
         guests = normalised_guests(flat, guest_position, guest_sd, guest_slot, sent_scale,
                                    factor, slots)
@@ -1141,6 +1139,7 @@ def choose_level(flat, lowest, highest, ratio, host_position, host_mean, host_sd
         if serpentine:
             got_hosts, got = serpentine_decode_frame_exact(received, level, step, scale,
                                                            compander, nothing)
+            got_hosts = stair_values(got_hosts, level, step)
         else:
             got_hosts, got = hard_decode_frame(received, level, step, scale, alpha, inverse)
         got_scale = guest_scales(
@@ -1181,9 +1180,7 @@ def choose_paired_level(flat, lowest, highest, ratio, host_position, host_mean, 
             hosts = normalised_hosts(flat, host_position, host_mean, host_sd, factor,
                                      ride, detail_position, sign)
             sent_scale = guest_scales(
-                sector_activity(serpentine_stair_values(hosts, level, step, nothing)
-                            if serpentine else stair_values(hosts, level, step),
-                            member, host_sector, sectors),
+                sector_activity(stair_values(hosts, level, step), member, host_sector, sectors),
                 law, guest_sector[leg], guest_band, limit_low, limit_high)
             guests = normalised_guests(flat, guest_position[leg], guest_sd[leg], guest_slot,
                                        sent_scale, factor, slots)
@@ -1200,6 +1197,7 @@ def choose_paired_level(flat, lowest, highest, ratio, host_position, host_mean, 
             if serpentine:
                 got_hosts, got = serpentine_decode_frame_exact(received, level, step, scale,
                                                                compander, nothing)
+                got_hosts = stair_values(got_hosts, level, step)
             else:
                 got_hosts, got = hard_decode_frame(received, level, step, scale, alpha,
                                                    inverse)
@@ -1750,6 +1748,20 @@ def serpentine_stair_values(hosts, level, step, offset):
             raise ValueError('serpentine level must be 0 or 1')
         if level[i] == 1:
             out[i] = offset[i]+np.round((hosts[i]-offset[i])/step[i])*step[i]
+    return out
+
+
+@njit(cache=True)
+def serpentine_stair_centroids(hosts, level, step, offset, host_factor):
+    """Each host as the soft decoder reads it on a quiet link: the centroid
+    of its stair under the host prior (``serpentine_soft_decode_frame``)."""
+    out = hosts.copy()
+    for i in range(len(hosts)):
+        if level[i] == 1:
+            k = np.round((hosts[i]-offset[i])/step[i])
+            centre = k*step[i]+offset[i]
+            out[i] = laplace_cell((centre-.5*step[i])*host_factor,
+                                  (centre+.5*step[i])*host_factor)[1]/host_factor
     return out
 
 
