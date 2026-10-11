@@ -28,6 +28,23 @@ adjustment, and no sharpening/clarity. `sample_sender_settings()` in
 introducing another wire identity. Legal-range reconstruction remains the
 explicit option described below; it is not hidden inside this preset.
 
+Selecting either adaptive profile in the GUI applies that same sample preset.
+Saved adaptive preferences predating sample revision 1 migrate once to it;
+subsequent explicitly saved adjustments are retained. Reference is now the
+adaptive kernel default in both CLI and GUI. Legacy profile defaults are
+unchanged. A direct CLI invocation can still explicitly select another kernel
+or capture width; use the sample launcher for the complete matched preset.
+
+GUI-selection verification: selecting each adaptive profile through
+`SenderGui._assign` and launching its generated command produced live received
+RGB at 96 kHz on channels 24/25 (2 mono frames, 3 paired stereo frames in the
+short coloured-text run). The first sender-grid NPZ was byte-identical to the
+sample-preset run for both modes, SHA-256
+`3eafaa3735050539f6cb646dd3234fd4e1716bb5b5ccd9a4766c99d7de771085`.
+This verifies source-value/configuration parity, not bit-identical audio-route
+decodes or elimination of the remaining mono artifacts. 199 focused tests
+passed, including profile selection and one-time preference migration.
+
 The public adaptive mono (ID 2) and stereo (ID 4) paths share the table-scoped
 serpentine codec: exact inverse, host level -1, stair factor 0.25, guest range
 factors 1/2/4/8/16, and bundled chroma50 geometry. Stereo enables the additional

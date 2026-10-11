@@ -550,7 +550,7 @@ SAVED_SETTING_FIELDS = (
     'aspect_layout', 'clip_aware', 'luma_adjust',
     'luma_adjust_linear', 'pixel_encode', 'pixel_detail', 'pixel_grid',
     'dct_kernel', 'dct_kernel_params', 'collapsed_sections',
-    'matched_nested_test', 'nested_test_tables',
+    'matched_nested_test', 'nested_test_tables', 'adaptive_sample_revision',
 )
 
 
@@ -626,6 +626,16 @@ def _restore_sender_settings(target, saved):
                              else 'off')
     if target.get('preview_stage') not in ('source', 'resized'):
         target['preview_stage'] = 'resized'
+    if (target.get('profile') in ('adaptive-mono-nested', 'adaptive-stereo-nested')
+            and saved.get('adaptive_sample_revision') != 1):
+        _apply_adaptive_sample(target)
+
+
+def _apply_adaptive_sample(settings):
+    """Use the same explicit preset as the public sample feed and live tests."""
+    from tools.v7_adaptive_pipeline import sample_sender_settings
+    mode = 'mono' if settings['profile'] == 'adaptive-mono-nested' else 'stereo'
+    settings.update(sample_sender_settings(mode))
 
 
 class OutputDevice:
@@ -2899,6 +2909,8 @@ class SenderGui:
             if kernel_was_default:
                 self.settings['dct_kernel'] = default_kernel_for_profile(value)
             self._profile_changed(value)
+            if value in ('adaptive-mono-nested', 'adaptive-stereo-nested'):
+                _apply_adaptive_sample(self.settings)
             if value not in FOLDED_PROFILES:
                 self.settings['perceptual_resize'] = 'off'
             if value not in DCT_PROFILES:

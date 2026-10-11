@@ -31,7 +31,8 @@ PROFILE_DEFAULT_KERNELS = {
     # its base wire's kernel, the stereo fold with this one.  The stock
     # stereo-slices wire gains nothing from either and stays on the reference.
     'stereo-nested': 'upscale_precomp',
-    'adaptive-stereo-nested': 'upscale_precomp',
+    'adaptive-mono-nested': 'reference',
+    'adaptive-stereo-nested': 'reference',
 }
 
 

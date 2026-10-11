@@ -32,6 +32,10 @@ def sample_sender_settings(mode):
         'profile': f'adaptive-{mode}-nested',
         'dct_encode': True, 'dct_kernel': 'reference', 'luma_adjust': False,
         'capture_width': '768', 'brightness': '1', 'gamma': '1',
+        'dct_sharpen': 'off', 'dct_clarity': '0', 'dct_chroma_gain': '1',
+        'dct_kernel_params': {}, 'clip_aware': False, 'pixel_encode': False,
+        'perceptual_resize': 'off', 'encode_filter': 'auto',
+        'adaptive_sample_revision': 1,
     }
 
 

@@ -11,6 +11,26 @@ from tools.v7_sk_fold import adaptive_body_filtfilt
 
 
 class AdaptivePipelineTests(unittest.TestCase):
+    def test_gui_profile_selection_and_old_preferences_match_sample(self):
+        from tools.v7_send_gui import SenderGui, _restore_sender_settings
+        from tools.v7_adaptive_pipeline import sample_sender_settings
+        for mode in ('mono', 'stereo'):
+            expected = sample_sender_settings(mode)
+            gui = SenderGui(restore_preferences=False)
+            gui._assign('profile', expected['profile'])
+            for key, value in expected.items():
+                self.assertEqual(gui.settings[key], value, key)
+            restored = {}
+            _restore_sender_settings(restored, {
+                'profile': expected['profile'], 'dct_kernel': 'viewer_solve',
+                'capture_width': '160'})
+            for key, value in expected.items():
+                self.assertEqual(restored[key], value, key)
+            restored = {}
+            _restore_sender_settings(restored, {
+                **expected, 'capture_width': '512'})
+            self.assertEqual(restored['capture_width'], '512')
+
     def test_sample_feed_uses_existing_adaptive_modes_and_public_cli(self):
         from tools.v7_sample_feed import command_for
         from tools.v7_live import parser
