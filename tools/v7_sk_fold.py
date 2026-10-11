@@ -1791,48 +1791,65 @@ def serpentine_decode_frame_exact(received, level, step, scale, compander, offse
 
 
 @njit(cache=True)
-def serpentine_shrink_guests(guests, sigma, level, step, scale, compander):
-    """Noise-weighted serpentine guests (in place), one packet.
+def serpentine_soft_decode_frame(received, level, step, scale, sigma, density,
+                                 compander, offset, host_factor):
+    """Posterior-mean host and guest of every serpentine slot at its own
+    noise: the stock ``soft_decode_frame`` for the serpentine mapping.
 
-    A guest rides inside half a stair: symbol noise ``sigma`` (wire units)
-    becomes 2*sigma/(scale*step) on the companded residual, and the inverse
-    compander's slope at the decoded value turns that into guest error e.
-    With p the packet's guest power (mean decoded guest squared less mean
-    e squared, floored), each guest is scaled by p/(p+e*e): a clean link
-    keeps it, a noisy one fades it toward zero (the stock decoder's
-    behaviour) instead of showing the noise as speckle.
+    A folded slot sends d + step*(q + p*c/2): stair q, the stair's
+    orientation p (+1 on even stairs, -1 on odd) and the companded guest c.
+    Every nearby stair and every guest position on the soft grid is weighed
+    by the host prior on that stair (a unit-variance Laplacian on the
+    unnormalised host, which the fixed level scales by ``host_factor``), the
+    table's guest density and the measured noise ``sigma`` (wire units).
+    Nothing is thresholded: on a quiet link stair and guest are read
+    exactly; as noise grows the guest fades to zero and the host slides from
+    the stair centroid to a plain shrunk reading.
     """
-    n = len(guests)
-    errors = np.zeros(n)
-    count = 0
-    power = 0.0
-    noise = 0.0
-    last = len(compander)-1
+    n = len(received)
+    a, b = np.zeros(n), np.zeros(n)
+    grid = np.empty(SOFT_POINTS)
+    value_of = np.empty(SOFT_POINTS)
+    for j in range(SOFT_POINTS):
+        grid[j] = -1.0+2.0*j/(SOFT_POINTS-1)
+        value_of[j] = expand_exact(compander, grid[j])
     for i in range(n):
-        if level[i] != 1:
+        value = received[i]/scale[i]
+        noise = max(sigma[i]/scale[i], 1e-9)
+        if level[i] == 0:
+            a[i] = value/(1.0+noise*noise)
             continue
-        c = abs(compress(compander, guests[i]))
-        position = min(c, 1.0)
-        lo, hi = 0, last
-        while hi-lo > 1:
-            mid = (lo+hi)//2
-            if compander[mid] < position:
-                lo = mid
-            else:
-                hi = mid
-        slope = (B_LIMIT/last)/max(compander[hi]-compander[lo], 1e-12)
-        error = slope*2.0*sigma[i]/(scale[i]*step[i])
-        errors[i] = error
-        power += guests[i]*guests[i]
-        noise += error*error
-        count += 1
-    if count == 0:
-        return guests
-    prior = max((power-noise)/count, 1e-6)
-    for i in range(n):
-        if level[i] == 1:
-            guests[i] *= prior/(prior+errors[i]*errors[i])
-    return guests
+        inner = .5*step[i]
+        shifted = value-offset[i]
+        nearest = np.round(shifted/step[i])
+        # The grid cannot resolve noise finer than its own spacing.
+        spread = math.sqrt(noise*noise+(inner*2.0/(SOFT_POINTS-1))**2/3.0)
+        reach = SOFT_CUTOFF*spread
+        total = host = guest = 0.0
+        for d in range(-SOFT_REACH, SOFT_REACH+1):
+            k = nearest+d
+            parity = 1.0 if k % 2.0 == 0.0 else -1.0
+            # On an odd stair the guest runs the other way.
+            base = parity*(shifted-k*step[i])
+            first, last = _soft_span(base, inner, reach)
+            if first > last:
+                continue
+            centre = k*step[i]+offset[i]
+            prior, centroid = laplace_cell((centre-.5*step[i])*host_factor,
+                                           (centre+.5*step[i])*host_factor)
+            centroid /= host_factor
+            for j in range(first, last+1):
+                miss = (base-inner*grid[j])/spread
+                weight = prior*density[j]*math.exp(-.5*miss*miss)
+                total += weight
+                host += weight*centroid
+                guest += weight*value_of[j]
+        if total > 1e-300:
+            a[i] = host/total
+            b[i] = guest/total
+        else:
+            a[i] = value/(1.0+noise*noise)
+    return a, b
 
 
 @njit(cache=True)

@@ -14,10 +14,10 @@ import threading
 MAPPING = 'serpentine-geometric'
 VERSION = 1
 _ADAPTIVE = threading.local()
-# Receiver: weight each decoded guest by its noise (see
-# v7_sk_fold.serpentine_shrink_guests). A hard decode shows wire noise as
-# full-size guests, which reads as speckle on fine detail.
-GUEST_SHRINK = os.environ.get('V7_SERPENTINE_GUEST_SHRINK', '1') != '0'
+# Receiver: posterior-mean decode at each slot's measured noise
+# (v7_sk_fold.serpentine_soft_decode_frame), as the stock nested fold
+# decodes. V7_SERPENTINE_SOFT=0 restores the plain geometric read (tests).
+SOFT_DECODE = os.environ.get('V7_SERPENTINE_SOFT', '1') != '0'
 
 
 def install(out=None, fixed_level=None, step_factor=1.0, guest_factor=1.0,
@@ -39,6 +39,10 @@ def install(out=None, fixed_level=None, step_factor=1.0, guest_factor=1.0,
     adaptive_guest_range = bool(adaptive_guest_range)
     from tools.v7_adaptive_pipeline import ADAPTIVE_HOST_LEVEL
     host_level = int(ADAPTIVE_HOST_LEVEL)
+    # The level the stairs are cut at: the soft decode's host prior is on
+    # the unnormalised host, which that level divides by RATIO**level.
+    host_factor = float(nf.RATIO)**(host_level if fixed_level is None
+                                    else int(fixed_level))
     if adaptive_guest_range and (fixed_level != host_level or guest_factor != 1.0):
         raise ValueError(f'adaptive guest range fixes host level {host_level} '
                          'and static guest factor 1')
@@ -100,6 +104,8 @@ def install(out=None, fixed_level=None, step_factor=1.0, guest_factor=1.0,
     sk.serpentine_encode_frame(tiny, tiny, level, ones, ones, table, tiny)
     decoder(tiny, level, ones, ones, table if exact_inverse else inverse, tiny)
     sk.serpentine_stair_values(tiny, level, ones, tiny)
+    sk.serpentine_soft_decode_frame(tiny, level, ones, ones, ones,
+                                    np.ones(sk.SOFT_POINTS), table, tiny, 1.0)
     sk.serpentine_place_pair(np.zeros(2), tiny, tiny, np.array([0]), tiny, ones,
                              tiny, np.array([1]), 1.0)
     if adaptive_guest_range:
@@ -180,15 +186,13 @@ def install(out=None, fixed_level=None, step_factor=1.0, guest_factor=1.0,
                                           self.scale, self.compander, offset)
 
     def soft(self, values, sigma, density, offset=None):
-        del density
         off = self._serpentine_zero if offset is None else offset
-        hosts, guests = decoder(_f8(values), self.level, self.step, self.scale,
-                                self._serpentine_decoder_table, off)
-        if GUEST_SHRINK and sigma is not None:
-            # Fade guests by their measured noise instead of showing it.
-            sk.serpentine_shrink_guests(guests, _f8(sigma), self.level,
-                                        self.step, self.scale, self.compander)
-        return hosts, guests
+        if SOFT_DECODE and sigma is not None:
+            return sk.serpentine_soft_decode_frame(
+                _f8(values), self.level, self.step, self.scale, _f8(sigma),
+                density, self.compander, off, host_factor)
+        return decoder(_f8(values), self.level, self.step, self.scale,
+                       self._serpentine_decoder_table, off)
 
     def soften(self, readings, phase=None):
         got = {}
