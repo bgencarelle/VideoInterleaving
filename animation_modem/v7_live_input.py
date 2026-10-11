@@ -40,6 +40,9 @@ _HEADER_OVERLAP = PULSE.SYNC_LEN + META_SYMBOL + 64
 # EOF_MARKER_OFFSET after the header and the decoder looks for it within
 # _EOF_RADIUS either side of that, all in units of the packet's own scale.
 _EOF_RADIUS = max(12.0, EOF_SEARCH_FRACTION*PULSE_FRAME)
+# A forward header closer than this fraction of a packet after the last one
+# lies inside that packet (see LiveInput._inside_previous_packet).
+_PACKET_SPAN_MARGIN = .9
 # The audio by which a marker anywhere in that search must have arrived: a
 # packet with no marker found by then is handed over all the same.
 _PACKET_DEADLINE = EOF_MARKER_OFFSET + EOF_MARKER_LENGTH + _EOF_RADIUS + 1.0
@@ -415,6 +418,8 @@ class LiveInput:
             if (self._headers and
                     position - self._headers[-1][0] < self._same_header):
                 continue
+            if self._inside_previous_packet(position, confidence, direction):
+                continue
             self._headers.append((position, float(scale), float(confidence),
                                   int(direction)))
             self._profile_headers.append((position, profile_code))
@@ -429,6 +434,21 @@ class LiveInput:
                 found += 1
         self._scan_from = max(self._scan_from, int(self.total - overlap))
         return found
+
+    def _inside_previous_packet(self, position, confidence, direction):
+        """True for a weaker forward header inside the packet the last
+        forward header started. A rescan that begins mid-packet can read a
+        stretch of picture data as a preamble (a confidence of about 0.5,
+        where real ones read 0.99); the real next header can only come a
+        whole packet later. Tape speed drift is far inside the margin.
+        A stronger header there is kept: then the earlier one was false."""
+        if direction <= 0 or not self._headers:
+            return False
+        last, scale, last_confidence, last_direction = self._headers[-1]
+        if last_direction <= 0:
+            return False
+        inside = position-last < PULSE_FRAME*scale*_PACKET_SPAN_MARGIN
+        return inside and confidence < last_confidence
 
     def _count_complete(self, audio):
         """Forward packets whose end marker has arrived since the last call.

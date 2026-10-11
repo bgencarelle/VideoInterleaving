@@ -7,12 +7,17 @@ import numpy as np
 from pathlib import Path
 import json
 import math
+import os
 import threading
 
 
 MAPPING = 'serpentine-geometric'
 VERSION = 1
 _ADAPTIVE = threading.local()
+# Receiver: weight each decoded guest by its noise (see
+# v7_sk_fold.serpentine_shrink_guests). A hard decode shows wire noise as
+# full-size guests, which reads as speckle on fine detail.
+GUEST_SHRINK = os.environ.get('V7_SERPENTINE_GUEST_SHRINK', '1') != '0'
 
 
 def install(out=None, fixed_level=None, step_factor=1.0, guest_factor=1.0,
@@ -172,10 +177,15 @@ def install(out=None, fixed_level=None, step_factor=1.0, guest_factor=1.0,
                                           self.scale, self.compander, offset)
 
     def soft(self, values, sigma, density, offset=None):
-        del sigma, density
+        del density
         off = self._serpentine_zero if offset is None else offset
-        return decoder(_f8(values), self.level, self.step, self.scale,
-                       self._serpentine_decoder_table, off)
+        hosts, guests = decoder(_f8(values), self.level, self.step, self.scale,
+                                self._serpentine_decoder_table, off)
+        if GUEST_SHRINK and sigma is not None:
+            # Fade guests by their measured noise instead of showing it.
+            sk.serpentine_shrink_guests(guests, _f8(sigma), self.level,
+                                        self.step, self.scale, self.compander)
+        return hosts, guests
 
     def soften(self, readings, phase=None):
         got = {}
@@ -194,17 +204,19 @@ def install(out=None, fixed_level=None, step_factor=1.0, guest_factor=1.0,
         return got
 
     def decode_paired(self, got, factor, averaged=False):
-        del averaged
         out_plane = np.zeros(self.luma)
         shared = (self.host_position, self.host_mean, self.host_sd, self.common,
                   self.differ, self.ride, self.detail_position, factor)
         if 'sum' in got:
             sk.place_single(out_plane, got['sum'][0], *shared, 0.0)
         elif len(got) == 2:
-            left, right = got[0][0], got[1][0]
-            sk.serpentine_place_pair(out_plane, left, right, self.host_position,
-                                     self.host_mean, self.host_sd, self.ride,
-                                     self.detail_position, factor)
+            # Base and detail weighted by what each leg's noise and stair
+            # error left of them (the stock paired placement). The plain
+            # algebraic split divides the two legs' independent stair errors
+            # by the ride, which on small rides showed as bent lines.
+            (left, _, sigma_left), (right, _, sigma_right) = got[0], got[1]
+            sk.place_pair(out_plane, left, right, sigma_left, sigma_right,
+                          self.level, self.step, *shared, bool(averaged))
         else:
             (leg, (hosts, _, _)), = got.items()
             sk.place_single(out_plane, hosts, *shared, 1.0 if leg == 0 else -1.0)

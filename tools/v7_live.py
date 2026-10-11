@@ -547,6 +547,30 @@ def _wire_index(counter):
     return (int(counter)-1) % (P.MAX_SOURCE_INDEX+1)
 
 
+def _masks_on_grids(masks, grids):
+    """Chroma masks on the coding grids. A wire's masks are on the legacy V7
+    chroma grid; an enlarged grid (the adaptive nested tables) holds the same
+    coefficient (u, v) at its own row length (nested_grid.FoldGrid), so each
+    legacy mask is moved there; coefficients past the grid's edge are not
+    carried."""
+    out = []
+    for plane, mask in zip((1, 2), masks):
+        mask = np.asarray(mask, dtype=bool)
+        rows, cols = grids[plane]
+        if mask.size == rows*cols:
+            out.append(mask)
+            continue
+        old_rows, old_cols = P.V7_GRIDS[plane]
+        if mask.size != old_rows*old_cols:
+            raise ValueError('chroma mask fits neither the legacy nor the coding grid')
+        moved = np.zeros((rows, cols), dtype=bool)
+        keep_rows, keep_cols = min(rows, old_rows), min(cols, old_cols)
+        moved[:keep_rows, :keep_cols] = mask.reshape(
+            old_rows, old_cols)[:keep_rows, :keep_cols]
+        out.append(moved.ravel())
+    return out
+
+
 def _chroma_sent_masks(codec):
     """Per chroma grid: the coefficients a fold codec's packets carry."""
     kept = np.asarray(codec.kept, dtype=np.int64)
@@ -639,6 +663,7 @@ def _values(model, frame, encode_filter='nearest', brightness=1.05, gamma=1.0,
         from animation_modem.v7_source_dct import luma_adjust
         masks = chroma_sent_for(aspect)
         if masks is not None:
+            masks = _masks_on_grids(masks, model.coder.grids)
             values = luma_adjust(values, model.coder.grids, masks, luminance[0])
     deferred_gains = None
     if kernel_frame and defer_kernel_gain:

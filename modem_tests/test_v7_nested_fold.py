@@ -169,10 +169,11 @@ class TableTests(unittest.TestCase):
                     slice_wire._dct_matrix(cols).T
                 detail = ready.detail[plane]
                 scale = experimental.grid.scales[plane]
-                # Slot tables retain their legacy coefficient units; the
-                # receiver's established inverse-grid scaling is applied after
-                # restoring both transmitted legs.
-                expected = spectra[plane][detail]/(scale*scale)
+                # The sender's spectra are in legacy units (FoldGrid.forward
+                # scales by sqrt(old/new)); the receiver's inverse-grid
+                # scaling (1/scale) returns them to the enlarged grid's own
+                # units once, not twice (chroma was 1.25x too strong).
+                expected = spectra[plane][detail]/scale
                 np.testing.assert_allclose(recovered.ravel()[detail], expected,
                                            rtol=2e-5, atol=2e-7)
                 self.assertGreater(float(np.linalg.norm(recovered.ravel()[detail])),

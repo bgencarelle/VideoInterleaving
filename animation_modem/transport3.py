@@ -289,7 +289,7 @@ def _measure_pulse_profiles(samples, min_scale, max_scale, match_both,
         return forward
     if forward is not None and reverse is not None:
         if _opposite_words_overlap(forward, reverse):
-            return None
+            return _stronger_of_overlapping(forward, reverse)
     candidates = [hit for hit in (forward, reverse) if hit is not None]
     return min(candidates, key=lambda hit: hit[0]) if candidates else None
 
@@ -330,6 +330,22 @@ def _opposite_words_overlap(first, second):
     closer than one preamble at the smaller of their scales."""
     return abs(first[0]-second[0]) < OPPOSITE_WORD_SPACING*min(first[1],
                                                                second[1])
+
+
+# Overlapping opposite words are both distrusted only when they fit about
+# equally well. A clean preamble fits at about 0.99; the edges of a preamble
+# together with the picture data right after it can also read as a reversed
+# word, at a clearly lower fit (0.73 seen on adaptive stereo, ID 4). Dropping
+# both then lost every header of the stream.
+OPPOSITE_CONFIDENCE_MARGIN = .15
+
+
+def _stronger_of_overlapping(first, second):
+    """Of two overlapping opposite hits ``(position, scale, confidence,
+    ...)``, the one that fits clearly better, or None when neither does."""
+    if abs(first[2]-second[2]) < OPPOSITE_CONFIDENCE_MARGIN:
+        return None
+    return first if first[2] > second[2] else second
 
 
 def measure_pulses_both(samples, min_scale=0.5, max_scale=4.0,
@@ -423,7 +439,7 @@ def measure_pulses_both_numpy(samples, min_scale=0.5, max_scale=4.0,
         if hit is not None:
             candidates.append((*hit, way))
     if len(candidates) == 2 and _opposite_words_overlap(*candidates):
-        return None
+        return _stronger_of_overlapping(*candidates)
     return min(candidates, key=lambda hit: hit[0]) if candidates else None
 
 

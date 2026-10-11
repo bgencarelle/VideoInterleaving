@@ -1791,6 +1791,51 @@ def serpentine_decode_frame_exact(received, level, step, scale, compander, offse
 
 
 @njit(cache=True)
+def serpentine_shrink_guests(guests, sigma, level, step, scale, compander):
+    """Noise-weighted serpentine guests (in place), one packet.
+
+    A guest rides inside half a stair: symbol noise ``sigma`` (wire units)
+    becomes 2*sigma/(scale*step) on the companded residual, and the inverse
+    compander's slope at the decoded value turns that into guest error e.
+    With p the packet's guest power (mean decoded guest squared less mean
+    e squared, floored), each guest is scaled by p/(p+e*e): a clean link
+    keeps it, a noisy one fades it toward zero (the stock decoder's
+    behaviour) instead of showing the noise as speckle.
+    """
+    n = len(guests)
+    errors = np.zeros(n)
+    count = 0
+    power = 0.0
+    noise = 0.0
+    last = len(compander)-1
+    for i in range(n):
+        if level[i] != 1:
+            continue
+        c = abs(compress(compander, guests[i]))
+        position = min(c, 1.0)
+        lo, hi = 0, last
+        while hi-lo > 1:
+            mid = (lo+hi)//2
+            if compander[mid] < position:
+                lo = mid
+            else:
+                hi = mid
+        slope = (B_LIMIT/last)/max(compander[hi]-compander[lo], 1e-12)
+        error = slope*2.0*sigma[i]/(scale[i]*step[i])
+        errors[i] = error
+        power += guests[i]*guests[i]
+        noise += error*error
+        count += 1
+    if count == 0:
+        return guests
+    prior = max((power-noise)/count, 1e-6)
+    for i in range(n):
+        if level[i] == 1:
+            guests[i] *= prior/(prior+errors[i]*errors[i])
+    return guests
+
+
+@njit(cache=True)
 def adaptive_guest_peak(flat, positions, guest_sd, guest_scale, host_factor):
     """Maximum normalized magnitude for actual guests in one leg.
 

@@ -935,13 +935,13 @@ def _slice_wire_class():
                 old_full = sk.contract_grid_planes(
                     spectra[0], spectra[1], spectra[2], fold.grid.positions,
                     fold.grid.old_off, fold.grid.off, fold.grid.old_size)
+                # FoldGrid.forward already returns legacy coefficient units
+                # (each enlarged plane is scaled by sqrt(old/new)), which is
+                # what the stock slots carry and what the receiver's
+                # inverse_plane_scaled(1/scale) expects. No further scaling:
+                # dividing by the scale again sent chroma 1.25x too strong.
                 legacy = [old_full[a:b] for a, b in zip(
                     fold.grid.old_off[:-1], fold.grid.old_off[1:])]
-                # The source projection keeps canonical coefficient units by
-                # scaling each enlarged plane. Stock chroma ranks still use
-                # legacy units, so undo that scale before their fixed slots.
-                for plane in (1, 2):
-                    legacy[plane] = legacy[plane]/fold.grid.scales[plane]
             out = super().channel_coefficients(model, legacy, kind)
             if fold is None:
                 return out
