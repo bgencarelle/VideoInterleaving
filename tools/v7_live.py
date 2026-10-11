@@ -1526,8 +1526,9 @@ def _run_send_session(args):
                 getattr(args, 'aspect_layout', 'auto'), send=True,
                 path=(getattr(args, 'adaptive_nested_table', None)
                       if getattr(args, 'adaptive_nested_family', False) else None),
-                adaptive_guest_range=bool(getattr(
-                    args, 'adaptive_nested_family', False)),
+                # Level chosen per picture by trial decode (the stock nested
+                # fold's rule, V7_SK_VERDICT.md), not a fixed host level.
+                adaptive_guest_range=False,
                 chroma_detail=bool(getattr(args,
                                            'adaptive_nested_family', False)))
             if getattr(args, 'adaptive_nested_family', False):
@@ -2604,7 +2605,7 @@ class _AdaptiveProfileDecoder:
         # mono status with the metadata model bit set to nearest.
         self.slice_wire = nested_fold.slice_wire(aspect_layout)
         self.adaptive_slice_wire = nested_fold.slice_wire(
-            aspect_layout, path=nested_table_path, adaptive_guest_range=True,
+            aspect_layout, path=nested_table_path, adaptive_guest_range=False,
             chroma_detail=True)
         self.adaptive_mono_mode = ADAPTIVE_PROFILES['adaptive-mono-nested']['mode']
         self.adaptive_stereo_mode = ADAPTIVE_PROFILES['adaptive-stereo-nested']['mode']

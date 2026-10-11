@@ -23,11 +23,11 @@ def install_receiver(live, table_path, profile=None):
     table = resolve_table_path(table_path)
     from tools.v7_nested_experiment import install
     install(live, table, set_default=False)
-    from tools.v7_adaptive_serpentine import install as install_codec
-    from tools.v7_adaptive_pipeline import SERPENTINE_STEP_FACTOR, EXACT_INVERSE
-    install_codec(step_factor=SERPENTINE_STEP_FACTOR,
-                  exact_inverse=EXACT_INVERSE,
-                  isolated_path=table)
+    # The table runs on the stock nested fold: serpentine slots, the level
+    # chosen per picture by trial decode and sent on the signature, and the
+    # soft decode (nested_fold.SERPENTINE). The fixed host level with
+    # guest-only range factors is not installed: it left slot values far
+    # above the design level (V7_SK_VERDICT.md, "loud pictures").
     return table, True
 
 
@@ -38,11 +38,7 @@ def install_sender(live, table_path='', profile=None):
     table = resolve_table_path(table_path)
     from tools.v7_nested_experiment import install
     install(live, table, set_default=False)
-    from tools.v7_adaptive_pipeline import (
-        SERPENTINE_STEP_FACTOR, EXACT_INVERSE)
-    from tools.v7_adaptive_serpentine import install as install_codec
-    install_codec(step_factor=SERPENTINE_STEP_FACTOR,
-                  exact_inverse=EXACT_INVERSE, isolated_path=table)
+    # Same fold as the receiver (see install_receiver).
     return table
 
 
