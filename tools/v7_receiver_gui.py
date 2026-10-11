@@ -1292,8 +1292,8 @@ class ReceiverGui:
                     self.v7_live, args.nested_test_tables)
                 args.adaptive_nested_table = str(_table)
                 args.adaptive_nested_installed = True
-                print('V7 adaptive nested profiles: ID 2; mono/stereo selected by '
-                      'validated signature and metadata; legacy profile IDs remain '
+                print('V7 adaptive nested profiles: mono ID 2, stereo ID 4; '
+                      'adaptive signature validation remains required; legacy profile IDs remain '
                       'separate; serpentine adaptive_guest_range=factors[1,2,4,8,16] '
                       f'host_level=-1 step_factor=0.25 exact_inverse chroma_detail={detail}',
                       flush=True)

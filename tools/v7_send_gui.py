@@ -45,7 +45,7 @@ from tools.v7_profile_registry import SEND_PROFILES as PROFILE_CHOICES
 # slices are deprecated and no longer selectable (DEPRECATED_PROFILES); their
 # wires remain in the code because the nested folds ride on them and the
 # receiver still reads them.
-DEPRECATED_PROFILES = ('fold-500', 'mono-fold-500', 'mono-colour-500', 'stereo-slices')
+DEPRECATED_PROFILES = ('fold-500', 'mono-colour-500', 'stereo-slices')
 
 
 def valid_profiles():

@@ -14,7 +14,9 @@ from .v7_core import _sample_at
 SYNC_LEN = 288
 HALF = 8
 PREAMBLE_BITS = (0, 0, 0, 0, 0, 0, 1, 0, 0, 1, 0, 1, 1, 1, 0, 0)
-ADAPTIVE_NESTED_MODE = 2
+ADAPTIVE_MONO_MODE = 2
+ADAPTIVE_STEREO_MODE = 4  # reuses the retired MONO_500 wire identity
+ADAPTIVE_NESTED_MODE = ADAPTIVE_MONO_MODE  # compatibility alias
 PREAMBLE_AMPLITUDE = 0.55
 SHORT, LONG = HALF, 2 * HALF
 EDGE_HYSTERESIS = 0.2
@@ -23,7 +25,8 @@ EDGE_HYSTERESIS = 0.2
 # The Schmitt band is EDGE_HYSTERESIS of it.
 HEADER_ARRIVAL_PEAK = 10**(-1/20)
 
-# The six current coded-profile IDs use constant-weight biphase words.  Every
+# Six coded-profile IDs use constant-weight biphase words. ID 4's former
+# MONO_500 meaning is retired and reused for adaptive nested stereo. Every
 # word keeps the same first/last edge and the same edge count, so pulse timing
 # geometry is unchanged; the interval pattern carries the profile ID.  ID 1 is
 # the historical V7 word (Fold-500), preserving its existing pulse signature.
@@ -31,9 +34,9 @@ HEADER_ARRIVAL_PEAK = 10**(-1/20)
 PROFILE_PREAMBLE_BITS = {
     0: (0, 1, 1, 1, 0, 1, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0),  # Fold-off / aspect-fold-500
     1: PREAMBLE_BITS,                                        # Fold-500
-    ADAPTIVE_NESTED_MODE: (0, 1, 0, 0, 1, 0, 0, 0, 0, 0, 1, 1, 0, 0, 1, 0),  # adaptive nested mono/stereo
+    ADAPTIVE_MONO_MODE: (0, 1, 0, 0, 1, 0, 0, 0, 0, 0, 1, 1, 0, 0, 1, 0),  # adaptive nested mono
     3: (0, 1, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1, 0),  # Mono-off / aspect-mono-500
-    4: (0, 1, 0, 0, 0, 1, 1, 0, 0, 0, 0, 0, 0, 1, 1, 0),  # Mono-500
+    ADAPTIVE_STEREO_MODE: (0, 1, 0, 0, 0, 1, 1, 0, 0, 0, 0, 0, 0, 1, 1, 0),  # adaptive nested stereo; retired MONO_500 ID
     5: (0, 0, 1, 0, 0, 0, 1, 1, 0, 1, 1, 0, 0, 0, 0, 0),  # Mono-1000
 }
 

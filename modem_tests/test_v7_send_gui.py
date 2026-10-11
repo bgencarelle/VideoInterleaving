@@ -113,7 +113,7 @@ class SenderGuiTests(unittest.TestCase):
 
     def test_deprecated_profiles_are_refused_outside_the_test_switch(self):
         from tools import v7_send_gui as gui
-        deprecated = ('fold-500', 'mono-fold-500', 'mono-colour-500', 'stereo-slices')
+        deprecated = ('fold-500', 'mono-colour-500', 'stereo-slices')
         self.assertEqual(gui.DEPRECATED_PROFILES, deprecated)
         self.assertEqual(set(v7_live.DEPRECATED_SEND_PROFILES), set(deprecated))
         with patch.dict('os.environ', {'V7_ALLOW_DEPRECATED_PROFILES': ''}):
@@ -125,6 +125,12 @@ class SenderGuiTests(unittest.TestCase):
                     v7_live.parser().parse_args(
                         ['send', '--device', 'null', '--source', 'test',
                          '--profile', profile])
+        with patch.dict('os.environ', {'V7_ALLOW_DEPRECATED_PROFILES': '1'}), \
+                patch('sys.stderr'):
+            with self.assertRaises(SystemExit):
+                v7_live.parser().parse_args([
+                    'send', '--device', 'null', '--source', 'test',
+                    '--profile', 'mono-fold-500'])
         with patch.dict('os.environ', {'V7_ALLOW_DEPRECATED_PROFILES': '1'}):
             self.assertIn('fold-500', gui.valid_profiles())
 

@@ -13,13 +13,14 @@ from tools.v7_receiver_audio import (AudioPassthrough,
 
 
 class ReceiverChannelRouterTests(unittest.TestCase):
-    MONO_500 = 4
+    ADAPTIVE_MONO = 2
+    ADAPTIVE_STEREO = 4
     FOLD_500 = 1
 
     def test_profile_candidate_cannot_disable_playing_audio(self):
-        router = ReceiverChannelRouter(self.MONO_500,
-                                       stereo_modes=(self.FOLD_500,))
-        good = {'confirmed': True, 'channel_modes': (None, self.MONO_500)}
+        router = ReceiverChannelRouter(self.ADAPTIVE_MONO,
+                                       stereo_modes=(self.FOLD_500, self.ADAPTIVE_STEREO))
+        good = {'confirmed': True, 'channel_modes': (None, self.ADAPTIVE_MONO)}
         router.observe_profile_decision(good, now=1.0)
         router.observe_profile_decision(good, now=1.1)
         candidate = {'confirmed': False,
@@ -31,12 +32,12 @@ class ReceiverChannelRouterTests(unittest.TestCase):
         self.assertEqual(router.last_packet, 1.1)
 
     def test_single_soundtrack_status_does_not_disable_audio(self):
-        router = ReceiverChannelRouter(self.MONO_500)
-        good = {'confirmed': True, 'channel_modes': (None, self.MONO_500)}
+        router = ReceiverChannelRouter(self.ADAPTIVE_MONO)
+        good = {'confirmed': True, 'channel_modes': (None, self.ADAPTIVE_MONO)}
         router.observe_profile_decision(good, now=1.0)
         router.observe_profile_decision(good, now=1.1)
         stray = {'confirmed': True,
-                 'channel_modes': (self.MONO_500, self.MONO_500)}
+                 'channel_modes': (self.ADAPTIVE_MONO, self.ADAPTIVE_MONO)}
         state = router.observe_profile_decision(stray, now=1.2)
         self.assertEqual(state['audio_side'], 'left')
         router.observe_profile_decision(good, now=1.3)
@@ -47,10 +48,10 @@ class ReceiverChannelRouterTests(unittest.TestCase):
         self.assertEqual(state['state'], 'dual-mono')
 
     def test_mono_route_does_not_change_on_packet_loss(self):
-        router = ReceiverChannelRouter(self.MONO_500,
+        router = ReceiverChannelRouter(self.ADAPTIVE_MONO,
                                        initial_video_side='right')
-        router.observe(None, self.MONO_500, now=1.0)
-        state = router.observe(None, self.MONO_500, now=1.1)
+        router.observe(None, self.ADAPTIVE_MONO, now=1.0)
+        state = router.observe(None, self.ADAPTIVE_MONO, now=1.1)
         self.assertEqual(state['state'], 'mono-right')
         self.assertEqual(state['audio_side'], 'left')
 
@@ -62,9 +63,9 @@ class ReceiverChannelRouterTests(unittest.TestCase):
                          'sync-lost')
 
     def test_mono_audio_passthrough_keeps_last_side_after_sync_loss(self):
-        router = ReceiverChannelRouter(self.MONO_500)
-        router.observe(None, self.MONO_500, now=1.0)
-        router.observe(None, self.MONO_500, now=1.1)
+        router = ReceiverChannelRouter(self.ADAPTIVE_MONO)
+        router.observe(None, self.ADAPTIVE_MONO, now=1.0)
+        router.observe(None, self.ADAPTIVE_MONO, now=1.1)
 
         route = router.observe(now=4.0)
 
@@ -74,10 +75,10 @@ class ReceiverChannelRouterTests(unittest.TestCase):
         self.assertIsNone(passthrough_audio_side(route, 1))
 
     def test_side_changes_only_after_current_expires_and_other_is_confirmed(self):
-        router = ReceiverChannelRouter(self.MONO_500,
+        router = ReceiverChannelRouter(self.ADAPTIVE_MONO,
                                        initial_video_side='right')
-        router.observe(None, self.MONO_500, now=0.0)
-        router.observe(None, self.MONO_500, now=.1)
+        router.observe(None, self.ADAPTIVE_MONO, now=0.0)
+        router.observe(None, self.ADAPTIVE_MONO, now=.1)
 
         # Pulses without a validated status do not permit a route change.
         state = router.observe(now=.9)
@@ -85,16 +86,16 @@ class ReceiverChannelRouterTests(unittest.TestCase):
 
         # The opposite leg is confirmed only after its own two distinct packet
         # statuses; current-side evidence has meanwhile expired.
-        router.observe(self.MONO_500, None, now=.91)
-        state = router.observe(self.MONO_500, None, now=.92)
+        router.observe(self.ADAPTIVE_MONO, None, now=.91)
+        state = router.observe(self.ADAPTIVE_MONO, None, now=.92)
         self.assertEqual(state['state'], 'mono-left')
         self.assertEqual(state['video_side'], 'left')
         self.assertEqual(state['audio_side'], 'right')
 
     def test_two_active_mono_legs_are_dual_mono_not_audio(self):
-        router = ReceiverChannelRouter(self.MONO_500,
+        router = ReceiverChannelRouter(self.ADAPTIVE_MONO,
                                        initial_video_side='right')
-        router.observe(self.MONO_500, self.MONO_500, now=1.0,
+        router.observe(self.ADAPTIVE_MONO, self.ADAPTIVE_MONO, now=1.0,
                        left_confirmed=True, right_confirmed=True)
         state = router.snapshot(1.0)
         self.assertEqual(state['state'], 'dual-mono')
@@ -103,7 +104,7 @@ class ReceiverChannelRouterTests(unittest.TestCase):
 
     def test_router_recognizes_both_transmitted_mono_profile_statuses(self):
         router = ReceiverChannelRouter(
-            (self.MONO_500, 5), stereo_modes=(self.FOLD_500,))
+            (self.ADAPTIVE_MONO, 5), stereo_modes=(self.FOLD_500, self.ADAPTIVE_STEREO))
 
         router.observe(5, None, now=1.0, left_confirmed=True)
         state = router.observe(5, None, now=1.1, left_confirmed=True)
@@ -113,10 +114,35 @@ class ReceiverChannelRouterTests(unittest.TestCase):
         self.assertEqual(state['audio_side'], 'right')
 
     def test_two_active_fold_legs_are_stereo_and_loss_does_not_reclassify(self):
-        router = ReceiverChannelRouter(self.MONO_500,
-                                       stereo_modes=(self.FOLD_500,))
+        router = ReceiverChannelRouter(self.ADAPTIVE_MONO,
+                                       stereo_modes=(self.FOLD_500, self.ADAPTIVE_STEREO))
         router.observe(self.FOLD_500, self.FOLD_500, now=1.0)
         state = router.observe(self.FOLD_500, self.FOLD_500, now=1.1)
+        self.assertEqual(state['state'], 'stereo')
+        self.assertIsNone(state['audio_side'])
+
+    def test_adaptive_stereo_identity_routes_both_legs_as_video(self):
+        router = ReceiverChannelRouter(
+            self.ADAPTIVE_MONO,
+            stereo_modes=(self.FOLD_500, self.ADAPTIVE_STEREO))
+        state = router.observe(None, self.ADAPTIVE_STEREO, now=1.0,
+                               right_confirmed=True)
+        self.assertEqual(state['state'], 'stereo')
+        self.assertEqual(state['video_side'], 'both')
+        self.assertIsNone(passthrough_audio_side(state, 2))
+
+    def test_profile_switch_reset_clears_old_mono_passthrough(self):
+        router = ReceiverChannelRouter(
+            self.ADAPTIVE_MONO,
+            stereo_modes=(self.FOLD_500, self.ADAPTIVE_STEREO))
+        router.observe(None, self.ADAPTIVE_MONO, now=1.0,
+                       right_confirmed=True)
+        self.assertEqual(router.snapshot(1.0)['audio_side'], 'left')
+        router.reset()
+        self.assertIsNone(router.snapshot(1.1)['audio_side'])
+        state = router.observe(self.ADAPTIVE_STEREO, self.ADAPTIVE_STEREO,
+                               now=1.2, left_confirmed=True,
+                               right_confirmed=True)
         self.assertEqual(state['state'], 'stereo')
         self.assertIsNone(state['audio_side'])
 
@@ -126,10 +152,10 @@ class ReceiverChannelRouterTests(unittest.TestCase):
         self.assertIsNone(state['audio_side'])
 
     def test_freewheel_precedes_configured_sync_loss_warning_threshold(self):
-        router = ReceiverChannelRouter(self.MONO_500,
+        router = ReceiverChannelRouter(self.ADAPTIVE_MONO,
                                        initial_video_side='right')
-        router.observe(None, self.MONO_500, now=1.0)
-        router.observe(None, self.MONO_500, now=1.1)
+        router.observe(None, self.ADAPTIVE_MONO, now=1.0)
+        router.observe(None, self.ADAPTIVE_MONO, now=1.1)
         self.assertEqual(router.sync_state(1.5, 2.0), 'playing')
         self.assertEqual(router.sync_state(2.0, 2.0), 'freewheeling')
         self.assertEqual(router.sync_state(3.1, 2.0), 'freewheeling')

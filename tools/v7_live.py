@@ -1104,15 +1104,14 @@ def _mix_mono_video_audio(modem, frames, source, delay, video_side,
     return output
 
 
-# Sender profiles on offer.  mono-fold-500, fold-500, mono-colour-500 and
-# stereo-slices are deprecated: no longer valid choices, though their wires
+# Sender profiles on offer.  fold-500, mono-colour-500 and stereo-slices are
+# deprecated: no longer valid choices, though their wires
 # stay (the nested folds ride on them and the receiver still reads them).
-from tools.v7_profile_registry import (ADAPTIVE_NESTED_MODE,
+from tools.v7_profile_registry import (ADAPTIVE_PROFILES,
                                        SEND_PROFILES as PROFILE_REGISTRY)
 
 SEND_PROFILES = tuple(value for _label, value in PROFILE_REGISTRY)
-DEPRECATED_SEND_PROFILES = ('mono-fold-500', 'fold-500', 'mono-colour-500',
-                            'stereo-slices')
+DEPRECATED_SEND_PROFILES = ('fold-500', 'mono-colour-500', 'stereo-slices')
 
 
 def deprecated_profiles_allowed():
@@ -1135,6 +1134,15 @@ def _apply_profile_option(args):
     (tools/v7_send_defaults.py) is the one sent.
     """
     profile = getattr(args, 'profile', None)
+    if profile == 'mono-fold-500':
+        raise ValueError('mono-fold-500 status ID 4 is retired; ID 4 now '
+                         'identifies adaptive-stereo-nested')
+    if (profile is None and getattr(args, 'experimental_mono_fold', False) and
+            not getattr(args, 'experimental_mono_colour', False) and
+            not getattr(args, 'aspect_mono', False) and
+            not getattr(args, 'nested_fold', False)):
+        raise ValueError('--experimental-mono-fold used retired status ID 4; '
+                         'select adaptive-stereo-nested for ID 4')
     if profile is None and not (
             getattr(args, 'experimental_mono_fold', False) or
             getattr(args, 'experimental_fold', None) is not None or
@@ -1459,8 +1467,9 @@ def _run_send_session(args):
                 chroma_detail=bool(getattr(args,
                                            'adaptive_nested_family', False)))
             if getattr(args, 'adaptive_nested_family', False):
-                slice_wire.status_mode = ADAPTIVE_NESTED_MODE
-                slice_wire.pulse_profile_code = ADAPTIVE_NESTED_MODE
+                wire_mode = ADAPTIVE_PROFILES[args.profile]['mode']
+                slice_wire.status_mode = wire_mode
+                slice_wire.pulse_profile_code = wire_mode
         # Build every layout model the sender may need before audio starts.
         for layout in ((slice_wire.layout,) if slice_wire.layout != 'auto' else
                        tuple(dict.fromkeys(
@@ -1486,8 +1495,9 @@ def _run_send_session(args):
                     path=(nested_fold.TABLES if getattr(
                         args, 'adaptive_nested_family', False) else None))
                 if getattr(args, 'adaptive_nested_family', False):
-                    mono_wire.status_mode = ADAPTIVE_NESTED_MODE
-                    mono_wire.pulse_profile_code = ADAPTIVE_NESTED_MODE
+                    wire_mode = ADAPTIVE_PROFILES[args.profile]['mode']
+                    mono_wire.status_mode = wire_mode
+                    mono_wire.pulse_profile_code = wire_mode
         else:
             wire_class = (MonoColourFoldWire
                           if getattr(args, 'experimental_mono_colour', False)
@@ -2477,11 +2487,11 @@ class _AdaptiveProfileDecoder:
         from live_fold import LiveFold
         from aspect_fold import AspectFoldWire
         from aspect_mono import AspectMonoWire
-        from mono_video import (MonoColourFoldWire, MonoFreshFoldWire,
-                                mono_channel_profile)
-        from tone_code import FOLD_500, MONO_500, MONO_1000
+        from mono_video import MonoColourFoldWire, mono_channel_profile
+        from tone_code import FOLD_500, MONO_1000
 
         self.fold = fold
+        self.base_mode = FOLD_500
         self.v7 = v7
         self.base_model = base_model
         self.preferred_side = preferred_side
@@ -2502,7 +2512,6 @@ class _AdaptiveProfileDecoder:
                                 path=nested_table_path,
                                 require_nested=True)
         self.mono_wires = {
-            MONO_500: MonoFreshFoldWire(base_model, side='both'),
             MONO_1000: MonoColourFoldWire(base_model, side='both'),
             self.aspect_mono_mode: self.aspect_mono_wire,
         }
@@ -2531,26 +2540,26 @@ class _AdaptiveProfileDecoder:
         self.adaptive_slice_wire = nested_fold.slice_wire(
             aspect_layout, path=nested_table_path, adaptive_guest_range=True,
             chroma_detail=True)
-        # ID 2 is shared by mono and stereo-slices. Its subtype is unknown
-        # until a packet with independently verified metadata is decoded.
-        self._last_slices = None
-        # ID 2 was reserved for the removed Fold-1000. It now identifies only
-        # the matched adaptive nested family; the metadata model bit selects
-        # its mono or stereo-slices interpretation.
-        self.adaptive_mode = ADAPTIVE_NESTED_MODE
-        self.mono_wires[self.adaptive_mode] = self.adaptive_mono_wire
+        self.adaptive_mono_mode = ADAPTIVE_PROFILES['adaptive-mono-nested']['mode']
+        self.adaptive_stereo_mode = ADAPTIVE_PROFILES['adaptive-stereo-nested']['mode']
+        self.adaptive_slice_wire.status_mode = self.adaptive_stereo_mode
+        self.adaptive_slice_wire.pulse_profile_code = self.adaptive_stereo_mode
+        self.stereo_slice_modes = frozenset((self.adaptive_stereo_mode,))
+        self.mono_wires[self.adaptive_mono_mode] = self.adaptive_mono_wire
         self.mono_status_modes = frozenset(self.mono_wires)
+        self.stereo_status_modes = frozenset((self.aspect_mode, *self.stereo_slice_modes))
         self.supported_modes = frozenset(
-            (FOLD_500, self.aspect_mode, *self.mono_wires))
+            (FOLD_500, self.aspect_mode, *self.mono_wires,
+             *self.stereo_slice_modes))
         self._mode_names = {
             FOLD_500: 'fold-500',
             self.aspect_mode: 'aspect-fold-500',
-            MONO_500: 'mono-fold-500',
             MONO_1000: 'mono-colour-500',
             self.aspect_mono_mode: 'aspect-mono-500',
-            self.adaptive_mode: 'adaptive-mono-nested',
+            self.adaptive_mono_mode: 'adaptive-mono-nested',
+            self.adaptive_stereo_mode: 'adaptive-stereo-nested',
         }
-        self.active_mode = FOLD_500
+        self.active_mode = self.base_mode
         self.active_side = None
         self.candidate = None
         self.streak = 0
@@ -2564,6 +2573,9 @@ class _AdaptiveProfileDecoder:
         self.stereo_tail_memory = True
         self.dispatch_mode = None
         self.dispatch_side = None
+        self.dispatch_slice_metadata = False
+        self.aspect_mono_slices = False
+        self.startup_hint = None
         # Called with (profile name, side) whenever a new profile is
         # confirmed; the live receiver keeps it for its next start.
         self.on_switch = None
@@ -2577,54 +2589,37 @@ class _AdaptiveProfileDecoder:
             raise TypeError('adaptive V7 profile dispatch requires LiveFold')
 
     def may_use_stereo_slices(self, mode=None):
-        """Whether a mono-status packet may need its companion leg."""
+        """Whether this confirmed wire identity carries two slice legs."""
         mode = self.dispatch_mode if mode is None else mode
-        return mode in (self.aspect_mono_mode, self.adaptive_mode)
+        return (mode in self.stereo_slice_modes or
+                (mode == self.aspect_mono_mode and
+                 self.dispatch_slice_metadata))
 
     @property
     def profile_name(self):
-        if self.active_mode == getattr(self, 'adaptive_mode', None):
-            if self._last_slices is None:
-                return 'adaptive-nested · awaiting verified metadata'
-            return ('adaptive-stereo-nested' if self._last_slices else
-                    'adaptive-mono-nested')
-        if (self.active_mode == getattr(self, 'aspect_mono_mode', None) and
-                getattr(self, '_last_slices', False)):
-            return self.slice_wire.wire_profile
         return self._mode_names[self.active_mode]
 
     @property
     def candidate_name(self):
         if self.candidate is None:
             return None
-        if self.candidate[0] == getattr(self, 'adaptive_mode', None):
-            return 'adaptive-nested · awaiting verified metadata'
         return self._mode_names[self.candidate[0]]
 
     def start_with(self, profile_name, side=None):
-        """Start out as if ``profile_name`` had been confirmed, so its first
-        packet is shown at once; another profile still needs
-        REQUIRED_STREAK agreeing packets. False if the name is unknown."""
+        """Remember a saved profile as a hint; wire status remains authoritative."""
         modes = {name: mode for mode, name in self._mode_names.items()}
         mode = modes.get(profile_name)
-        if profile_name in ('adaptive-stereo-nested',
-                            'adaptive-mono-nested'):
-            mode = getattr(self, 'adaptive_mode', None)
-            # The saved profile is only a startup hint. A new stream's subtype
-            # must come from its own verified metadata.
-            self._last_slices = None
         if mode is None:
             return False
-        self.active_mode = mode
-        self.active_side = (side if mode in self.mono_status_modes and
-                            side in (0, 1) else None)
+        self.startup_hint = (mode, side)
         self.reset_candidate()
         return True
 
     def bind_state(self, state):
         self.state = state
         self.stereo_tail_memory = bool(state.tail.enabled)
-        if self.active_mode in self.mono_status_modes:
+        if (self.active_mode in self.mono_status_modes or
+                self.active_mode in self.stereo_slice_modes):
             state.tail.enabled = False
 
     def reset_candidate(self):
@@ -2636,6 +2631,15 @@ class _AdaptiveProfileDecoder:
     def reset_capture_timeline(self):
         self._reset_aspect_wires()
         self._reset_capture_positions()
+        self.active_mode = self.base_mode
+        self.active_side = None
+        self.dispatch_mode = self.dispatch_side = None
+        self.dispatch_slice_metadata = False
+        self.aspect_mono_slices = False
+        self._last_pixel = None
+        self._pixel_unconfirmed = 0
+        self._last_layouts.clear()
+        self.generation += 1
 
     def _reset_aspect_wires(self):
         wire = getattr(self, 'slice_wire', None)
@@ -2750,12 +2754,14 @@ class _AdaptiveProfileDecoder:
                 self.candidate_scale = scale
                 if self.streak >= self.REQUIRED_STREAK:
                     self.active_mode, self.active_side = key
-                    if self.active_mode == getattr(self, 'adaptive_mode', None):
-                        self._last_slices = None
                     self.reset_candidate()
-                    if (self.on_switch is not None and
-                            self.active_mode !=
-                            getattr(self, 'adaptive_mode', None)):
+                    self.dispatch_mode = self.dispatch_side = None
+                    self.dispatch_slice_metadata = False
+                    self.aspect_mono_slices = False
+                    self._last_pixel = None
+                    self._pixel_unconfirmed = 0
+                    self._last_layouts.clear()
+                    if self.on_switch is not None:
                         self.on_switch(self._mode_names[self.active_mode],
                                        self.active_side)
                     self._reset_aspect_wires()
@@ -2764,8 +2770,9 @@ class _AdaptiveProfileDecoder:
                     if self.state is not None:
                         self.state.tail.reset()
                         self.state.tail.enabled = (
-                            self.stereo_tail_memory and self.active_mode not in
-                            self.mono_status_modes)
+                            self.stereo_tail_memory and
+                            self.active_mode not in self.mono_status_modes and
+                            self.active_mode not in self.stereo_slice_modes)
                         self.state.last_verified = None
         return {
             'position': position, 'scale': scale, 'mode': mode,
@@ -2856,10 +2863,6 @@ class _AdaptiveProfileDecoder:
         profile_model = model
         aspect_layout = None
         hint = kwargs.get('profile_hint') or {}
-        if (mode == getattr(self, 'adaptive_mode', None) and
-                hint.get('encoding_type') is None and
-                self._last_slices is None):
-            return held('adaptive_subtype_unconfirmed', observed_mode)
         # A packet whose metadata failed carries no aspect code. Its picture
         # data may still be good, so try the last layout the metadata
         # confirmed; the fold signature (different for every layout) must then
@@ -2894,13 +2897,22 @@ class _AdaptiveProfileDecoder:
             # The fixed tail arrives whole in every packet: no tail memory.
             prev_tail = profile_model.mu
         slices = False
-        if mode in (getattr(self, 'aspect_mono_mode', None),
-                    getattr(self, 'adaptive_mode', None)):
-            slices = hint.get('encoding_type')
-            slices = (self._last_slices if slices is None else
-                      int(slices) == self.pixel_encoding_type)
-            mono_wire = (self.adaptive_mono_wire if mode == self.adaptive_mode
-                         else self.aspect_mono_wire)
+        if mode == self.adaptive_stereo_mode:
+            slices = True
+            slice_wire = self.adaptive_slice_wire
+            aspect_layout = slice_wire.layout_for(hint.get('aspect_code'))
+            if aspect_layout is None:
+                aspect_layout = self._last_layouts.get(mode)
+                predicted_layout = aspect_layout is not None
+            if aspect_layout is None:
+                return held('aspect_layout_unknown', observed_mode)
+        elif mode in (self.aspect_mono_mode, self.adaptive_mono_mode):
+            slices = (self.aspect_mono_slices if hint.get('encoding_type') is None
+                      else mode == self.aspect_mono_mode and
+                      int(hint['encoding_type']) == self.pixel_encoding_type)
+            mono_wire = (self.adaptive_mono_wire
+                         if mode == self.adaptive_mono_mode else
+                         self.aspect_mono_wire)
             aspect_layout = mono_wire.layout_for(
                 hint.get('aspect_code'))
             if aspect_layout is None:
@@ -2911,7 +2923,7 @@ class _AdaptiveProfileDecoder:
         if mode in self.mono_status_modes:
             try:
                 profile_model = (
-                    (self.adaptive_slice_wire if mode == self.adaptive_mode
+                    (self.adaptive_slice_wire if mode == self.adaptive_stereo_mode
                      else self.slice_wire).model_for(model, aspect_layout)
                     if slices else
                     self.mono_wires[mode].model_for(model, aspect_layout)
@@ -2922,8 +2934,16 @@ class _AdaptiveProfileDecoder:
             # Mono layouts have no cross-packet tail memory. The outer pulse
             # loop owns the shared store, so give this decoder its own prior.
             prev_tail = profile_model.mu
+        elif mode in self.stereo_slice_modes:
+            try:
+                profile_model = self.adaptive_slice_wire.model_for(
+                    model, aspect_layout)
+            except ValueError:
+                return held('unsupported_model_for_profile', observed_mode)
+            prev_tail = profile_model.mu
         self._local.equalized = None
-        if mode in self.mono_status_modes:
+        if (mode in self.mono_status_modes or
+                mode in self.stereo_slice_modes):
             with self.mono_channel_profile():
                 result = self._real_decode(
                     profile_model, x, tmap, counter, prev_tail, *args,
@@ -2972,8 +2992,11 @@ class _AdaptiveProfileDecoder:
             if mode == self.aspect_mode:
                 codec = aspect_wire.codec(profile_model)
                 equalized = result.diag.get('fold_eq')
+            elif mode == self.adaptive_stereo_mode:
+                codec = self.adaptive_slice_wire._codec(profile_model)
+                equalized = self._local.equalized
             else:
-                mono_wire = (self.adaptive_mono_wire if mode == self.adaptive_mode
+                mono_wire = (self.adaptive_mono_wire if mode == self.adaptive_mono_mode
                              else self.aspect_mono_wire)
                 codec = mono_wire._codec(profile_model)
                 equalized = self._local.equalized
@@ -2987,29 +3010,24 @@ class _AdaptiveProfileDecoder:
             if aspect_wire is not None and (
                     not aspect_wire.pixel or pixel_signed):
                 self._last_pixel = aspect_wire.pixel
-            if mode in (getattr(self, 'aspect_mono_mode', None),
-                        getattr(self, 'adaptive_mode', None)):
-                previous_profile = self.profile_name
-                self._last_slices = slices
-                if (mode == getattr(self, 'adaptive_mode', None) and
-                        self.profile_name != previous_profile and
-                        self.on_switch is not None):
-                    # ID 2 does not identify mono vs stereo. Save and report
-                    # its profile only after packet metadata resolves it.
-                    self.on_switch(self.profile_name, self.active_side)
+            if mode == self.aspect_mono_mode:
+                self.aspect_mono_slices = slices
+                self.dispatch_slice_metadata = slices
         if result is not None:
             result.diag['coded_status_mode'] = mode
             result.diag['profile_mode'] = mode
             result.diag['wire_profile'] = (
-                (self.adaptive_slice_wire if mode == self.adaptive_mode else
-                 self.slice_wire).wire_profile if slices else
+                (self._mode_names[mode] if mode in self.stereo_slice_modes else
+                 (self.adaptive_slice_wire if mode == self.adaptive_stereo_mode else
+                  self.slice_wire).wire_profile) if slices else
                 self._mode_names[mode])
             result.diag['slices'] = slices
             if aspect_layout is not None:
                 result.diag['aspect_layout'] = aspect_layout
                 if mode == self.aspect_mode:
                     result.diag['aspect_pixel'] = aspect_wire.pixel
-            if mode in self.mono_status_modes and self._local.equalized is not None:
+            if (mode in self.mono_status_modes or
+                    mode in self.stereo_slice_modes) and self._local.equalized is not None:
                 result.diag['mono_fold_eq'] = self._local.equalized
         return result
 
@@ -3020,14 +3038,14 @@ class _AdaptiveProfileDecoder:
         if not result.diag.get('slices') or layout is None:
             return None
         wire = (self.adaptive_slice_wire if result.diag.get('profile_mode') ==
-                getattr(self, 'adaptive_mode', None) else self.slice_wire)
+                getattr(self, 'adaptive_stereo_mode', None) else self.slice_wire)
         return wire.half(wire.model_for(model, layout), result, channel)
 
     def slice_values(self, halves, result=None):
         """Grid values from one or two stereo-slices channels; notes on
         ``result`` what was shown."""
         wire = (self.adaptive_slice_wire if result is not None and
-                result.diag.get('profile_mode') == getattr(self, 'adaptive_mode', None)
+                result.diag.get('profile_mode') == getattr(self, 'adaptive_stereo_mode', None)
                 else self.slice_wire)
         used = wire.choose(halves)
         if result is not None:
@@ -3058,9 +3076,9 @@ class _AdaptiveProfileDecoder:
                 return self.v7.values_from(model, result.coeffs)
             wire = self.aspect_mono_wire
             return wire.values(wire.model_for(model, layout), result)
-        if mode == getattr(self, 'adaptive_mode', None):
-            if result.diag.get('slices'):
-                return self.slice_values([self.slice_half(model, result)], result)
+        if mode == getattr(self, 'adaptive_stereo_mode', None):
+            return self.slice_values([self.slice_half(model, result)], result)
+        if mode == getattr(self, 'adaptive_mono_mode', None):
             wire = self.adaptive_mono_wire
             layout = result.diag.get('aspect_layout')
             return wire.values(wire.model_for(model, layout), result)
@@ -3132,7 +3150,7 @@ def _detect_mono_fold_side(args, timeout=2.0, wait_for_signal=False):
     """
     import sounddevice as sd
     _ensure_test_modem_path()
-    from tone_code import MONO_500, MONO_1000
+    from tone_code import ADAPTIVE_MONO, MONO_1000
 
     device_info = sd.query_devices(args.device, 'input')
     channels = 1 if int(device_info.get('max_input_channels') or 0) < 2 else 2
@@ -3146,7 +3164,7 @@ def _detect_mono_fold_side(args, timeout=2.0, wait_for_signal=False):
     stop = getattr(args, 'stop_event', None)
 
     def confirmed_profile():
-        for candidate in (ADAPTIVE_NESTED_MODE, MONO_1000, MONO_500):
+        for candidate in (ADAPTIVE_MONO, MONO_1000):
             side = _mono_fold_input_side(observed_modes, candidate)
             if side is not None:
                 return side, candidate
@@ -3269,6 +3287,12 @@ def run_receive(args):
         table, _ = install_receiver(sys.modules[__name__], DEFAULT_TABLE_PATH)
         args.adaptive_nested_table = str(table)
         args.adaptive_nested_installed = True
+    if (getattr(args, 'experimental_mono_fold', False) and
+            not getattr(args, 'experimental_mono_colour', False) and
+            not getattr(args, 'aspect_mono', False) and
+            not getattr(args, 'nested_fold', False)):
+        raise ValueError('experimental Mono-500 receive mode was retired; '
+                         'ID 4 identifies adaptive-stereo-nested')
     if getattr(args, 'nested_smooth', None) is not None:
         if args.nested_smooth < 0:
             raise ValueError('--nested-smooth must be 0 or more')
@@ -3432,8 +3456,10 @@ def _run_receive_session(args, fold, mono_wire=None, adaptive_profile=None,
     if adaptive_profile is not None:
         _ensure_test_modem_path()
         from tone_code import warmup_status_templates
-        from tone_code import FOLD_500, FOLD_OFF, MONO_500, MONO_1000, MONO_OFF
-        for mode in (FOLD_500, FOLD_OFF, MONO_500, MONO_1000, MONO_OFF):
+        from tone_code import (ADAPTIVE_MONO, ADAPTIVE_STEREO, FOLD_500,
+                               FOLD_OFF, MONO_1000, MONO_OFF)
+        for mode in (FOLD_500, FOLD_OFF, ADAPTIVE_MONO, ADAPTIVE_STEREO,
+                     MONO_1000, MONO_OFF):
             warmup_status_templates(mode)
     if stop.is_set():
         return
@@ -3525,20 +3551,23 @@ def _run_receive_session(args, fold, mono_wire=None, adaptive_profile=None,
     else:
         input_mode = 'mono-input' if input_channels == 1 else 'M/S'
     _ensure_test_modem_path()
-    from tone_code import FOLD_500, FOLD_OFF, MONO_500, MONO_1000, MONO_OFF
-    # MONO_OFF is aspect-mono-500 under packet-profile dispatch.
-    mono_status = ((MONO_500, MONO_1000, MONO_OFF, ADAPTIVE_NESTED_MODE)
+    from tone_code import FOLD_500, FOLD_OFF, MONO_1000, MONO_OFF
+    # ID 2 is adaptive mono; ID 4 is adaptive stereo and is never passthrough.
+    mono_status = ((MONO_1000, MONO_OFF, ADAPTIVE_PROFILES[
+        'adaptive-mono-nested']['mode'])
                    if adaptive_profile is not None else
                    MONO_1000 if getattr(mono_wire, 'wire_profile', None) ==
-                   'mono-colour-500' else MONO_500)
-    mono_status_name = ('MONO_500 / MONO_1000 / MONO_OFF'
+                   'mono-colour-500' else MONO_1000)
+    stereo_status = ((FOLD_OFF, FOLD_500, ADAPTIVE_PROFILES[
+        'adaptive-stereo-nested']['mode']) if adaptive_profile is not None else
+        (FOLD_OFF, FOLD_500))
+    mono_status_name = ('MONO_1000 / MONO_OFF / ADAPTIVE_MONO'
                         if adaptive_profile is not None else
-                        'MONO_1000' if mono_status == MONO_1000 else
-                        'MONO_500')
+                        'MONO_1000')
     initial_side = (getattr(mono_wire, 'side', None)
                     if mono_wire is not None else None)
     receiver_router = ReceiverChannelRouter(
-        mono_status, (FOLD_OFF, FOLD_500),
+        mono_status, stereo_status,
         initial_video_side=(initial_side if initial_side in (
             'left', 'right', 'both') else None))
     runtime_options = getattr(args, 'runtime_options', None)
@@ -4162,10 +4191,13 @@ def _run_receive_session(args, fold, mono_wire=None, adaptive_profile=None,
             # the last good image while pulse acquisition starts over.
             input_gap.clear()
             live_input.reset()
+            receiver_router.reset()
             if profile_probes is not None:
                 for probe in profile_probes:
                     probe.reset()
-                adaptive_profile.reset_candidate()
+                adaptive_profile.reset_capture_timeline()
+                slice_state.tail.reset()
+                slice_state.last_verified = None
             pulse_state.tail.reset()
             pulse_state.last_verified = None
             if temporal_fusion is not None:
@@ -4231,6 +4263,10 @@ def _run_receive_session(args, fold, mono_wire=None, adaptive_profile=None,
             profile_decisions = adaptive_profile.observe_packets(
                 profile_events, now=now)
             for decision in profile_decisions:
+                if decision['switched']:
+                    receiver_router.reset()
+                    slice_state.tail.reset()
+                    slice_state.last_verified = None
                 receiver_router.observe_profile_decision(decision, now=now)
                 if decision['switched'] and not args.no_log:
                     print({'status': 'wire_profile_switch',
@@ -4263,6 +4299,13 @@ def _run_receive_session(args, fold, mono_wire=None, adaptive_profile=None,
                 if side is not None and 0 <= side < len(profile_probes):
                     decode_input = profile_probes[side].input
                     decode_audio = profile_probes[side].audio
+            elif decision['mode'] in adaptive_profile.stereo_slice_modes:
+                side = (0 if adaptive_profile.preferred_side == 'left' else
+                        1 if adaptive_profile.preferred_side == 'right' else 1)
+                if side < len(profile_probes):
+                    decision['decode_side'] = side
+                    decode_input = profile_probes[side].input
+                    decode_audio = profile_probes[side].audio
             if (decode_audio is not None and
                     not adaptive_profile.claim(decision)):
                 decode_audio = None
@@ -4279,7 +4322,8 @@ def _run_receive_session(args, fold, mono_wire=None, adaptive_profile=None,
             return
         if profile_probes is not None:
             adaptive_profile.dispatch_mode = decision['mode']
-            adaptive_profile.dispatch_side = decision['side_index']
+            adaptive_profile.dispatch_side = decision.get(
+                'decode_side', decision['side_index'])
         pulse_hits = decode_input.pulse_hits(decode_audio)
         if not pulse_hits:
             if profile_probes is None:
@@ -4332,7 +4376,8 @@ def _run_receive_session(args, fold, mono_wire=None, adaptive_profile=None,
                 len(profile_probes) > 1 and
                 adaptive_profile.may_use_stereo_slices() and
                 adaptive_profile.dispatch_side in (0, 1) and
-                (adaptive_profile._last_slices or
+                (adaptive_profile.dispatch_mode in
+                 adaptive_profile.stereo_slice_modes or
                  any(result.diag.get('slices') for result in results))):
             slice_side = adaptive_profile.dispatch_side
             other_probe = profile_probes[1-slice_side]

@@ -62,8 +62,8 @@ identically to both channels.
 ### 2.1 Preamble word and profile ID
 
 The preamble is a 16-bit biphase-mark word with 8-sample half-bits at
-amplitude 0.55. There are six words (`transport3.PROFILE_PREAMBLE_BITS`), five
-in use and one reserved. All
+amplitude 0.55. There are six words (`transport3.PROFILE_PREAMBLE_BITS`), all
+in use. All
 have the same first edge, last edge and edge count, so timing is the same for
 every word; the pattern of short and long intervals carries a profile ID
 (section 14). The words have minimum Hamming distance six. ID 1 is the
@@ -331,8 +331,7 @@ Every profile keys the bin-3 tone with a 12-chip status
 - A chip change is an 8-sample raised-cosine ramp inside the cyclic prefix.
   Outside the body bin 3 is steady.
 - The six status words are a four-chip pattern repeated three times: `0011`,
-  `0101`, `0110`, `1100`, `1010`, `1001` for codes 0 to 5 (code 2 is
-  reserved, section 14.1). Their pairwise
+  `0101`, `0110`, `1100`, `1010`, `1001` for codes 0 to 5. Their pairwise
   distance is six. A word is accepted when `2 × errors + erasures < 6`.
 
 The receiver decodes the chips, removes them and then uses the tones for
@@ -893,8 +892,9 @@ A mono wire keeps the packet format of section 2 and changes the body:
 
 ### 13.3 Signalling and reception
 
-A mono profile is named by its preamble word and the equal coded status
-(codes 3, 4, 5). The metadata has no profile bit.
+A mono profile is named by its preamble word and equal coded status (adaptive
+mono ID 2, aspect mono ID 3, or mono-colour ID 5). The metadata has no profile
+bit. ID 4 now names adaptive stereo; the former Mono-500 meaning is retired.
 
 The default receiver scans each input channel separately. A mono profile is
 taken from the channel that shows its word. When both channels show it, the
@@ -913,14 +913,16 @@ receiver holds the last picture for an unknown or unconfirmed status.
 |---:|---|---|
 | 0 | `FOLD_OFF` | `aspect-fold-500`; with the metadata model bit `nearest`, a pixel grid |
 | 1 | `FOLD_500` | `fold-500` |
-| 2 | `ADAPTIVE_NESTED` (historical status word `FOLD_1000`) | Adaptive nested mono or stereo-slices; metadata model bit selects the family |
+| 2 | `ADAPTIVE_MONO` (historical status word `FOLD_1000`) | Adaptive nested mono |
 | 3 | `MONO_OFF` | `aspect-mono-500`; with the metadata model bit `nearest`, `stereo-slices` |
-| 4 | `MONO_500` | `mono-fold-500` |
+| 4 | `ADAPTIVE_STEREO` (historical status word `MONO_500`) | Adaptive nested stereo-slices |
 | 5 | `MONO_1000` | `mono-colour-500` |
 
 The standalone sender selects one with `--profile`. All of them require the
-canonical fixture, coded status and the EOF marker. IDs are not renumbered or
-reused. The unfolded wire (`--experimental-fold 0`, and
+canonical fixture, coded status and the EOF marker. ID 2's former Fold-1000
+meaning and ID 4's former Mono-500 meaning are retired; old recordings using
+those meanings are not distinguished from the adaptive profiles. The unfolded
+wire (`--experimental-fold 0`, and
 `tools/v7_wire_profile.py` `baseline` for benches) uses preamble ID 1 with
 steady tones and no status.
 
@@ -932,22 +934,23 @@ The default receiver (`_AdaptiveProfileDecoder`) works as follows.
    consecutive packets that show it; those packets are held. An unreadable ID
    clears the count. A switch resets the tail memory and the last verified
    metadata.
-3. It dispatches IDs 0, 1, 2, 3, 4 and 5. ID 2 selects the adaptive nested
-    family; the metadata model bit selects mono or stereo-slices. The matched
-    adaptive-table signature is required before display. The former Fold-1000
-    profile has no codec dispatch and is rejected by the adaptive signature
-    check. This keeps ID 2's historical status codeword while preventing an
-    old Fold-1000 body from being interpreted as adaptive nested data.
+3. It dispatches IDs 0, 1, 2, 3, 4 and 5. ID 2 is adaptive mono; ID 4 is
+     adaptive stereo-slices. They are separate identities; metadata never
+     chooses between them. Both require the matched adaptive-table signature
+     before adaptive values are displayed. Their reused historical status
+     codewords do not preserve the retired Fold-1000 or Mono-500 meanings.
 4. Before the body is interpreted, the decoded tone status must equal the
     dispatched ID and the active profile. Otherwise the packet is held.
 
 Legacy profile IDs 0 and 3 retain their existing codec dispatch and table
 semantics; adaptive ID-2 codec installation is table-scoped and does not
 replace their cached mono/stereo tables or the default legacy table path.
-The 2026-10-11 live GUI/Pulse smoke exercised legacy → ID 2 → legacy → ID 2
-switching in the same receiver process, alongside the adaptive signature
-check. See `docs/V7_GUI_TEST_PATCH.md` for the sources, route settings and
-artifact directory.
+The earlier 2026-10-11 GUI/Pulse smoke tested the then-shared adaptive ID 2.
+The current registry instead assigns ID 2 to adaptive mono and reuses retired
+ID 4 for adaptive stereo. Saved receiver profiles are startup hints only;
+current validated status controls decoder and channel routing. See
+`docs/V7_GUI_PROFILE_AUDIT.md` for the device-free identity and transition
+coverage; no audio route test is part of this change.
 
 ### 14.2 Fold 500
 
@@ -1022,6 +1025,10 @@ On `fold-500`, `--pixel-encode` uses the base wire's 48 × 40 luma corner (a
 40 × 48 picture) and involves no pixel-grid table.
 
 ### 14.5 mono-fold-500
+
+Historical profile only. Its ID 4 is retired and now identifies adaptive
+stereo-slices; ID-4 legacy recordings are not distinguished from the new
+profile and are not guaranteed to decode.
 
 Mono wire (section 13.2), status 4. The 1,264 slots carry corner ranks 0 to
 1,263 of the `box` model. Ranks 764 to 1,263 are the hosts and ranks 1,264 to
@@ -1142,9 +1149,9 @@ Decided and done:
 - The user-facing no-fold options were retired: `send --baseline`,
   `receive --baseline` and `main.py --modem-baseline`. The transport can still
   encode and decode a packet without a fold.
-- The former Fold-1000 codec was removed. ID 2 now names the adaptive nested
-  family; the old status codeword is unchanged, and the adaptive signature
-  prevents old Fold-1000 data from being displayed as the new mapping.
+- The former Fold-1000 codec and Mono-500 wire meaning are retired. ID 2 names
+  adaptive mono and ID 4 names adaptive stereo; each requires the matching
+  adaptive signature before its values are displayed.
 - The continuous clock-track code (`encode_stream`, `decode_stream`,
   `receive --refine`) was deleted from `v7.py`. `clock_word` is kept;
   `decode_frame` uses it for its cancellation template.

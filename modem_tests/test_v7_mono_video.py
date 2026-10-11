@@ -462,7 +462,7 @@ class MonoVideoWireTests(unittest.TestCase):
         self.assertIs(run.call_args.kwargs['adaptive_profile'], profiles)
 
     def test_profile_changes_need_three_distinct_valid_status_packets(self):
-        from tone_code import FOLD_500, MONO_500, MONO_1000
+        from tone_code import ADAPTIVE_STEREO, FOLD_500, MONO_1000
 
         profile = v7_live._AdaptiveProfileDecoder(
             v7_live._experimental_fold(500), self.model)
@@ -477,41 +477,41 @@ class MonoVideoWireTests(unittest.TestCase):
             return profile.observe_packets(events)[0]
 
         self.assertEqual(profile.active_mode, FOLD_500)
-        self.assertFalse(observe(0, None, MONO_500)['confirmed'])
+        self.assertFalse(observe(0, None, ADAPTIVE_STEREO)['confirmed'])
         self.assertEqual(profile.streak, 1)
-        self.assertFalse(observe(v7.PULSE_FRAME, None, MONO_500)['confirmed'])
+        self.assertFalse(observe(v7.PULSE_FRAME, None, ADAPTIVE_STEREO)['confirmed'])
         self.assertEqual(profile.active_mode, FOLD_500)
-        switched = observe(2*v7.PULSE_FRAME, None, MONO_500)
+        switched = observe(2*v7.PULSE_FRAME, None, ADAPTIVE_STEREO)
         self.assertTrue(switched['switched'])
-        self.assertEqual(profile.active_mode, MONO_500)
-        self.assertEqual(profile.active_side, 1)
+        self.assertEqual(profile.active_mode, ADAPTIVE_STEREO)
+        self.assertIsNone(profile.active_side)
 
         # An invalid or conflicting status breaks the candidate; it never
         # inherits the previous packet's profile bit.
         observe(3*v7.PULSE_FRAME, None, MONO_1000)
         self.assertEqual(profile.streak, 1)
         active_elsewhere = observe(
-            4*v7.PULSE_FRAME, MONO_500, None)
+            4*v7.PULSE_FRAME, ADAPTIVE_STEREO, None)
         self.assertTrue(active_elsewhere['confirmed'])
         self.assertEqual(profile.streak, 0)
-        self.assertEqual(profile.active_side, 0)
+        self.assertIsNone(profile.active_side)
         ambiguous = observe(5*v7.PULSE_FRAME, FOLD_500, MONO_1000)
         self.assertIsNone(ambiguous['mode'])
         self.assertEqual(profile.streak, 0)
         observe(6*v7.PULSE_FRAME, None, MONO_1000)
         observe(7*v7.PULSE_FRAME, None, MONO_1000)
-        self.assertEqual(profile.active_mode, MONO_500)
+        self.assertEqual(profile.active_mode, ADAPTIVE_STEREO)
         switched = observe(8*v7.PULSE_FRAME, None, MONO_1000)
         self.assertTrue(switched['switched'])
         self.assertEqual(profile.active_mode, MONO_1000)
 
     def test_candidate_streak_resets_after_sync_loss_timeout(self):
-        from tone_code import FOLD_500, MONO_500
+        from tone_code import ADAPTIVE_STEREO, FOLD_500
 
         profile = v7_live._AdaptiveProfileDecoder(
             v7_live._experimental_fold(500), self.model)
         event = {'position': 0, 'scale': 1., 'side_index': 1,
-                 'mode': MONO_500}
+                 'mode': ADAPTIVE_STEREO}
 
         profile.observe_packets([event], now=1.0)
         self.assertEqual(profile.streak, 1)
@@ -527,14 +527,14 @@ class MonoVideoWireTests(unittest.TestCase):
         self.assertTrue(decision['switched'])
 
     def test_slow_packet_spacing_does_not_look_like_sync_loss(self):
-        from tone_code import FOLD_500, MONO_500
+        from tone_code import ADAPTIVE_STEREO, FOLD_500
 
         profile = v7_live._AdaptiveProfileDecoder(
             v7_live._experimental_fold(500), self.model)
         scale = 100.0
         packet_seconds = v7.PULSE_FRAME*scale/v7.RATE
         event = {'position': 0, 'scale': scale, 'side_index': 1,
-                 'mode': MONO_500}
+                 'mode': ADAPTIVE_STEREO}
         profile.observe_packets([event], now=1.0)
         profile.reset_candidate_if_stale(
             now=1.0+packet_seconds, timeout=2.0)
@@ -548,31 +548,32 @@ class MonoVideoWireTests(unittest.TestCase):
             now=1.0+2*packet_seconds)[0]
 
         self.assertTrue(decision['switched'])
-        self.assertEqual(profile.active_mode, MONO_500)
+        self.assertEqual(profile.active_mode, ADAPTIVE_STEREO)
         self.assertNotEqual(profile.active_mode, FOLD_500)
 
     def test_profile_status_probes_follow_mixed_stereo_and_mono_packets(self):
-        from mono_video import MonoColourFoldWire, MonoFreshFoldWire
-        from tone_code import FOLD_500, MONO_500, MONO_1000, encode_packet
+        from mono_video import MonoColourFoldWire
+        from tone_code import ADAPTIVE_STEREO, FOLD_500, MONO_1000, encode_packet
 
-        fresh = MonoFreshFoldWire(self.model, side='right')
         colour = MonoColourFoldWire(self.model, side='right')
+        profile = v7_live._AdaptiveProfileDecoder(
+            v7_live._experimental_fold(500), self.model)
         packets = []
-        kinds = (['stereo']*3 + ['fresh']*3 + ['colour']*3 + ['stereo']*4)
+        kinds = (['stereo']*3 + ['adaptive-stereo']*3 +
+                 ['colour']*3 + ['stereo']*4)
         for counter, kind in enumerate(kinds, 1):
             if kind == 'stereo':
                 packet = encode_packet(
                     self.model, self.values, counter, mode=FOLD_500)
-            elif kind == 'fresh':
-                packet = fresh.encode_packet(self.model, self.values, counter)
+            elif kind == 'adaptive-stereo':
+                packet = profile.adaptive_slice_wire.encode_packet(
+                    self.model, self.values, counter)
             else:
                 packet = colour.encode_packet(self.model, self.values, counter)
             packets.append(packet)
         audio = np.concatenate(packets)
         probes = [v7_live._ProfileStatusProbe(v7.RATE, index)
                   for index in range(2)]
-        profile = v7_live._AdaptiveProfileDecoder(
-            v7_live._experimental_fold(500), self.model)
         decisions = []
         claims = []
         for start in range(0, len(audio), 1024):
@@ -588,30 +589,30 @@ class MonoVideoWireTests(unittest.TestCase):
                                    decision['switched']))
 
         switches = [item['mode'] for item in decisions if item['switched']]
-        self.assertEqual(switches, [MONO_500, MONO_1000, FOLD_500])
+        self.assertEqual(switches, [ADAPTIVE_STEREO, MONO_1000, FOLD_500])
         self.assertEqual(profile.active_mode, FOLD_500)
         self.assertEqual(profile.active_side, None)
         switch_claims = [item for item in claims if item[2]]
         self.assertEqual(
             switch_claims,
-            [(5*v7.PULSE_FRAME, MONO_500, True),
+            [(5*v7.PULSE_FRAME, ADAPTIVE_STEREO, True),
              (8*v7.PULSE_FRAME, MONO_1000, True),
              (11*v7.PULSE_FRAME, FOLD_500, True)])
 
     def test_adaptive_decoder_dispatches_each_confirmed_packet_layout(self):
-        from tone_code import (FOLD_500, MONO_500, MONO_1000,
+        from tone_code import (ADAPTIVE_STEREO, FOLD_500, MONO_1000,
                                coded_pilot_timing, encode_packet)
 
         fold = v7_live._experimental_fold(500)
         profile = v7_live._AdaptiveProfileDecoder(fold, self.model)
-        fresh = MonoFreshFoldWire(self.model, side='right')
         colour = MonoColourFoldWire(self.model, side='right')
         cases = (
             (FOLD_500, np.concatenate([
                 encode_packet(self.model, self.values, counter,
                               mode=FOLD_500)
                 for counter in range(1, 5)])),
-            (MONO_500, fresh.encode(self.model, [self.values]*4)[:, 1:2]),
+            (ADAPTIVE_STEREO, profile.adaptive_slice_wire.encode(
+                self.model, [self.values]*4)[:, 1:2]),
             (MONO_1000, colour.encode(self.model, [self.values]*4)[:, 1:2]),
         )
 
@@ -630,9 +631,18 @@ class MonoVideoWireTests(unittest.TestCase):
                         result = results[-1]
                         self.assertIn(result.status, ('received', 'verified'))
                         self.assertEqual(result.diag['profile_mode'], mode)
-                        self.assertEqual(
-                            profile.values(self.model, result).shape,
-                            (self.model.coder.source_count,))
+                        if mode == ADAPTIVE_STEREO:
+                            self.assertEqual(result.diag['wire_profile'],
+                                             'adaptive-stereo-nested')
+                        values = profile.values(self.model, result)
+                        if mode == ADAPTIVE_STEREO:
+                            # An unrecognized adaptive signature holds the
+                            # prior picture; it is never replaced with black.
+                            self.assertIsNone(values)
+                        else:
+                            self.assertEqual(
+                                values.shape,
+                                (self.model.coder.source_count,))
         finally:
             profile.uninstall()
 
@@ -666,7 +676,9 @@ class MonoVideoWireTests(unittest.TestCase):
                 return v7_live._detect_mono_fold_side(args, timeout=.1)
 
         samples = self.audio
-        self.assertEqual(detect(self.audio), ('right', 4))
+        # The former Mono-500 ID 4 is retired and now dispatches adaptive
+        # stereo; auto mono detection must not revive the old interpretation.
+        self.assertEqual(detect(self.audio), (None, None))
         colour_audio = MonoColourFoldWire(self.model).encode(
             self.model, [self.values]*PACKETS)
         self.assertEqual(detect(colour_audio), ('right', 5))
@@ -768,9 +780,9 @@ class MonoVideoWireTests(unittest.TestCase):
 
         fake_sounddevice.InputStream = InputStream
         from tone_code import decode_tone_code
-        for profile, expected_mode in (
-                ('mono-fold-500', MONO_VIDEO_MODE),
-                ('mono-colour-500', MONO_COLOUR_MODE)):
+        for profile, expected_mode, detected_mode in (
+                ('mono-colour-500', MONO_COLOUR_MODE,
+                 ('right', MONO_COLOUR_MODE)),):
             with self.subTest(profile=profile):
                 written.clear()
                 with patch.dict(sys.modules, {'sounddevice': fake_sounddevice}), \
@@ -801,7 +813,7 @@ class MonoVideoWireTests(unittest.TestCase):
                     written[0][:, 1], sample_rate=v7.RATE)
                 self.assertTrue(status['valid'], status)
                 self.assertEqual(status['status']['mode'], expected_mode)
-                self.assertEqual(detected, ('right', expected_mode))
+                self.assertEqual(detected, detected_mode)
                 np.testing.assert_allclose(written[1][:, 0], .1)
                 self.assertGreater(float(np.max(np.abs(written[1][:, 1]))), 0.0)
 
@@ -860,7 +872,7 @@ class MonoVideoWireTests(unittest.TestCase):
                 # finish before checking the first two packets; the old .24 s
                 # wall-clock budget could expire before either was written.
                 '--video-source', 'clip.mkv', '--seconds', '5', '--no-log',
-                '--experimental-mono-fold', '--source-audio', 'source'])
+                '--profile', 'adaptive-mono-nested', '--source-audio', 'source'])
             v7_live.run_send(args)
 
         self.assertEqual(captures[0][0], 'clip.mkv')

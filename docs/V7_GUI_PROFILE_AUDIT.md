@@ -6,18 +6,61 @@ Baseline: pushed `e2b412429c993f133a8bf0ff14f58d514a6b5834`.
 
 | File | Before | After | Reason / dependency | Coverage |
 |---|---|---|---|---|
-| `tools/v7_live.py` | Sender ready/stats identified adaptive ID-2 mode via its inherited mono/slice wire wrapper, so the selected adaptive GUI profile was not stated. Receiver treated a new ID-2 stream as mono before verified metadata; adaptive ID-2 was excluded from companion-input decoding. | Sender ready/stats reports the selected adaptive profile. Receiver starts subtype as unknown; pending label is neutral, no sticky switch is emitted until verified packet metadata identifies mono or stereo. Unknown subtype with no verified encoding is held. ID-2 adaptive and legacy mono-status modes are eligible for companion-leg decoding. | ID 2 is shared by mono and stereo-slice forms; subtype must be determined from packet metadata. Preserves signature/metadata verification as the authority and preserves both stereo legs. | `modem_tests.test_v7_adaptive_profile_dispatch`, receiver GUI suite, live 96-kHz GUI runs below. |
+| `tools/v7_live.py` | Historical shared-ID-2 dispatch labelled both adaptive profiles through an inherited wrapper and required metadata subtype inference. | Superseded by distinct identities: ID 2 adaptive mono, ID 4 adaptive stereo; sender readiness reports selected profile and receiver dispatches current validated wire identity. No subtype wait. | See the newer identity/route ledger row below; signature validation remains required. | Device-free sender identity and receiver transition tests; historical live captures are explicitly marked. |
 | `modem_tests/test_v7_adaptive_profile_dispatch.py` | No assertions for unknown subtype, deferred switch, adaptive stereo other-leg dispatch, or GUI command's nested adaptive flags. | Adds those assertions, including preserving the existing legacy-profile switch notification. | Locks down the dispatch and labeling changes above. | Passed (5 tests in the focused module). |
 | `tools/v7_send_gui.py` | Kernel chooser listed registry kernels without filtering against the selected profile's parameter defaults. Profile changes silently replaced a valid-but-incompatible saved kernel. Start validation could fall through to runtime rejection after GUI selection. | Chooser filters each offered profile by actual `PROFILE_DEFAULTS`, preserving `reference`; retained incompatible selections show a notice and are excluded from choices. Removed kernels migrate to a valid profile default. Starting with an incompatible retained value now raises the kernel's profile-specific error before launch. A/B descriptions use the same filtered set. | Runtime probe showed `antiring` has mono Aspect settings but no adaptive-stereo settings; registry eligibility alone had been insufficient. Keep a user's explicit saved kernel when switching away and back, while preventing it from being started on a profile for which it has no settings. | Sender-kernel GUI module, 41 tests in final targeted run. |
 | `tools/v7_send_gui.py` / `modem_tests/test_v7_send_gui_kernels.py` | When `reference` was explicitly selected for a profile with a non-reference default, command construction omitted `--dct-kernel reference`; runtime then silently reapplied the profile default. | Send `--dct-kernel reference` only for an explicit reference selection that overrides a profile-specific non-reference default. General V7 still sends no redundant flag. | Ensures GUI selection reaches the sender process; live evidence labelled with a requested `reference` but no CLI flag actually used the profile default and is not treated as a reference-kernel comparison. | `test_reference_overrides_a_nonreference_profile_default`; existing general reference no-flag test remains. |
 | `modem_tests/test_v7_send_gui_kernels.py` | No adaptive-profile chooser filter, retained-choice migration, or fail-closed profile/kernel pairing assertion. | Adds chooser assertions for adaptive mono/stereo, explicit preservation/notice behavior, and start rejection for an unsupported retained kernel. | Regression coverage for the GUI/runtime mismatch above. | 41 tests passed. |
 | `dct_kernels/gaussian.py` | Lowest mean natural-image score in the matched shipped-kernel sweep (`-43.77` ideal vs `-26.71` reference; `-55.69` bilinear vs `-45.28` reference); profile-specific Aspect mono/stereo tuning was effectively reference/no-op. | Removed from the registered kernels and its runtime/GUI tests. Existing GUI preferences migrate to that profile's existing default with a visible “no longer installed” notice. | Narrow removal of a measured low-quality, redundant choice. No profile default or transform was retuned. Historical scores and rationale are in `docs/V7_KERNEL_DEFAULTS_TUNING.md`. | Kernel test suite and retired-preference migration test. |
 | `tools/v7_nested_experiment.py` / `modem_tests/test_v7_nested_gui_patch.py` | The `set_default=False` GUI install log printed the process-wide stock `nested_fold.TABLES` path as though it were the table selected for the adaptive decoder. Stale saved preference values for an old stock table path were not explicitly pinned as irrelevant. | Diagnostic separately prints resolved `selected_tables` path and SHA-256, stock `default_tables` path, and selected geometry. Test confirms the receiver GUI continues to use the bundled table even if a stale preferences file contains `nested_tables.npz`. | Avoids mistaking an unchanged legacy cache default for the chosen GUI table; the table field is initialized from the bundled candidate and is not restored from preferences. No receiver-GUI file-picker code was changed. | Tests assert selected path/hash, unchanged default path, and stale-preference immunity. |
+| `animation_modem/transport3.py`, `test_modem_v7/tone_code.py`, `tools/v7_profile_registry.py`, `tools/v7_live.py`, `tools/v7_receiver_audio.py` | Adaptive mono and stereo both used ID 2; receiver inferred subtype from metadata and sticky profile state could select a decoder/side before current-stream identity was established. Route evidence and paired-leg state could survive a profile switch or input restart. | Central registry assigns ID 2 to adaptive mono and reuses retired ID 4 (`MONO_500`) for adaptive stereo. Receiver dispatches by validated ID; adaptive stereo owns both legs and never exposes one as passthrough. Saved profile is only a startup hint. Switches and capture restarts clear stale identity, side, layout, route and paired-tail state; adaptive table signature validation remains required. | Separate wire identities remove the adaptive subtype wait; OS audio rates and Aspect Fold 500/kernel defaults are preserved. Historical ID-4 Mono-500 meaning is retired; old recordings are not a compatibility target. | Device-free identity/transition tests cover mono → stereo → Aspect Fold 500 → mono, sticky preferences, restart reset and router passthrough. Existing stereo-slice tests cover partial-leg and hold-last behavior. |
 | `tools/v7_receiver_gui.py`, `tools/v7_native_file_dialog.py`, `modem_tests/test_v7_native_file_dialog.py` | Save-folder selection initialized Tk in the GLFW process. The owner's macOS traceback aborts in Tk 9's Cocoa initialization (`NSApplication macOSVersion`). | macOS uses a native `osascript` folder picker; other platforms isolate Tk in a child interpreter. Cancellation preserves the current selection, and helper failures become ordinary GUI errors. | Avoid loading competing GUI toolkits into one Cocoa application. No decode, audio or image-processing changes. | Five dialog tests plus the receiver-GUI suite pass. Native macOS execution is not available on this Linux host; Linux also lacks Tk, so an actual Tk dialog smoke check was unavailable. |
 
 The status showed these pre-existing dirty files before this work and they were not edited here: `AGENTS.md`, `docs/V7_FIXES.md`, `tools/v7_nested_build.py`, `tools/v7_nested_corpus.py`, `tools/v7_sk_study.py`, `generated_img_lists.source-manifest.json.gz`, and `modem_tests/test_v7_curvature.py`. No commit or push was made.
 
 ## Live profile evidence
+
+The historical live captures in this section predate distinct adaptive IDs;
+their ID-2 stereo labels are not evidence for the current mapping. The current
+ID-2 mono / ID-4 stereo identity map and retired ID-4 meaning are recorded in
+the follow-up ledger row above. The live sequence and saved-profile restart
+below now provide end-to-end evidence for that mapping.
+
+The distinct-ID GUI sequence was run through the real sender GUI, 96-kHz
+PulseAudio sender output on channels 24/25, receiver AUTO, and viewer using the
+repository-picture source. The receiver confirmed adaptive mono ID 2 on the
+right video leg, adaptive stereo ID 4 with both channel modes active and both
+halves decoded, Aspect Fold 500 ID 0, then adaptive mono ID 2 again. Route
+traces show mono-right video with left-leg passthrough, stereo with no audio
+leg, and restored mono-right/left-passthrough after the final switch. The
+receiver restarted with saved `adaptive-mono-nested`; its first live adaptive
+stereo packets selected ID 4 and stereo decoding, then adaptive mono ID 2
+overrode the preference and restored the mono route. Captured receiver RGB is
+under `tmp/v7-gui-live-pair/results-distinct-ids/`; the saved preference was
+`adaptive-mono-nested`. PortAudio traces verified 96-kHz/25-channel input from
+the temporary sink monitor and 44.1-kHz stereo output on the separate `loop`
+sink. The temporary sink was unloaded, and defaults returned to `loop` /
+`loop.monitor` at 44.1 kHz.
+
+The owner-requested mono comparison used six matched live runs: portrait/text
+and coloured text, each sent as `aspect-mono-500`, the saved-profile alias
+`aspect-mono-nested`, and `adaptive-mono-nested`. Each source's three runs used
+the same video,
+`viewer_solve`, box encoding, 160-px capture, 96-kHz output and no luma-adjust;
+receiver AUTO decoded 71/69/17 frames for portrait/text and 70/69/14 for
+coloured text, respectively. Aspect mono and its legacy nested alias both
+confirm wire ID 3 and use 80x96 luma plus two 40x48 chroma planes. The legacy
+alias uses `test_modem_v7/nested_tables.npz` (SHA-256
+`f7b94d5c2adc1b023ac675a184fb3cbba6c784ba79812187ceedd0f4e25d43f1`); plain
+Aspect Mono 500 has no nested table. Adaptive mono confirms ID 2 and uses
+100x120 luma plus two 50x60 chroma planes with `chroma50.npz` (SHA-256
+`bc02a63d491fe1c6a9aef2a5f61541048967a57db6d79de9f38c9426ddf1dd3e`).
+Sender input-grid values, verified receiver RGB, source RGB, commands and route
+traces are under `tmp/v7-mono-version-comparison/`; inline sheets are
+`portrait-text-mono-comparison-sheet.png` and
+`text-colour-mono-comparison-sheet.png`. Existing 17-tap filter captures were
+not mixed into these pairs because they do not share this exact source/settings
+matrix.
 
 The real sender GUI command builder and live receiver GUI were exercised over PortAudio/PulseAudio using the repository-picture video, 96 kHz, a temporary 25-channel null sink/monitor, and channel pair 24/25. `pactl` stream inspection showed actual `float32le 25ch 96000Hz` streams; the harness routed sender output and receiver input on the same pair. The temporary sink was unloaded and defaults returned to `loop` / `loop.monitor` at 44.1 kHz stereo.
 

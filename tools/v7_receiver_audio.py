@@ -192,6 +192,15 @@ class ReceiverChannelRouter:
             self.state, self.audio_side = 'unresolved', None
         return self.snapshot(now)
 
+    def reset(self):
+        """Forget stale mode/side evidence after a profile switch or restart."""
+        self.channels = (_ChannelEvidence(self.loss_seconds),
+                         _ChannelEvidence(self.loss_seconds))
+        self.state = 'searching'
+        self.video_side = None
+        self.audio_side = None
+        self.last_packet = None
+
     def sync_state(self, now=None, freewheel_seconds=2.0):
         now = time.monotonic() if now is None else float(now)
         if self.last_packet is None:

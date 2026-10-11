@@ -1,5 +1,11 @@
 # Matched nested-codec GUI test patch
 
+> Historical instructions and GUI/Pulse results below predate distinct
+> adaptive identities. Current wire IDs are ID 2 for adaptive mono and ID 4
+> for adaptive stereo; the former ID-4 Mono-500 meaning is retired. See
+> `docs/transport_v7_spec.md` §14.1 and `docs/V7_GUI_PROFILE_AUDIT.md` for the
+> current registry and device-free transition checks.
+
 The patch targets clean pushed baseline
 `04d1fb2e7365c4f385b34218675b12af06ed4838` and includes the GUI changes plus
 the runtime dependencies and focused tests needed by this table. No dirty
@@ -23,8 +29,9 @@ needed.
 
 1. In the sender GUI choose **Adaptive stereo nested** or **Adaptive mono
    nested**. The bundled table path is prefilled.
-2. The receiver detects adaptive profile ID 2 automatically and uses the same
-   bundled table; there is no receiver profile or opt-in checkbox.
+2. The receiver detects adaptive mono ID 2 or adaptive stereo ID 4 from the
+   current validated wire status and uses the same bundled table; the saved
+   receiver profile is only a startup hint.
 3. The adaptive profiles use serpentine mapping, guest factors 1/2/4/8/16,
    fixed host level −1, step factor 0.25 and exact inverse. Stereo additionally
    enables chroma detail. Sender channel count and sample rate continue to
@@ -43,15 +50,16 @@ sequence was legacy → adaptive → legacy → adaptive, while the receiver GUI
 configured only with the matched table path and detected the wire profile from
 the stream. All eight runs produced saved received RGB frames (1,238 total),
 and the receiver logged both legacy and adaptive profile transitions. The
-stereo runs also reported `adaptive-stereo-nested on right`; the ID-2 codec
-status line uses the shared adaptive-family dispatch name while packet metadata
-selects mono versus stereo-slices.
+stereo runs also reported `adaptive-stereo-nested on right`; at that time both
+adaptive profiles shared ID 2 and metadata selected mono versus stereo-slices.
+That implementation is superseded by the distinct IDs above.
 
 Both directions were verified on the temporary `v7_gui_test_96` PulseAudio
 null sink at 96 kHz, float32, 25 channels, selecting channels 24/25. The
 receiver route trace records the monitor input and the sender trace records
-the matching output. The GUI process logged the ID-2 adaptive signature/table
-configuration. Each run saved a viewer screenshot and received RGB PNGs under
+the matching output. The GUI process logged the adaptive signature/table
+configuration under the then-shared ID-2 design. Each run saved a viewer
+screenshot and received RGB PNGs under
 `tmp/v7-gui-live-pair/results-adaptive-id2-auto/`; `smoke-summary.json` records
 source, profile, detected hints/transitions, table, routes, frame counts and
 artifact paths. For direct picture inspection, each run also has
@@ -62,9 +70,10 @@ decoded-picture evidence. After the harness unloaded its temporary sink, the
 defaults were `loop` and `loop.monitor` and only the existing `loop` null sink
 remained.
 
-This smoke is a live software loopback verification, not a physical-medium
-test. The receiver uses automatic wire-profile detection; mono/stereo is
-selected from validated ID-2 metadata/signature, not a receiver profile menu.
+This smoke is a live software loopback verification of the then-shared ID-2
+design, not a test of current ID-2 mono / ID-4 stereo transitions or a
+physical-medium test. Current receiver dispatch uses the validated wire ID;
+adaptive signature verification remains required for adaptive values.
 
 Run focused, device-free checks from the repository root:
 
