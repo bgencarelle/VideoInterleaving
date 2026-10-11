@@ -49,7 +49,8 @@ kept under the ignored repository-local `tmp/v7-kernel-tuning/` directory.
 
 Higher SSIMULACRA2 is better. The reference is the shipped encode with no
 optional kernel. The first pair of score columns is before tuning; the latter
-pair uses the updated defaults.
+pair uses the updated defaults. The Gaussian row is historical benchmark data;
+that kernel was retired from the shipped registry in October 2026 (see below).
 
 | Kernel | Ideal before | Ideal tuned | Δ | Bilinear before | Bilinear tuned | Δ |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
@@ -121,10 +122,11 @@ versus `3.98%` / `0.40%`.
 - `viewer_solve`: `lam=.5`, a more regularized solve with lower measured edge
   ripple.
 
-Anti-ringing, Gaussian, Magic Kernel Sharp, and Upscaler pre-compensation kept
-their existing defaults: their highest-scoring probes either approached an
+Anti-ringing, Magic Kernel Sharp, and Upscaler pre-compensation kept their
+existing defaults: their highest-scoring probes either approached an
 identity/no-op setting, weakened the intended edge/ringing tradeoff, or did not
-hold up for the matched bilinear-viewer setting. The shock-edge bilinear
+hold up for the matched bilinear-viewer setting. Gaussian kept its default in
+the original sweep; its later removal is recorded below. The shock-edge bilinear
 natural-image mean decreased by 0.10 points after reducing rounds; this small
 quality trade buys lower encode cost and the ideal-mode result improved by
 0.39.
@@ -290,3 +292,16 @@ uses `keep=0.75`; the two viewer-matched kernels disable halo cleanup with
 `tame=0`. Shock-filter edges retains the shared defaults, which scored best on
 the natural-image objective. The stereo-specific values do not alter the
 Aspect Mono or general V7 defaults.
+
+## Retired kernel
+
+`gaussian.py` was removed from the shipped DCT-kernel registry after this
+matched natural-image sweep showed the weakest mean quality of the listed
+kernels: `-43.77` versus reference `-26.71` in ideal reconstruction and `-55.69`
+versus `-45.28` with bilinear display. Its Aspect Mono and Aspect Stereo tuned
+settings were nearly identity relative to reference (within 0.03 score points
+for natural-image means), so the selectable Gaussian added no useful result on
+those active Aspect profiles. The historical row remains above for
+reproducibility. The kernel is no longer offered or valid on CLI/live controls;
+saved sender GUI selections migrate to the selected profile's existing default
+with a visible notice. No default kernel was changed.

@@ -10,6 +10,7 @@ autodetected. Stock launchers and frozen production tables are unaffected.
     python tools/v7_nested_experiment.py --tables tmp/candidate.npz --mapping serpentine receive ...
 """
 import argparse
+import hashlib
 from dataclasses import replace
 from pathlib import Path
 import sys
@@ -61,7 +62,11 @@ def install(live, tables, set_default=True):
         def warm(model, *args, **kwargs):
             return real_warm(source_model(model), *args, **kwargs)
         live._values, live._warm_kernels = values, warm
-    print(f'V7 nested experiment: tables={nested_fold.TABLES} '
+    selected = Path(tables).resolve()
+    digest = hashlib.sha256(selected.read_bytes()).hexdigest()
+    print(f'V7 nested experiment: selected_tables={selected} '
+          f'table_sha256={digest} '
+          f'default_tables={Path(nested_fold.TABLES).resolve()} '
           f'luma={shape[1]}x{shape[0]} chroma={chroma[1]}x{chroma[0]} '
           'matched tables required at both ends', flush=True)
     return grids

@@ -76,8 +76,12 @@ parameter set, so dragging a slider only rebuilds the array it changes.
 |---|---|
 | `antiring.py` | keeps the sent picture inside the range the source had nearby: halos and mesh move out, detail contrast is kept (the sharp-and-clean option; about +4 ms per 1080p frame) |
 | `lanczos.py`, `mitchell.py`, `magic_kernel_sharp.py` | classic and modern resampling kernels as windows |
-| `gaussian.py` | no overshoot at all, at the cost of edge width |
 | `band_taper.py` | radial raised-cosine over the sent band, optionally out to the guests |
+
+`gaussian.py` was retired in 2026-10 after the matched kernel sweep ranked it
+well below reference on natural-image quality while its profile-specific
+settings were effectively neutral in Aspect mono/stereo. Existing saved
+selections migrate to the profile default with a visible notice.
 
 ### Made for a picture that is enlarged afterwards
 

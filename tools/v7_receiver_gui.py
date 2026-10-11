@@ -406,29 +406,8 @@ def _save_preferences(values, path=RECEIVER_PREFERENCES_PATH):
 
 def pick_save_directory(current=''):
     """Open the platform's native directory picker for decoded images."""
-    try:
-        import tkinter as tk
-        from tkinter import filedialog
-    except ImportError as exc:
-        raise RuntimeError('A native folder picker is unavailable.') from exc
-    root = None
-    try:
-        root = tk.Tk()
-        root.withdraw()
-        try:
-            root.attributes('-topmost', True)
-        except tk.TclError:
-            pass
-        options = {'parent': root, 'title': 'Save decoded images to'}
-        if current and Path(current).is_dir():
-            options['initialdir'] = str(current)
-        selected = filedialog.askdirectory(**options)
-        return str(selected) if selected else None
-    except tk.TclError as exc:
-        raise RuntimeError(f'Could not open the folder picker: {exc}') from exc
-    finally:
-        if root is not None:
-            root.destroy()
+    from tools.v7_native_file_dialog import pick_directory
+    return pick_directory(current, 'Save decoded images to')
 
 
 def _process_memory_mib():

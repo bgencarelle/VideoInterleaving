@@ -110,6 +110,14 @@ class KernelGuiTests(unittest.TestCase):
         self.assertIn('default (no kernel)', gui._value_label('dct_kernel'))
         self.assertFalse([d for d in gui._visible_fields() if d.startswith('kp:')])
 
+    def test_reference_overrides_a_nonreference_profile_default(self):
+        gui = SenderGui(self.devices, restore_preferences=False)
+        gui.settings.update(device=3, source='test', profile='aspect-fold-500',
+                            dct_encode=True, dct_kernel='reference')
+        command = self.command(gui)
+        self.assertIn('--dct-kernel', command)
+        self.assertEqual(command[command.index('--dct-kernel')+1], 'reference')
+
     def test_the_chooser_lists_the_kernel_folder(self):
         gui = _gui(self.devices)
         labels = dict((name, label) for label, name in
@@ -127,7 +135,6 @@ class KernelGuiTests(unittest.TestCase):
         labels = dict((name, label) for label, name in
                       gui._choices('dct_kernel'))
         self.assertIn('best ideal + bilinear', labels['viewer_solve'])
-
         gui.settings['profile'] = 'aspect-mono-500'
         labels = dict((name, label) for label, name in
                       gui._choices('dct_kernel'))
@@ -138,6 +145,41 @@ class KernelGuiTests(unittest.TestCase):
         labels = dict((name, label) for label, name in
                       gui._choices('dct_kernel'))
         self.assertIn('best ideal + bilinear', labels['viewer_solve'])
+
+    def test_adaptive_profile_choices_match_runtime_profile_settings(self):
+        gui = SenderGui(self.devices)
+        self.assertNotIn('gaussian', [name for _label, name in
+                                      gui._choices('dct_kernel')])
+        gui.settings['profile'] = 'adaptive-stereo-nested'
+        names = [name for _label, name in gui._choices('dct_kernel')]
+        self.assertEqual(names, ['reference', 'upscale_precomp'])
+
+        gui.settings['profile'] = 'adaptive-mono-nested'
+        names = [name for _label, name in gui._choices('dct_kernel')]
+        self.assertIn('antiring', names)
+
+    def test_profile_switch_retains_unsupported_kernel_with_notice(self):
+        gui = SenderGui(self.devices)
+        gui.settings.update(profile='adaptive-mono-nested',
+                            dct_kernel='antiring')
+        gui._assign('profile', 'adaptive-stereo-nested')
+        self.assertEqual(gui.settings['dct_kernel'], 'antiring')
+        self.assertIn('antiring', gui.notice)
+        self.assertIn('no settings', gui.notice)
+        self.assertIn('retained', gui.notice)
+        choices = [name for _label, name in gui._choices('dct_kernel')]
+        self.assertNotIn('antiring', choices)
+        gui._assign('profile', 'adaptive-mono-nested')
+        self.assertEqual(gui.settings['dct_kernel'], 'antiring')
+
+    def test_retained_but_unsupported_kernel_fails_closed_at_start(self):
+        gui = _gui(self.devices)
+        gui.settings.update(profile='adaptive-mono-nested',
+                            dct_kernel='antiring')
+        gui._assign('profile', 'adaptive-stereo-nested')
+        with self.assertRaisesRegex(ValueError,
+                                    'antiring has no settings for adaptive-stereo-nested'):
+            validate_settings(gui.settings, self.devices, self.sd)
 
     def test_a_chosen_kernel_shows_its_parameters_and_reaches_the_command(self):
         gui = _gui(self.devices)
@@ -187,7 +229,7 @@ class KernelGuiTests(unittest.TestCase):
 
     def test_pixel_encode_and_direct_dct_off_hide_and_drop_the_kernel(self):
         gui = _gui(self.devices)
-        gui._assign('dct_kernel', 'gaussian')
+        gui._assign('dct_kernel', 'lanczos')
         gui.settings['pixel_encode'] = True
         self.assertNotIn('dct_kernel', gui._visible_fields())
         self.assertNotIn('--dct-kernel', self.command(gui))
@@ -195,6 +237,21 @@ class KernelGuiTests(unittest.TestCase):
         gui.settings['dct_encode'] = False
         self.assertNotIn('dct_kernel', gui._visible_fields())
         self.assertNotIn('--dct-kernel', self.command(gui))
+
+    def test_a_retired_saved_kernel_is_migrated_with_a_notice(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder)/'sender.json'
+            path.write_text(json.dumps({
+                'version': gui_module.SENDER_PREFERENCES_VERSION,
+                'settings': {'profile': 'aspect-fold-500',
+                             'dct_encode': True,
+                             'dct_kernel': 'gaussian'},
+            }))
+            gui = SenderGui(self.devices, preference_path=path,
+                            restore_preferences=True)
+        self.assertEqual(gui.settings['dct_kernel'], 'viewer_solve')
+        self.assertIn('gaussian', gui.notice)
+        self.assertIn('no longer installed', gui.notice)
 
     def test_an_unknown_saved_kernel_refuses_to_start(self):
         gui = _gui(self.devices)
@@ -248,15 +305,15 @@ class KernelGuiTests(unittest.TestCase):
                          names[1])
         gui._on_key(KeyStub, None, KeyStub.KEY_LEFT, 0, KeyStub.PRESS, 0)
         self.assertEqual(gui.settings['dct_kernel'], 'reference')
-        gui._assign('dct_kernel', 'gaussian')
-        gui.selected = 'kp:sigma'
-        before = gui._field_value('kp:sigma')
+        gui._assign('dct_kernel', 'lanczos')
+        gui.selected = 'kp:width'
+        before = gui._field_value('kp:width')
         gui._on_key(KeyStub, None, KeyStub.KEY_RIGHT, 0, KeyStub.PRESS, 0)
-        self.assertGreater(gui._field_value('kp:sigma'), before)
+        self.assertGreater(gui._field_value('kp:width'), before)
         gui._on_key(KeyStub, None, KeyStub.KEY_RIGHT, 0, KeyStub.PRESS,
                     KeyStub.MOD_SHIFT)
-        self.assertAlmostEqual(gui._field_value('kp:sigma'),
-                               before+0.025*6, places=6)
+        self.assertAlmostEqual(gui._field_value('kp:width'),
+                               before+0.05*6, places=6)
 
     def test_other_settings_stay_locked_while_sending(self):
         gui = _gui(self.devices)

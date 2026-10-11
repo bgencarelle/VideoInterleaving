@@ -1,5 +1,8 @@
 import tempfile
 import unittest
+from contextlib import redirect_stdout
+from hashlib import sha256
+from io import StringIO
 from pathlib import Path
 
 from tools.v7_nested_gui_patch import (DEFAULT_TABLE_PATH, launcher_prefix,
@@ -47,12 +50,20 @@ class MatchedNestedGuiPatchTests(unittest.TestCase):
         self.assertTrue(resolve_table_path().is_file())
 
     def test_adaptive_codec_registration_is_scoped_to_its_table(self):
+        v7_live._ensure_test_modem_path()
         import nested_fold
         from tools.v7_nested_gui_patch import install_receiver
         default_path = Path(nested_fold.TABLES).resolve()
         legacy_before = nested_fold.table('mono', '1:1', default_path)
         legacy_stereo_before = nested_fold.table('slices', '1:1', default_path)
-        table, _ = install_receiver(v7_live, DEFAULT_TABLE_PATH)
+        output = StringIO()
+        with redirect_stdout(output):
+            table, _ = install_receiver(v7_live, DEFAULT_TABLE_PATH)
+        diagnostic = output.getvalue()
+        self.assertIn(f'selected_tables={table}', diagnostic)
+        self.assertIn(f'table_sha256={sha256(table.read_bytes()).hexdigest()}',
+                      diagnostic)
+        self.assertIn(f'default_tables={default_path}', diagnostic)
         legacy = nested_fold.table('mono', '1:1', default_path)
         adaptive = nested_fold.table('mono', '1:1', table)
         legacy_stereo = nested_fold.table('slices', '1:1', default_path)
@@ -74,8 +85,8 @@ class MatchedNestedGuiPatchTests(unittest.TestCase):
     def test_sender_gui_builds_ready_candidate_command(self):
         device = OutputDevice(0, 'pulse', 32, 44100, 'ALSA')
         gui = SenderGui((device,))
-        gui.settings.update(device=0, source='test', profile='adaptive-stereo-nested',
-                            luma_adjust=True)
+        gui._assign('profile', 'adaptive-stereo-nested')
+        gui.settings.update(device=0, source='test', luma_adjust=True)
         command = build_command(gui.settings, (device,), self.SoundDeviceStub(),
                                 python='python')
         self.assertNotIn('--luma-adjust', command)
@@ -97,6 +108,20 @@ class MatchedNestedGuiPatchTests(unittest.TestCase):
         self.assertEqual(arguments.adaptive_nested_table,
                          str(resolve_table_path()))
         self.assertEqual(arguments.nested_test_tables,
+                         str(resolve_table_path()))
+
+    def test_stale_saved_stock_table_path_does_not_replace_selected_gui_table(self):
+        root_parser, receive_parser = _receive_parser(v7_live)
+        with tempfile.TemporaryDirectory() as folder:
+            preferences = Path(folder)/'receiver.json'
+            preferences.write_text(
+                '{"nested_test_tables": "test_modem_v7/nested_tables.npz"}')
+            gui = ReceiverGui(
+                v7_live, root_parser, receive_parser,
+                (('pulse · 25 in · 96 kHz', 0),), preference_path=preferences)
+            gui._field('device').value = 0
+            arguments = gui._build_arguments()
+        self.assertEqual(arguments.adaptive_nested_table,
                          str(resolve_table_path()))
 
 

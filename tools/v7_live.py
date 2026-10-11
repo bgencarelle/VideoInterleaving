@@ -1734,7 +1734,11 @@ def _run_send_session(args):
                 'coded_pilot': (fold is not None or mono_wire is not None or
                                 aspect_wire is not None or
                                 slice_wire is not None),
-                'wire_profile': (mono_wire.wire_profile
+                'wire_profile': (args.profile
+                                 if args.profile in (
+                                     'adaptive-mono-nested',
+                                     'adaptive-stereo-nested') else
+                                 mono_wire.wire_profile
                                  if mono_wire is not None else
                                  slice_wire.wire_profile
                                  if slice_wire is not None else
@@ -2090,7 +2094,11 @@ def _run_send_session(args):
                 else:
                     capture_text = (f'{args.capture_width}px/'
                                     f'{_capture_scale_flags(args)}')
-                wire_mode = (mono_wire.wire_profile
+                wire_mode = (args.profile
+                             if args.profile in (
+                                 'adaptive-mono-nested',
+                                 'adaptive-stereo-nested') else
+                             mono_wire.wire_profile
                              if mono_wire is not None else
                              f'{slice_wire.wire_profile} L/R'
                              if slice_wire is not None else
@@ -2523,7 +2531,9 @@ class _AdaptiveProfileDecoder:
         self.adaptive_slice_wire = nested_fold.slice_wire(
             aspect_layout, path=nested_table_path, adaptive_guest_range=True,
             chroma_detail=True)
-        self._last_slices = False
+        # ID 2 is shared by mono and stereo-slices. Its subtype is unknown
+        # until a packet with independently verified metadata is decoded.
+        self._last_slices = None
         # ID 2 was reserved for the removed Fold-1000. It now identifies only
         # the matched adaptive nested family; the metadata model bit selects
         # its mono or stereo-slices interpretation.
@@ -2566,9 +2576,16 @@ class _AdaptiveProfileDecoder:
         if not isinstance(fold, LiveFold):
             raise TypeError('adaptive V7 profile dispatch requires LiveFold')
 
+    def may_use_stereo_slices(self, mode=None):
+        """Whether a mono-status packet may need its companion leg."""
+        mode = self.dispatch_mode if mode is None else mode
+        return mode in (self.aspect_mono_mode, self.adaptive_mode)
+
     @property
     def profile_name(self):
         if self.active_mode == getattr(self, 'adaptive_mode', None):
+            if self._last_slices is None:
+                return 'adaptive-nested · awaiting verified metadata'
             return ('adaptive-stereo-nested' if self._last_slices else
                     'adaptive-mono-nested')
         if (self.active_mode == getattr(self, 'aspect_mono_mode', None) and
@@ -2580,6 +2597,8 @@ class _AdaptiveProfileDecoder:
     def candidate_name(self):
         if self.candidate is None:
             return None
+        if self.candidate[0] == getattr(self, 'adaptive_mode', None):
+            return 'adaptive-nested · awaiting verified metadata'
         return self._mode_names[self.candidate[0]]
 
     def start_with(self, profile_name, side=None):
@@ -2588,11 +2607,12 @@ class _AdaptiveProfileDecoder:
         REQUIRED_STREAK agreeing packets. False if the name is unknown."""
         modes = {name: mode for mode, name in self._mode_names.items()}
         mode = modes.get(profile_name)
-        if profile_name == 'adaptive-stereo-nested':
+        if profile_name in ('adaptive-stereo-nested',
+                            'adaptive-mono-nested'):
             mode = getattr(self, 'adaptive_mode', None)
-            self._last_slices = True
-        elif profile_name == 'adaptive-mono-nested':
-            self._last_slices = False
+            # The saved profile is only a startup hint. A new stream's subtype
+            # must come from its own verified metadata.
+            self._last_slices = None
         if mode is None:
             return False
         self.active_mode = mode
@@ -2731,9 +2751,11 @@ class _AdaptiveProfileDecoder:
                 if self.streak >= self.REQUIRED_STREAK:
                     self.active_mode, self.active_side = key
                     if self.active_mode == getattr(self, 'adaptive_mode', None):
-                        self._last_slices = False
+                        self._last_slices = None
                     self.reset_candidate()
-                    if self.on_switch is not None:
+                    if (self.on_switch is not None and
+                            self.active_mode !=
+                            getattr(self, 'adaptive_mode', None)):
                         self.on_switch(self._mode_names[self.active_mode],
                                        self.active_side)
                     self._reset_aspect_wires()
@@ -2834,6 +2856,10 @@ class _AdaptiveProfileDecoder:
         profile_model = model
         aspect_layout = None
         hint = kwargs.get('profile_hint') or {}
+        if (mode == getattr(self, 'adaptive_mode', None) and
+                hint.get('encoding_type') is None and
+                self._last_slices is None):
+            return held('adaptive_subtype_unconfirmed', observed_mode)
         # A packet whose metadata failed carries no aspect code. Its picture
         # data may still be good, so try the last layout the metadata
         # confirmed; the fold signature (different for every layout) must then
@@ -2963,7 +2989,14 @@ class _AdaptiveProfileDecoder:
                 self._last_pixel = aspect_wire.pixel
             if mode in (getattr(self, 'aspect_mono_mode', None),
                         getattr(self, 'adaptive_mode', None)):
+                previous_profile = self.profile_name
                 self._last_slices = slices
+                if (mode == getattr(self, 'adaptive_mode', None) and
+                        self.profile_name != previous_profile and
+                        self.on_switch is not None):
+                    # ID 2 does not identify mono vs stereo. Save and report
+                    # its profile only after packet metadata resolves it.
+                    self.on_switch(self.profile_name, self.active_side)
         if result is not None:
             result.diag['coded_status_mode'] = mode
             result.diag['profile_mode'] = mode
@@ -4297,8 +4330,7 @@ def _run_receive_session(args, fold, mono_wire=None, adaptive_profile=None,
         slice_side = slice_other = None
         if (adaptive_profile is not None and profile_probes is not None and
                 len(profile_probes) > 1 and
-                adaptive_profile.dispatch_mode ==
-                adaptive_profile.aspect_mono_mode and
+                adaptive_profile.may_use_stereo_slices() and
                 adaptive_profile.dispatch_side in (0, 1) and
                 (adaptive_profile._last_slices or
                  any(result.diag.get('slices') for result in results))):

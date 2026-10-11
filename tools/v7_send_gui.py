@@ -331,6 +331,26 @@ def kernel_registry(refresh=False):
     return _KERNELS
 
 
+def profile_kernel_names(profile, registry=None):
+    """Kernel names with declared defaults for this exact sender profile."""
+    registry = registry or kernel_registry()
+    offered_profiles = {value for _label, value in PROFILE_CHOICES}
+    if profile not in offered_profiles:
+        return tuple(registry.names())
+    profile_names = kernel_profiles(profile)
+    return tuple(name for name in registry.names()
+                 if name == v7_kernels.REFERENCE or
+                 registry.get(name).has_settings_for(profile_names))
+
+
+def _profile_kernel_fallback(profile, registry=None):
+    """A usable profile default, or the reference encode."""
+    registry = registry or kernel_registry()
+    names = profile_kernel_names(profile, registry)
+    preferred = default_kernel_for_profile(profile)
+    return preferred if preferred in names else v7_kernels.REFERENCE
+
+
 def _is_live_field(dest):
     """Settings that may change while the sender runs."""
     return (dest in LIVE_FIELDS or dest in KERNEL_LIVE_FIELDS or
@@ -339,10 +359,11 @@ def _is_live_field(dest):
 
 def _kernel_values(settings, kernel, profile=None):
     """The saved values for ``kernel``, limited to parameters it still has."""
+    profile_names = kernel_profiles(profile)
     saved = (settings.get('dct_kernel_params') or {}).get(kernel.name, {})
     return kernel.resolve({key: value for key, value in saved.items()
                            if key in kernel.params},
-                          profile=kernel_profiles(profile))
+                          profile=profile_names)
 
 
 VIDEO_FILE_GLOB = '*.mp4 *.m4v *.mov *.mkv *.webm *.avi *.mpeg *.mpg *.wmv *.ts'
@@ -1265,8 +1286,21 @@ def validate_settings(settings, devices, sd_module=None, audio_devices=()):
         dct_kernel = settings.get('dct_kernel', default_kernel) or default_kernel
         if dct_kernel != 'reference':
             try:
-                kernel_values = _kernel_values(
-                    settings, kernel_registry().get(dct_kernel), profile)
+                profile_names = kernel_profiles(profile)
+                registry = kernel_registry()
+                if dct_kernel not in registry.names():
+                    raise ValueError(
+                        f'DCT kernel: no kernel named {dct_kernel!r} '
+                        f'(have: {", ".join(registry.names())})')
+                selected = registry.get(dct_kernel)
+                if (profile in {value for _label, value in PROFILE_CHOICES} and
+                        not selected.has_settings_for(profile_names)):
+                    shown = (profile if isinstance(profile_names, str) else
+                             profile_names[0])
+                    raise v7_kernels.KernelError(
+                        f'{dct_kernel} has no settings for {shown}: choose an '
+                        'available kernel')
+                kernel_values = _kernel_values(settings, selected, profile)
             except v7_kernels.KernelError as exc:
                 raise ValueError(f'DCT kernel: {exc}.') from exc
     aspect_layout = 'auto'
@@ -1476,6 +1510,9 @@ def build_command(settings, devices, sd_module=None, python=None,
             for key, value in sorted(checked['dct_kernel_values'].items()):
                 if value != kernel_defaults[key]:
                     command.extend(('--dct-kernel-param', f'{key}={value:g}'))
+        elif default_kernel_for_profile(checked['profile']) != 'reference':
+            # Explicit GUI Reference must override the runtime profile default.
+            command.extend(('--dct-kernel', 'reference'))
         for folder in KERNEL_DIRS:
             command.extend(('--dct-kernel-dir', str(folder)))
         if checked['pixel_encode']:
@@ -1839,15 +1876,18 @@ class SenderGui:
         self.output_device_identity = preferences.get('output_device')
         self.source_audio_device_identity = preferences.get(
             'source_audio_device')
-        kernel_names = kernel_registry().names()
-        if self.settings.get('dct_kernel', 'reference') not in kernel_names:
-            self.notice = (f"DCT kernel {self.settings['dct_kernel']!r} is "
-                           'no longer in the kernel folder; using the profile default.')
-            default_kernel = default_kernel_for_profile(
-                self.settings.get('profile'))
-            self.settings['dct_kernel'] = (
-                default_kernel if default_kernel in kernel_names else
-                v7_kernels.REFERENCE)
+        registry = kernel_registry()
+        profile = self.settings.get('profile')
+        kernel_names = profile_kernel_names(profile, registry)
+        selected_kernel = self.settings.get('dct_kernel', 'reference')
+        if selected_kernel not in registry.names():
+            fallback = _profile_kernel_fallback(profile, registry)
+            self.notice = (f"Saved DCT kernel {selected_kernel!r} is no longer "
+                           f'installed; using {fallback!r}.')
+            self.settings['dct_kernel'] = fallback
+        elif selected_kernel not in kernel_names:
+            self.notice = (f"Saved DCT kernel {selected_kernel!r} has no "
+                           f'settings for {profile}; choose an available kernel.')
         output = _match_device(self.devices, self.output_device_identity)
         if output is not None:
             self.settings['device'] = output.index
@@ -1935,8 +1975,10 @@ class SenderGui:
             ideal, bilinear = winners['ideal'], winners['bilinear']
             default_kernel = default_kernel_for_profile(
                 self.settings.get('profile'))
+            registry = kernel_registry()
             descriptions = {name: label for name, label, _help, _params in
-                            kernel_registry().describe()}
+                            registry.describe()
+                            if name in profile_kernel_names(profile, registry)}
             priority = dict.fromkeys((v7_kernels.REFERENCE, default_kernel,
                                       ideal, bilinear))
             names = [name for name in priority if name in descriptions]
@@ -2711,17 +2753,24 @@ class SenderGui:
         """Rescan the kernel folders (here, and in a running sender)."""
         registry = kernel_registry()
         added, removed = registry.scan()
-        if self.settings.get('dct_kernel', 'reference') not in registry.names():
-            default_kernel = default_kernel_for_profile(
-                self.settings.get('profile'))
-            self.settings['dct_kernel'] = (
-                default_kernel if default_kernel in registry.names() else
-                v7_kernels.REFERENCE)
+        profile = self.settings.get('profile')
+        current = self.settings.get('dct_kernel', v7_kernels.REFERENCE)
+        migration = None
+        if current not in registry.names():
+            fallback = _profile_kernel_fallback(profile, registry)
+            self.settings['dct_kernel'] = fallback
+            migration = (f"{current!r} is no longer installed; "
+                         f'using {fallback!r}.')
+        elif current not in profile_kernel_names(profile, registry):
+            migration = (f"{current!r} has no settings for {profile}; "
+                         'selection retained. Choose an available kernel.')
         text = ', '.join([f'+{name}' for name in added] +
                          [f'-{name}' for name in removed]) or 'no change'
         skipped = ''.join(f'; skipped {Path(path).name}: {message}'
                           for path, message in registry.errors)
         self.notice = f'DCT kernels rescanned: {text}{skipped}'
+        if migration:
+            self.notice += f'; {migration}'
         if self.process is not None:
             try:
                 self._write_control({'kernels': 'reload'})
@@ -2816,15 +2865,21 @@ class SenderGui:
         return str(value) if str(value).strip() else '(not set)'
 
     def _profile_changed(self, value):
-        if self.settings['encode_filter'] == 'auto':
-            return
-        if (value in FOLDED_PROFILES and
+        if (self.settings['encode_filter'] != 'auto' and
+                value in FOLDED_PROFILES and
                 self.settings['encode_filter'] != 'box'):
             self.settings['encode_filter'] = 'auto'
+        registry = kernel_registry()
+        current = self.settings.get('dct_kernel', v7_kernels.REFERENCE)
+        if (current in registry.names() and
+                current not in profile_kernel_names(value, registry)):
+            self.notice = (f"DCT kernel {current!r} has no settings for "
+                           f'{value}; choose an available kernel. Your selection is retained.')
 
     def _assign(self, dest, value):
         if self._ab_blocks(dest):
             return
+        previous_notice = self.notice
         kernel_was_default = (dest == 'profile' and
                               self._is_default('dct_kernel'))
         self.settings[dest] = value
@@ -2873,7 +2928,10 @@ class SenderGui:
                 self._send_live_kernel_update()
             except (OSError, ValueError, RuntimeError) as exc:
                 message = str(exc)
-        self.notice = message
+        retained_kernel_warning = (dest == 'profile' and self.notice != previous_notice
+                                   and 'selection is retained' in self.notice)
+        if not retained_kernel_warning:
+            self.notice = message
         self.dirty = True
         self._persist_preferences()
 

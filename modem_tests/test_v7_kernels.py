@@ -271,10 +271,11 @@ class RegistryTests(unittest.TestCase):
     def test_shipped_kernels_all_load(self):
         registry = K.open_registry()
         self.assertEqual(registry.errors, [])
-        for name in ('lanczos', 'mitchell', 'magic_kernel_sharp', 'gaussian',
+        for name in ('lanczos', 'mitchell', 'magic_kernel_sharp',
                      'band_taper', 'antiring', 'upscale_precomp', 'shock_edge',
                      'csf_peak', 'slepian', 'tv_cartoon', 'viewer_solve'):
             self.assertIn(name, registry.names())
+        self.assertNotIn('gaussian', registry.names())
         self.assertEqual(registry.names()[0], K.REFERENCE)
 
     def test_files_are_added_and_removed_by_rescanning_the_folder(self):
@@ -427,7 +428,7 @@ class GainTests(unittest.TestCase):
             np.testing.assert_allclose(gain, expected, atol=2e-3)
 
     def test_mix_zero_switches_a_plane_off_and_one_is_as_written(self):
-        kernel = self.registry.get('gaussian')
+        kernel = self.registry.get('lanczos')
         params = kernel.defaults()
         full = kernel.gain(self.luma, params)
         half = kernel.gain(self.luma, dict(params, luma_mix=0.5))
@@ -498,7 +499,7 @@ class EncoderTests(unittest.TestCase):
                 self.frame, GRIDS, SHAPES, kernel=off), name)
 
     def test_taper_and_a_kernel_window_multiply(self):
-        selection = self.registry.select('gaussian')
+        selection = self.registry.select('lanczos')
         both = direct_dct_values(self.frame, GRIDS, SHAPES, sharpen='taper',
                                  kernel=selection)
         taper = direct_dct_values(self.frame, GRIDS, SHAPES, sharpen='taper')
@@ -604,12 +605,12 @@ class EncoderTests(unittest.TestCase):
         luma = GRIDS[0][0]*GRIDS[0][1]
         reference = direct_dct_values(self.frame, GRIDS, SHAPES)[:luma]
         soft = direct_dct_values(self.frame, GRIDS, SHAPES,
-                                 kernel=self.registry.select('gaussian'))[:luma]
+                                 kernel=self.registry.select('lanczos'))[:luma]
         self.assertLess(np.abs(np.diff(soft.reshape(GRIDS[0]), axis=1)).mean(),
                         np.abs(np.diff(reference.reshape(GRIDS[0]), axis=1)).mean())
 
     def test_the_window_is_applied_to_the_luma_adjust_target(self):
-        selection = self.registry.select('gaussian')
+        selection = self.registry.select('lanczos')
         plain, shaped = [], []
         direct_dct_values(self.frame, GRIDS, SHAPES, luminance_out=plain)
         direct_dct_values(self.frame, GRIDS, SHAPES, luminance_out=shaped,
@@ -783,7 +784,7 @@ class LiveControlTests(unittest.TestCase):
 
     def test_each_kernel_remembers_its_own_values(self):
         self.send(kernel='lanczos', kernel_params={'width': 0.7})
-        self.send(kernel='gaussian')
+        self.send(kernel='mitchell')
         self.send(kernel='lanczos')
         self.assertEqual(self.controls.options({})['kernel'].params['width'], 0.7)
 
@@ -840,7 +841,7 @@ class LiveControlTests(unittest.TestCase):
             dct_options=self.controls.options(base))
         np.testing.assert_array_equal(reference, direct_dct_values(
             frame, model.coder.grids, model.coder.shapes))
-        self.send(kernel='gaussian')
+        self.send(kernel='lanczos')
         shaped, _ = v7_live._values(
             model, frame, 'box', 1.0, 1.0, dct_encode=True,
             dct_options=self.controls.options(base))
@@ -853,7 +854,7 @@ class LiveControlTests(unittest.TestCase):
                 'chroma_gain': 1.0, 'aggregation': 'off', 'band_profile': 'off'}
         masks_for = lambda aspect: [None, None, None]
         shots = []
-        for name in ('reference', 'gaussian'):
+        for name in ('reference', 'lanczos'):
             self.send(kernel=name)
             _values, _aspect, preview = v7_live._values(
                 model, frame, 'box', 1.0, 1.0, dct_encode=True,

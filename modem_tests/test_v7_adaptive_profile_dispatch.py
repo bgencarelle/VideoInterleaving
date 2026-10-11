@@ -33,11 +33,14 @@ class AdaptiveProfileDispatchTests(unittest.TestCase):
         decoder.last_decoded_packet = None
         decoder.state = None
         decoder.stereo_tail_memory = True
-        decoder.on_switch = None
+        switches = []
+        decoder.on_switch = lambda name, side: switches.append((name, side))
         decoder._mode_names = {1: 'fold-500', 2: 'adaptive-mono-nested',
                                3: 'aspect-mono-500'}
         decoder.mono_status_modes = frozenset((2, 3))
-        decoder._last_slices = False
+        decoder.adaptive_mode = 2
+        decoder.aspect_mono_mode = 3
+        decoder._last_slices = None
         decoder._reset_aspect_wires = lambda: None
         decoder.generation = 0
 
@@ -45,11 +48,48 @@ class AdaptiveProfileDispatchTests(unittest.TestCase):
             decision = decoder._observe(packet, 1.0, 2, 1, float(packet))
         self.assertTrue(decision['confirmed'])
         self.assertEqual(decoder.active_mode, ADAPTIVE_NESTED_MODE)
+        self.assertEqual(decoder._last_slices, None)
+        self.assertEqual(switches, [])
 
         for packet in range(3, 6):
             decision = decoder._observe(packet, 1.0, 3, 1, float(packet))
         self.assertTrue(decision['confirmed'])
         self.assertEqual(decoder.active_mode, 3)
+        self.assertEqual(switches, [('aspect-mono-500', 1)])
+
+    def test_id_two_profile_label_waits_for_verified_metadata(self):
+        decoder = object.__new__(_AdaptiveProfileDecoder)
+        decoder.active_mode = ADAPTIVE_NESTED_MODE
+        decoder.adaptive_mode = ADAPTIVE_NESTED_MODE
+        decoder.aspect_mono_mode = 3
+        decoder.mono_status_modes = frozenset((ADAPTIVE_NESTED_MODE, 3))
+        decoder.active_side = None
+        decoder._last_slices = None
+
+        self.assertEqual(decoder.profile_name,
+                         'adaptive-nested · awaiting verified metadata')
+        decoder._last_slices = True
+        self.assertEqual(decoder.profile_name, 'adaptive-stereo-nested')
+        decoder._last_slices = False
+        self.assertEqual(decoder.profile_name, 'adaptive-mono-nested')
+
+        decoder._mode_names = {2: 'adaptive-mono-nested'}
+        decoder.reset_candidate = lambda: None
+        self.assertTrue(decoder.start_with('adaptive-stereo-nested', side=1))
+        self.assertEqual(decoder._last_slices, None)
+        self.assertEqual(decoder.profile_name,
+                         'adaptive-nested · awaiting verified metadata')
+
+    def test_adaptive_stereo_dispatch_requests_the_other_input_leg(self):
+        decoder = object.__new__(_AdaptiveProfileDecoder)
+        decoder.dispatch_mode = ADAPTIVE_NESTED_MODE
+        decoder.adaptive_mode = ADAPTIVE_NESTED_MODE
+        decoder.aspect_mono_mode = 3
+        self.assertTrue(decoder.may_use_stereo_slices())
+        decoder.dispatch_mode = 3
+        self.assertTrue(decoder.may_use_stereo_slices())
+        decoder.dispatch_mode = 1
+        self.assertFalse(decoder.may_use_stereo_slices())
 
     def test_adaptive_gui_does_not_override_os_channels_or_sample_rate(self):
         class SoundDevice:
@@ -61,12 +101,17 @@ class AdaptiveProfileDispatchTests(unittest.TestCase):
 
         device = OutputDevice(0, 'pulse', 2, 44100, 'ALSA')
         gui = SenderGui((device,), restore_preferences=False)
-        gui.settings.update(device=0, source='test',
-                            profile='adaptive-stereo-nested')
+        gui._assign('profile', 'adaptive-stereo-nested')
+        gui.settings.update(device=0, source='test')
         command = build_command(gui.settings, (device,), SoundDevice,
                                 python='python')
         self.assertEqual(SoundDevice.calls[-1]['channels'], 2)
         self.assertEqual(SoundDevice.calls[-1]['samplerate'], 44100)
+        self.assertEqual(command[command.index('--profile')+1],
+                         'adaptive-stereo-nested')
+        self.assertIn('--adaptive-guest-range', command)
+        self.assertIn('--exact-inverse', command)
+        self.assertIn('--chroma-detail', command)
         self.assertNotIn('--rate', command)
         self.assertNotIn('--modem-channels', command)
 
