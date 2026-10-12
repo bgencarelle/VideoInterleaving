@@ -22,6 +22,33 @@ class LocalFrameBridgeTests(unittest.TestCase):
             right.close()
         np.testing.assert_array_equal(received, frame)
 
+    def test_image_index_and_clock_ride_with_the_frame(self):
+        from local_frame_bridge import read_frame_info
+        from tools.v7_live import _local_stamp
+        from animation_modem import v7 as P
+        left, right = socket.socketpair()
+        frame = np.zeros((4, 6, 3), np.uint8)
+        info = {'index': 1234, 'frames': 2221, 'pingpong': True,
+                'clocked': True, 'launch_ns': 10**18, 'shown_ns': 10**18+5*10**9}
+        try:
+            write_frame(left, frame, info)
+            write_frame(left, frame)                 # a frame without info
+            got, got_info = read_frame_info(right)
+            plain, plain_info = read_frame_info(right)
+        finally:
+            left.close()
+            right.close()
+        self.assertEqual(got_info, info)
+        self.assertIsNone(plain_info)
+        np.testing.assert_array_equal(got, frame)
+        # The sender stamps the packet with that image and local mode's loop.
+        index, loop, direction = _local_stamp(info)
+        self.assertEqual(index, 1234)
+        self.assertEqual(loop, P.LoopInfo.from_epoch(2221, 10**18, True))
+        self.assertIn(direction, (1, -1))
+        index, loop, _ = _local_stamp(dict(info, clocked=False))
+        self.assertFalse(loop.clocked)
+
     def test_publisher_connects_to_loopback_receiver(self):
         listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         listener.bind(('127.0.0.1', 0))

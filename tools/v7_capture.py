@@ -19,7 +19,7 @@ from urllib.parse import urlsplit
 
 import numpy as np
 
-from local_frame_bridge import read_frame
+from local_frame_bridge import read_frame_info
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -177,6 +177,10 @@ class LocalModeSource:
         self._condition = threading.Condition()
         self._connection = None
         self._latest = None
+        self._latest_info = None
+        # Which image the last returned frame shows and local mode's clock
+        # (local_frame_bridge.read_frame_info), or None.
+        self.info = None
         self._closed = False
         self._receiver = threading.Thread(
             target=self._receive, name='v7-local-mode-frames', daemon=True)
@@ -213,11 +217,11 @@ class LocalModeSource:
                 self._connection = connection
             try:
                 while True:
-                    frame = read_frame(connection)
-                    if frame is None:
+                    result = read_frame_info(connection)
+                    if result is None:
                         break
                     with self._condition:
-                        self._latest = frame
+                        self._latest, self._latest_info = result
                         self._condition.notify_all()
             except (ConnectionError, OSError, ValueError):
                 pass
@@ -244,6 +248,7 @@ class LocalModeSource:
                 self._condition.wait(min(.1, remaining))
             if self._latest is None:
                 raise RuntimeError('Local-mode video source has stopped')
+            self.info = self._latest_info
             return self._latest.copy()
 
     def close(self):

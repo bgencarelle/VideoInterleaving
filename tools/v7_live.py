@@ -542,6 +542,20 @@ def _dct_preview_image(rgb, brightness, gamma):
     return image.point(table*3)
 
 
+def _local_stamp(info):
+    """(source index, LoopInfo, direction) for a frame from local mode, from
+    the image it shows and local mode's clock (local_frame_bridge)."""
+    frames = max(1, int(info['frames']))
+    pingpong = bool(info['pingpong'])
+    if info['clocked']:
+        loop = P.LoopInfo.from_epoch(frames, int(info['launch_ns']), pingpong)
+        direction = P.loop_direction(P.loop_ticks(int(info['shown_ns'])), loop)
+    else:
+        loop = P.LoopInfo(frames, P.LOOP_NO_CLOCK, pingpong)
+        direction = 1
+    return int(info['index']) % (P.MAX_SOURCE_INDEX+1), loop, direction
+
+
 class _SenderIndex:
     """The index each packet carries when sending outside the app: the count
     of frames encoded, rolling over at the metadata's 15-bit field, sent with
@@ -2031,7 +2045,13 @@ def _run_send_session(args):
                 # exactly once, directly in coefficient space; a second fold
                 # would quantize the hosts again and erase the guest residuals.
                 frames.append(value); aspects.append(aspect)
-                if keeper is not None:
+                # Local mode says which image this is and gives its clock:
+                # the packet then carries the real index and loop, as
+                # main.py --mode modem's do.
+                local_info = getattr(raw_grab, 'info', None)
+                if local_info is not None:
+                    stamps.append(_local_stamp(local_info))
+                elif keeper is not None:
                     stamps.append(keeper.stamp(counter+len(frames)-1))
                 # A compressed packet still needs a new source frame at the
                 # faster wire cadence; otherwise the audio stream has gaps.
@@ -2040,7 +2060,8 @@ def _run_send_session(args):
                     continue
                 audio, stats = encode_batch(frames, aspects, counter,
                                             deferred_gains,
-                                            stamps=stamps if keeper else None)
+                                            stamps=(stamps if len(stamps) == len(frames)
+                                                    else None))
                 stamps = []
                 preview_frames = (
                     tuple((counter+index, aspects[index], frame)
@@ -2065,7 +2086,8 @@ def _run_send_session(args):
             try:
                 audio, stats = encode_batch(frames, aspects, counter,
                                             deferred_gains,
-                                            stamps=stamps if keeper else None)
+                                            stamps=(stamps if len(stamps) == len(frames)
+                                                    else None))
                 preview_frames = (
                     tuple((counter+index, aspects[index], frame)
                           for index, frame in enumerate(preview_images))

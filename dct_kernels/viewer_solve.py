@@ -51,7 +51,7 @@ def _model(viewer, rows, cols, sent_rows, sent_cols, up):
         reduce_ = _resample_matrix(n, sent, Image.Resampling.BOX)
         enlarge = _resample_matrix(sent, sent*up, _FILTERS[int(viewer)])
         basis = idct(np.eye(n), axis=0, norm='ortho')
-        return np.ascontiguousarray(enlarge @ reduce_ @ basis)
+        return _product(enlarge, reduce_, basis)
     return axis(rows, sent_rows), axis(cols, sent_cols)
 
 
@@ -73,8 +73,21 @@ def _normal(viewer, rows, cols, sent_rows, sent_cols, up):
     pictures themselves are never formed per frame."""
     my, mx = _model(viewer, rows, cols, sent_rows, sent_cols, up)
     iy, ix = _ideal(rows, cols, sent_rows, sent_cols, up)
-    return tuple(np.ascontiguousarray(matrix, np.float64) for matrix in
-                 (my.T @ my, mx.T @ mx, my.T @ iy, ix.T @ mx))
+    return tuple(np.ascontiguousarray(_product(*pair), np.float64) for pair in
+                 ((my.T, my), (mx.T, mx), (my.T, iy), (ix.T, mx)))
+
+
+# numpy on Apple Silicon (Accelerate) can raise false divide/overflow
+# warnings from a plain matrix product. These one-time products are checked
+# for finite values instead, so a real fault still stops with an error.
+def _product(*matrices):
+    with np.errstate(divide='ignore', over='ignore', invalid='ignore'):
+        result = matrices[0]
+        for matrix in matrices[1:]:
+            result = result @ matrix
+    if not np.isfinite(result).all():
+        raise FloatingPointError('viewer_solve: matrix product is not finite')
+    return np.ascontiguousarray(result)
 
 
 def post(grid, ctx, viewer, iterations, lam, up, tame):

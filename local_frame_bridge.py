@@ -11,26 +11,46 @@ import numpy as np
 
 
 _MAGIC = b'VIF1'
+# VIF2: the same frame plus which image it shows and the app's clock, so a
+# modem sender can stamp packets with the real image index and loop.
+_MAGIC_INFO = b'VIF2'
 _HEADER = struct.Struct('!4sII')
+# index, frames in the loop, ping-pong, clocked, launch time ns, shown at ns
+_INFO = struct.Struct('!iI??qq')
 _MAX_FRAME_BYTES = 64 * 1024 * 1024
 
 
 def read_frame(sock):
     """Read one RGB frame from a connected socket; return None on clean EOF."""
+    result = read_frame_info(sock)
+    return None if result is None else result[0]
+
+
+def read_frame_info(sock):
+    """(frame, info) from a connected socket, or None on clean EOF. ``info``
+    is None, or a dict: index, frames, pingpong, clocked, launch_ns,
+    shown_ns (see write_frame)."""
     header = _read_exact(sock, _HEADER.size, allow_eof=True)
     if header is None:
         return None
     magic, width, height = _HEADER.unpack(header)
     size = width * height * 3
-    if (magic != _MAGIC or width < 1 or height < 1 or
+    if (magic not in (_MAGIC, _MAGIC_INFO) or width < 1 or height < 1 or
             size > _MAX_FRAME_BYTES):
         raise ValueError('invalid local-frame header')
+    info = None
+    if magic == _MAGIC_INFO:
+        fields = _INFO.unpack(bytes(_read_exact(sock, _INFO.size)))
+        info = dict(zip(('index', 'frames', 'pingpong', 'clocked',
+                         'launch_ns', 'shown_ns'), fields))
     data = _read_exact(sock, size)
-    return np.frombuffer(data, dtype=np.uint8).reshape(height, width, 3)
+    return np.frombuffer(data, dtype=np.uint8).reshape(height, width, 3), info
 
 
-def write_frame(sock, frame):
-    """Write one contiguous uint8 RGB frame to a connected socket."""
+def write_frame(sock, frame, info=None):
+    """Write one contiguous uint8 RGB frame to a connected socket, with
+    ``info`` (index, frames, pingpong, clocked, launch_ns, shown_ns) when
+    given."""
     pixels = np.asarray(frame)
     if (pixels.dtype != np.uint8 or pixels.ndim != 3 or
             pixels.shape[2] != 3):
@@ -40,7 +60,13 @@ def write_frame(sock, frame):
     if width < 1 or height < 1 or size > _MAX_FRAME_BYTES:
         raise ValueError('local frame dimensions are outside supported limits')
     pixels = np.ascontiguousarray(pixels)
-    sock.sendall(_HEADER.pack(_MAGIC, width, height))
+    if info is None:
+        sock.sendall(_HEADER.pack(_MAGIC, width, height))
+    else:
+        sock.sendall(_HEADER.pack(_MAGIC_INFO, width, height) + _INFO.pack(
+            int(info['index']), int(info['frames']), bool(info['pingpong']),
+            bool(info['clocked']), int(info['launch_ns']),
+            int(info['shown_ns'])))
     sock.sendall(memoryview(pixels).cast('B'))
 
 
@@ -74,7 +100,7 @@ class LatestFramePublisher:
             target=self._run, name='local-frame-publisher', daemon=True)
         self._thread.start()
 
-    def publish(self, frame):
+    def publish(self, frame, info=None):
         pixels = np.asarray(frame)
         if (pixels.dtype != np.uint8 or pixels.ndim != 3 or
                 pixels.shape[2] != 3):
@@ -87,7 +113,7 @@ class LatestFramePublisher:
         with self._condition:
             if self._closed:
                 return
-            self._pending = pixels
+            self._pending = (pixels, info)
             self._condition.notify()
 
     def _connect(self):
@@ -110,14 +136,15 @@ class LatestFramePublisher:
                     self._condition.wait()
                 if self._closed:
                     break
-                pixels = self._pending
+                pending = self._pending
+                pixels, info = pending
                 self._pending = None
             if connection is None:
                 connection = self._connect()
                 if connection is None:
                     break
             try:
-                write_frame(connection, pixels)
+                write_frame(connection, pixels, info)
             except (OSError, ValueError):
                 try:
                     connection.close()
@@ -126,7 +153,7 @@ class LatestFramePublisher:
                 connection = None
                 with self._condition:
                     if not self._closed and self._pending is None:
-                        self._pending = pixels
+                        self._pending = pending
                         self._condition.notify()
         if connection is not None:
             try:

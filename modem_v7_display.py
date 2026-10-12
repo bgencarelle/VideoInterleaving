@@ -6,6 +6,7 @@ production fold/pilot/packet path shared by offline image-quality trials.
 """
 import json
 import math
+import sys
 from pathlib import Path
 import time
 import wave
@@ -184,6 +185,10 @@ def packet(library, model, absolute, source_index, selection, *,
     }
 
 
+# Packets whose pictures are loaded and encoded ahead of the one being sent.
+AHEAD_PACKETS = 3
+
+
 def send_args(args):
     """The V7 sender's arguments for ``main.py --mode modem``.
 
@@ -208,12 +213,10 @@ def build_encoder(args):
     return v7_live.build_send_encoder(send_args(args))
 
 
-def encoder_packet(encoder, library, absolute, source_index, selection, *,
-                   background=(4, 4, 4), rotation=0, mirror=False,
-                   loop=None, direction=1):
-    """One 48 kHz packet of the composited picture, encoded exactly as the
-    V7 sender encodes a frame, carrying ``source_index`` and the loop."""
-    index, main_folder, float_folder = selection
+def encoded_picture(encoder, library, index, main_folder, float_folder, *,
+                    background=(4, 4, 4), rotation=0, mirror=False):
+    """(values, aspect code): one composited picture, loaded and encoded
+    exactly as the V7 sender encodes a frame. The slow part of a packet."""
     from tools.v7_capture import CapturedFrame
     image = library.composite(index, main_folder, float_folder,
                               background, rotation, mirror)
@@ -222,13 +225,100 @@ def encoder_packet(encoder, library, absolute, source_index, selection, *,
     frame = CapturedFrame(
         np.asarray(image.convert('RGB')),
         tuple(image.info.get('source_dimensions', image.size)))
-    value, aspect_code = encoder.frame_values(frame)
+    return encoder.frame_values(frame)
+
+
+def wire_packet(encoder, value, aspect_code, absolute, source_index, *,
+                loop=None, direction=1):
+    """One 48 kHz packet of an encoded picture, numbered ``absolute`` and
+    carrying ``source_index`` and the loop. The quick part (about 2 ms)."""
     stamps = {} if loop is None else {int(source_index): (loop, direction)}
     with _v7.send_stamps(stamps):
-        audio = encoder.wire_audio([value], [aspect_code], absolute,
-                                   [int(source_index)])
+        return encoder.wire_audio([value], [aspect_code], absolute,
+                                  [int(source_index)])
+
+
+class PicturesAhead:
+    """Loads and encodes pictures before their send time, so the send loop
+    only hands a finished one to the wire when its slot comes.
+
+    The application's local mode does the same for its window: workers load
+    upcoming images into a buffer and the display takes the nearest one that
+    is ready, never waiting. Here each worker job loads, composites and
+    encodes one picture together. A packet carries the index of the picture
+    it really holds, so the receiver's loop readout stays true.
+    """
+
+    def __init__(self, make, frames, workers=2, keep=8):
+        from collections import OrderedDict
+        from concurrent.futures import ThreadPoolExecutor
+        self._make = make
+        self.frames = max(1, int(frames))
+        self.keep = int(keep)
+        self._jobs = OrderedDict()
+        self._pool = ThreadPoolExecutor(max_workers=workers,
+                                        thread_name_prefix='v7-modem-ahead')
+        self.exact = self.nearest = self.waited = 0
+
+    def request(self, index, folders):
+        key = (int(index), tuple(int(v) for v in folders))
+        if key in self._jobs:
+            self._jobs.move_to_end(key)
+            return
+        self._jobs[key] = self._pool.submit(self._make, *key)
+        while len(self._jobs) > self.keep:
+            _old, future = self._jobs.popitem(last=False)
+            future.cancel()                    # not started yet: skip it
+
+    def _distance(self, a, b):
+        d = abs(int(a)-int(b)) % self.frames
+        return min(d, self.frames-d)
+
+    def take(self, index, folders):
+        """(index sent, (values, aspect)): the picture for ``index`` if it is
+        finished, else the nearest finished one for these folders; waits only
+        when nothing at all is finished (the first packet, a folder change)."""
+        folders = tuple(int(v) for v in folders)
+        key = (int(index), folders)
+        exact = self._jobs.get(key)
+        if exact is not None and exact.done() and not exact.cancelled():
+            self.exact += 1
+            return key[0], exact.result()
+        ready = [(self._distance(i, index), i, future)
+                 for (i, f), future in self._jobs.items()
+                 if f == folders and future.done() and not future.cancelled()
+                 and future.exception() is None]
+        if ready:
+            _d, i, future = min(ready, key=lambda item: item[:2])
+            self.nearest += 1
+            return i, future.result()
+        self.request(index, folders)
+        self.waited += 1
+        return key[0], self._jobs[key].result()
+
+    def close(self):
+        self._pool.shutdown(wait=False, cancel_futures=True)
+
+
+def encoder_packet(encoder, library, absolute, source_index, selection, *,
+                   background=(4, 4, 4), rotation=0, mirror=False,
+                   loop=None, direction=1):
+    """One 48 kHz packet of the composited picture, encoded exactly as the
+    V7 sender encodes a frame, carrying ``source_index`` and the loop."""
+    index, main_folder, float_folder = selection
+    value, aspect_code = encoded_picture(
+        encoder, library, index, main_folder, float_folder,
+        background=background, rotation=rotation, mirror=mirror)
+    audio = wire_packet(encoder, value, aspect_code, absolute, source_index,
+                        loop=loop, direction=direction)
+    return audio, _packet_report(encoder, audio, absolute, source_index,
+                                 main_folder, float_folder, aspect_code)
+
+
+def _packet_report(encoder, audio, absolute, source_index, main_folder,
+                   float_folder, aspect_code):
     wire = (encoder.aspect_wire or encoder.mono_wire or encoder.slice_wire)
-    return audio, {
+    return {
         'frame': absolute,
         'source_index': source_index,
         'face_folder': main_folder,
@@ -420,12 +510,45 @@ def run_modem(args):
 
     retry_seconds = 1 / (settings.FPS or 60)
     midi_input = None
+    # Pictures are loaded and encoded ahead by workers; the send loop hands
+    # a finished one to the wire at its slot.
+    ahead = PicturesAhead(
+        lambda index, folders: encoded_picture(
+            encoder, library, index, *folders, background=background,
+            rotation=rotation, mirror=mirror),
+        library.frames)
+    # Those workers run alongside the audio callback, which needs Python's
+    # lock within one output buffer (2.7 ms at low latency). Python hands the
+    # lock over every 5 ms by default; hand it over sooner.
+    switch_interval = sys.getswitchinterval()
+    sys.setswitchinterval(min(switch_interval, .0005))
+    # Have the first packets' pictures finished before the sound starts: a
+    # first packet that waits for its picture is late, and the output skips.
+    now_ns = time.time_ns()
+    packet_seconds = _v7.PULSE_FRAME/_v7.RATE/speed
+    first, _ = index_calculator.calculate_free_clock_index(
+        library.frames, settings.PINGPONG, at_time_ns=now_ns,
+        time_offset_ns=index_offset_ns, publish=False)
+    first = max(0, min(int(first), library.frames - 1))
+    first_folders, previous = _folders(args, library, first, selected, previous)
+    priming = []
+    for step in range(AHEAD_PACKETS+1):
+        later, _ = index_calculator.calculate_free_clock_index(
+            library.frames, settings.PINGPONG,
+            at_time_ns=now_ns + round(step*packet_seconds*1e9),
+            time_offset_ns=index_offset_ns, publish=False)
+        priming.append(max(0, min(int(later), library.frames - 1)))
+    for wanted in priming:
+        ahead.request(wanted, first_folders)
+    for wanted in priming:
+        ahead.take(wanted, first_folders)        # waits for each to finish
     try:
         midi_input = _open_midi_input(index_calculator)
         with PacketOutput(device(args.scope_device), channels, output_latency,
                           frame=_v7.PULSE_FRAME, packet=_v7.PULSE_FRAME,
                           speed=speed) as output:
             print(f'[MODEM/V7] output {output.rate:g} Hz, {output.fps:.2f} fps')
+            packet_ns = round(output.emit_frame/output.rate * 1_000_000_000)
             while not args.modem_frames or sent < args.modem_frames:
                 started = time.perf_counter()
                 output.wait_ready()
@@ -454,8 +577,34 @@ def run_modem(args):
                                                 library.frames - 1))
                 folders, previous = _folders(args, library, index, selected, previous)
                 prefetch(index, folders, next_index)
-                audio, report = make_packet(sent + 1, index, folders,
-                                            target_time_ns)
+                # Ask for this packet's picture and the next few packets'
+                # (by the clock at their send times), then take the finished
+                # one for this slot.
+                upcoming = [index]
+                for step in range(1, AHEAD_PACKETS+1):
+                    if target_time_ns is None:
+                        upcoming.append((index+step) % library.frames)
+                        continue
+                    later, _ = index_calculator.calculate_free_clock_index(
+                        library.frames, settings.PINGPONG,
+                        at_time_ns=target_time_ns + step*packet_ns,
+                        time_offset_ns=index_offset_ns, publish=False)
+                    upcoming.append(max(0, min(int(later), library.frames - 1)))
+                for wanted in upcoming:
+                    ahead.request(wanted, folders)
+                handoff = time.perf_counter()
+                sent_index, (value, aspect_code) = ahead.take(index, folders)
+                direction = (_v7.loop_direction(_v7.loop_ticks(target_time_ns), loop)
+                             if loop.clocked and target_time_ns is not None else 1)
+                audio = wire_packet(encoder, value, aspect_code, sent + 1,
+                                    sent_index, loop=loop, direction=direction)
+                report = _packet_report(encoder, audio, sent + 1, sent_index,
+                                        *folders, aspect_code)
+                report.update(direction=direction, wanted_index=index,
+                              encode_ms=(time.perf_counter()-handoff)*1000)
+                if runtime_library is not None:
+                    report['fifo_hits'] = runtime_library.fifo_hits
+                    report['source_index_misses'] = runtime_library.index_misses
                 prepare_ms = max(args.modem_prepare_ms, report['encode_ms'] * 1.5)
                 if output.submit(audio, slot):
                     sent += 1
@@ -470,6 +619,8 @@ def run_modem(args):
                         time.sleep(delay)
             output.finish()
     finally:
+        ahead.close()
+        sys.setswitchinterval(switch_interval)
         try:
             if midi_input is not None:
                 midi_input.close()

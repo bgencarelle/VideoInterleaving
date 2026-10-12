@@ -9,7 +9,6 @@ from functools import lru_cache
 
 import math
 
-import os
 import numpy as np
 from numba import njit, prange
 from scipy.fft import dctn, idctn
@@ -810,8 +809,8 @@ def _direct_plan(height, width, rows, cols, block_y=1, block_x=1,
         _axis_analysis(width, block_x, cols, cols, decimated_x))
     synthesis_y = np.ascontiguousarray(_dct_matrix(rows, rows))
     synthesis_x = np.ascontiguousarray(_dct_matrix(cols, cols).T)
-    left = np.ascontiguousarray(synthesis_y @ analysis_y)
-    right = np.ascontiguousarray(analysis_x @ synthesis_x)
+    left = _setup_product(synthesis_y, analysis_y)
+    right = _setup_product(analysis_x, synthesis_x)
     plan = (analysis_y, analysis_x, synthesis_y, synthesis_x, left, right)
     for array in plan:
         array.setflags(write=False)
@@ -863,6 +862,17 @@ def _tone_lut_fixed(brightness, gamma):
 # lives in tools/v7_send_defaults.py); this is the value when none is given.
 # (With it, luma adjustment's target is the linear light either way.)
 LINEAR_PRESHRINK = True
+
+
+# numpy on Apple Silicon (Accelerate) can raise false divide/overflow
+# warnings from a plain matrix product. These one-time products are checked
+# for finite values instead, so a real fault still stops with an error.
+def _setup_product(a, b):
+    with np.errstate(divide='ignore', over='ignore', invalid='ignore'):
+        result = a @ b
+    if not np.isfinite(result).all():
+        raise FloatingPointError('direct DCT plan: matrix product is not finite')
+    return np.ascontiguousarray(result)
 
 
 @lru_cache(maxsize=16)

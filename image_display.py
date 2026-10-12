@@ -47,6 +47,7 @@ RESET_CODE = "\033[0m"
 # --------------------------------
 
 from index_calculator import update_index
+import index_calculator
 from folder_selector import update_folder_selection, folder_dictionary
 from display_manager import DisplayState, display_init, _is_wayland_session, _hide_cursor_reliable, _move_wlrctl_offscreen_once
 from event_handler import register_callbacks
@@ -208,6 +209,7 @@ def run_display(clock_source=CLOCK_MODE):
     fifo_miss_count = 0
     last_fifo_miss = -1
     last_displayed_index = 0
+    shown_index = 0
 
     # Identify Modes
     is_ascii = getattr(settings, 'ASCII_MODE', False)
@@ -230,7 +232,14 @@ def run_display(clock_source=CLOCK_MODE):
         now = time.monotonic()
         if now < next_local_frame:
             return
-        frame_publisher.publish(frame)
+        # Which image this is and the app's clock: a modem sender stamps its
+        # packets with them, so the receiver can tell the loop position.
+        frame_publisher.publish(frame, {
+            'index': shown_index, 'frames': png_paths_len,
+            'pingpong': bool(PINGPONG),
+            'clocked': not index_calculator.midi_mode,
+            'launch_ns': index_calculator.launch_time,
+            'shown_ns': time.time_ns()})
         next_local_frame = now + local_frame_period
     
     # Warn if both modes are set (configuration conflict)
@@ -495,6 +504,7 @@ def run_display(clock_source=CLOCK_MODE):
                     compensator.update(index, d_idx)
 
                     # Update loop pointers
+                    shown_index = d_idx
                     cur_main = m_img
                     cur_float = f_img
                     cur_m_sbs = m_sbs

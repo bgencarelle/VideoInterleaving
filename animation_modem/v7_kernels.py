@@ -445,7 +445,11 @@ class Kernel:
         if abs(total) < 1e-9:
             raise KernelError('kernel has no DC gain')
         flat = np.asarray(nu, np.float64).reshape(-1)
-        response = np.cos(2*np.pi*np.outer(flat, x)) @ taps / total
+        # (Accelerate's false matmul warnings: see v7_source_dct._setup_product.)
+        with np.errstate(divide='ignore', over='ignore', invalid='ignore'):
+            response = np.cos(2*np.pi*np.outer(flat, x)) @ taps / total
+        if not np.isfinite(response).all():
+            raise KernelError('kernel frequency response is not finite')
         return response.reshape(np.shape(nu))
 
     def _raw_gain(self, ctx, params):

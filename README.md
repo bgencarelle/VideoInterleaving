@@ -57,7 +57,7 @@ images/
     └── 0_overlay/
 ```
 
-Point the app at it with `--dir images`. PNG, WebP and JPEG all work.
+Point the app at it with `--dir images`. Use WebP or JPEG pictures.
 
 ## Show pictures
 
