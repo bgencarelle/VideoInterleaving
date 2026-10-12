@@ -1,31 +1,26 @@
 # VideoInterleaving
 
-VideoInterleaving renders ordered image sequences as a local window, browser
-stream, terminal video, oscilloscope signal, or audio modem. Each mode runs as
-its own application process.
+VideoInterleaving plays a folder of pictures as moving images. It can show
+them in a window, in a web browser, as text in a terminal, on an oscilloscope,
+or send them as sound that another computer turns back into pictures (the
+modem).
 
 ## Modes at a glance
 
-| Mode | Output | Default address or device |
+| Mode | What you get | Where to look |
 | --- | --- | --- |
-| `local` | Full-screen desktop window | Monitor: `http://localhost:8888/` |
-| `web` | Browser MJPEG viewer | Viewer: `http://localhost:8080/`; monitor: `http://localhost:1978/` |
-| `ascii` | ANSI color video over Telnet | Telnet: port `2323`; monitor: port `2324` |
-| `asciiweb` | Browser ASCII viewer over WebSocket | Viewer: `http://localhost:1980/ascii`; WebSocket: port `2424` |
-| `scope` | Stereo XY waveform | Audio output; monitor: port `8890` |
-| `modem` | V7 pulse-framed audio transport | Selected audio output; no web server |
+| `local` | A full-screen window | On the screen; status page at `http://localhost:8888/` |
+| `web` | Video in a web browser | `http://localhost:8080/` |
+| `ascii` | Video made of text, over Telnet | `nc localhost 2323` |
+| `asciiweb` | Video made of text, in a web browser | `http://localhost:1980/ascii` |
+| `scope` | Pictures drawn on an oscilloscope | Your audio output, wired to the scope |
+| `modem` | Pictures sent as sound | Your audio output, wired to a receiver |
 
-`local` is the default when `--mode` is omitted. The old `SERVER_MODE` and
-`ASCII_MODE` settings do not select the application mode; use `--mode` instead.
-Run `main.py --help` for the complete list of accepted options.
+If you leave out `--mode`, you get `local`.
 
-## Quick start
+## Install
 
-### Install
-
-On Debian/Ubuntu/Raspberry Pi OS, the setup script installs system and Python
-dependencies, creates `.venv`, checks the modem bindings, and configures
-systemd units when systemd is available:
+On Debian, Ubuntu or Raspberry Pi OS, one script installs everything:
 
 ```bash
 git clone https://github.com/bgencarelle/VideoInterleaving.git
@@ -33,37 +28,25 @@ cd VideoInterleaving
 sudo ./scripts/setup_app.sh
 ```
 
-For a manual Python environment, use Python 3.11 or newer. The virtual
-environment uses `--system-site-packages` to reuse compatible OS-provided Python
-packages, while `sounddevice` needs the native PortAudio library. On
-Debian-family systems, install the listed native dependencies first:
+On a Mac, run `./scripts/setup_app.sh` (it uses Homebrew).
+
+To set it up by hand instead, you need Python 3.11 or newer:
 
 ```bash
 sudo apt update
 sudo apt install $(grep -v '^#' system-requirements.txt | tr '\n' ' ')
-```
-
-Then create the environment with `--system-site-packages`:
-
-```bash
 python3 -m venv --system-site-packages .venv
 .venv/bin/python -m pip install --upgrade pip
 .venv/bin/python -m pip install -r requirements.txt
 .venv/bin/python utilities/check_modem_setup.py
 ```
 
-`requirements.txt` includes the modem and scope Python requirements. Native
-libraries (including PortAudio, OpenGL, and TurboJPEG) are listed in
-`system-requirements.txt` for Debian-family systems. On macOS, run
-`./scripts/setup_app.sh` to install the Homebrew dependencies. If setting up
-manually, install the native libraries required by your mode and use the
-package-manager Python when reusing its Python packages.
+The last line checks that sound input and output work.
 
-### Point the app at an image library
+## Your pictures
 
-Pass the root of your image library with `--dir`. The app looks for `face/` and
-`float/` trees under that root; each contains image folders and ordered frames
-used by the composition:
+Put your pictures in a folder with two parts, `face` and `float`. Each holds
+folders of numbered frames. A `float` picture is laid over a `face` picture.
 
 ```text
 images/
@@ -74,255 +57,172 @@ images/
     └── 0_overlay/
 ```
 
-Without `--dir`, the defaults prefer `images_sbs` when it exists, then `images`.
+Point the app at it with `--dir images`. PNG, WebP and JPEG all work.
 
-PNG, WebP, JPEG, and several NumPy image formats are accepted. For faster
-JPEG-based playback, an SBS JPEG stores color in its left half and its matte in
-its right half. SBS is optional; source images can be used directly. The
-optional converter at `utilities/reencode_for_jps_sbs.py` scans WebP files and
-needs OpenCV (`cv2`) and `tqdm`; `tqdm` is not installed by the default setup.
+## Show pictures
 
-### Start a mode
-
-Run from the repository root. Use `.venv/bin/python` so the application uses
-the environment installed above:
+Run these from the repository folder:
 
 ```bash
-# Desktop window (also the default mode)
+# A window on this screen
 .venv/bin/python main.py --mode local --dir images
 
-# Browser video
+# A web browser (open http://localhost:8080/)
 .venv/bin/python main.py --mode web --dir images
 
-# Telnet ASCII video
+# Text video over Telnet (connect with: nc localhost 2323)
 .venv/bin/python main.py --mode ascii --dir images
 
-# Browser ASCII video
+# Text video in a web browser (open http://localhost:1980/ascii)
 .venv/bin/python main.py --mode asciiweb --dir images
 ```
 
-Connect to ASCII Telnet with `nc localhost 2323` or `telnet localhost 2323`.
-In web mode, open `http://localhost:8080/`; the status monitor is on port
-`1978`. Video, Telnet, and WebSocket listeners are network-facing by default.
-Monitor endpoints are loopback-only by default; `--test` exposes them on all
-interfaces, and local mode enables that setting automatically.
-
-## Common options
+Useful options:
 
 ```text
---mode {web,ascii,asciiweb,local,scope,modem}
---dir PATH                 Image source root (overrides settings.py)
---port PORT                Port override for ASCII modes
---rotation {0,90,180,270}  Rotate local or scope output
---mirror / --no-mirror     Flip local or scope output horizontally
---help                     Show all options, including scope and modem flags
+--dir PATH                 where your pictures are
+--rotation 0|90|180|270    turn the picture
+--mirror                   flip the picture left to right
+--help                     every option
 ```
 
-`--port` changes the Telnet port in `ascii` mode. In `asciiweb` mode it sets
-the WebSocket base port, which listens on `PORT + 1`. Web, local, and scope
-ports are fixed by the mode configuration.
+For the text modes, you can change the look with `--ascii-contrast`,
+`--ascii-brightness` and `--ascii-gamma` (1.0 means no change).
 
-ASCII tone grading is available in both `ascii` and `asciiweb` modes. The
-stages apply in this order: contrast, brightness, then gamma:
+## Draw on an oscilloscope
 
-```bash
-.venv/bin/python main.py --mode ascii --dir images \
-  --ascii-contrast 1.4 --ascii-brightness 1.2 --ascii-gamma 0.9
-```
-
-Contrast `1.0` and brightness `1.0` are neutral; gamma below `1.0` lifts
-shadows. See `main.py --help` for validation ranges and the full scope/modem
-option lists.
-
-## Scope output
-
-Launch the graphical scope controller with:
+The easiest way is the scope window:
 
 ```bash
 ./vi.scope-gui
 ```
 
-The GUI selects either the regular `main.py --mode scope` image/bake pipeline
-or the live screen/video pipeline. It exposes the scope renderer and tuning
-options, output device/channel routing, and X-only mono output. Live video files
-can be browsed or dropped onto the window, paused, restarted, sought, and resumed
-from the last position. Screen capture supports MSS and FFmpeg; camera inputs
-can be supplied as an FFmpeg `FMT:SRC` string.
+Pick your pictures or a video, pick the audio output wired to the scope, and
+press Start. The left channel moves the dot sideways and the right channel
+moves it up and down.
 
-The baked scope source uses an XY bake generated from the image library;
-`--scope-source images` uses runtime thumbnails without a bake:
+From the command line:
 
 ```bash
 .venv/bin/python utilities/convert_to_xy.py -i images -o images_xy
 .venv/bin/python main.py --mode scope --dir images --xy-dir images_xy \
-  --scope-mode raster --device "Your audio output"
+  --device "Your audio output"
 ```
 
-Stereo output sends X on the left channel and Y on the right. For a
-single-input Y-T scope, connect the X output; the X trigger marker is enabled
-by default. Use `--device null` for the virtual/browser-rendered path without
-opening an audio device. See [`docs/SCOPE_UPGRADE.md`](docs/SCOPE_UPGRADE.md), the
-authoritative scope plan, operational reference, and append-only progress ledger.
+More in [`docs/SCOPE_UPGRADE.md`](docs/SCOPE_UPGRADE.md).
 
-The same GUI can run the unbaked live source directly. For example, to drive a
-single-input scope from a video file without opening the GUI:
+## Send pictures as sound (the modem)
+
+The modem turns pictures into sound on two audio channels. Play that sound
+into another computer's audio input (by cable, tape or recorder), and the
+receiver turns it back into pictures.
+
+### 1. Start the receiver
+
+On the computer that will show the pictures:
 
 ```bash
-.venv/bin/python tools/scope_screen.py --source video --file clip.mp4 \
-  --scope-x-only --device "Your audio output"
+./vi.modem-receive-gui
 ```
 
-## V7 modem output
+Choose the audio input in Setup and press Start. The receiver works out on
+its own how the sound was sent, so there is nothing else to set. It also
+lines up the left and right channels if one arrives a little late.
 
-Bake image layers once, then select the V7 modem mode. The output device must
-provide the two channels named by `--modem-channels` (a one-based pair):
+Keys in the receiver window: `P` shows only the picture, `F` goes full
+screen, `I` shows details, `Esc` goes back.
+
+Without the window:
 
 ```bash
-.venv/bin/python utilities/convert_to_modem_dct.py \
-  --input-dir images --output-dir images_modem
-
-.venv/bin/python main.py --mode modem --modem-dir images_modem \
-  --device "Your audio output" --modem-channels 1,2 --modem-pair 0,0
+./vi.modem-receive --device "Your audio input"
 ```
 
-`--modem-pair` selects fixed, zero-based face and float folder indices. Omit it
-for the live folder selector; that selector needs a rest face folder plus at
-least one other face folder. For a finite WAV export, add `--modem-wav PATH` and
-`--modem-frames N`; WAV export requires the free-running clock and does not open
-an audio device. The transport is described in
-[`docs/transport_v7_spec.md`](docs/transport_v7_spec.md). Synthetic tests do not
-establish real tape/deck or telephone-band reliability.
+### 2. Start a sender
 
-### Run the standalone V7 live sender and receiver
+There are three ways to send. With no extra options, all three send the same
+way, using the best settings found so far.
 
-For a direct camera, screen, or video-file link, use the standalone V7 tools
-instead of `main.py --mode modem` (which sends the baked image library above).
-Open two terminals from the repository root and start the receiver first:
+**The sender window**, for a camera, the screen, or a video file:
 
 ```bash
-# Terminal 1: audio input and display
-./vi.modem-receive --device "BlackHole 2ch"
-
-# Terminal 2: audio output; prompts for a capture source in an interactive shell
-./vi.modem-send --device "BlackHole 2ch"
+./vi.modem-send-gui
 ```
 
-To configure a receiver interactively before opening audio, run
-`.venv/bin/python tools/v7_live.py gui`. The first available input device is
-preselected in Setup; change it if needed, then press **Start**. **Live** is an
-image-first view with optional diagnostics. `I` opens Live and toggles the
-details panel, `P` switches to image-only (the picture alone, in the same
-window, with no controls), `Esc` or a click returns from image-only, and `F`
-toggles fullscreen, in image-only too. In fullscreen, the toolbar, status
-strip, and optional details panel are hidden on entry. Move the pointer to the
-top edge or press a key to bring them back; they hide again after two seconds
-of inactivity. The detailed panel includes decoder CPU time/load and GUI-thread
-CPU, process CPU, and resident-memory readings. The GUI also exposes an **Image
-only** button and a start-in-image-only option. The Live view's **Display
-upscaler** control offers Nearest (default), Bilinear, Sharp bilinear, Mitchell
-bicubic, Spline36, Robidoux, Robidoux Sharp, cubic B-spline, Kaiser-windowed
-sinc, Hann-windowed sinc, and EWA Jinc. These are presentation filters only;
-Nearest retains the legacy rendering path, and filter selection does not change
-decoded image data. The standalone preview accepts the same choices with
-`--display-mode`. In Live, click the displayed upscaler name to open a menu of
-all eleven choices; click a filter or use Up/Down and Enter, with Esc to close.
+Choose the audio output, the source and press Start. Drop a video file on the
+window to send it.
 
-For a lightweight sender controller, run `./vi.modem-send-gui`. Choose an
-explicit output device, source, sample rate, and wire profile, then press
-**Start**. For video, use **Browse**, type a path/URL, or drop a file onto the
-window. **Native** uses the output device's clock; Capture FPS is a separate
-advanced setting. Camera and screen/display choices are discovered when their
-pickers open. **Advanced → Pre-encode downscaler** selects the experimental
-preprocessing path; it is available for Mono video and Fold 500
-with the Box encode filter, and its strength is adjustable from 0 to 1. The
-sender runs as the existing CLI in a child process, and the GUI shows only
-occasional startup/shutdown output—there is no capture preview or per-frame logging. Press
-**Stop** to request a graceful shutdown. The receiver must use the matching
-wire profile.
-
-**Advanced → DCT downscale kernel** (Direct DCT encode) chooses how the
-picture is brought down to what the wire holds. Each kernel is one file in
-`dct_kernels/`: drop one in, or delete one, and press **R** (or restart) to
-see the change. The kernel's parameters appear under it and, like the DCT
-sharpen, clarity and chroma-gain strengths, can be changed while sending:
-Left/Right steps a value (Shift: five times) or switches kernel, and the next
-frame uses it. The sender's preview normally shows the toned source; with a
-kernel chosen, its **Encoder input** view instead shows the picture an ideal
-receiver draws from the sent coefficients, so a kernel change is visible
-there. Every tweakable row shows its default (amber when changed);
-**Delete** puts the selected row back, **D** (or the **Defaults** button)
-resets all the tweaks, and **B** (or **A/B**) flips between your settings and
-the shipped defaults while sending to judge a change by eye. Setup sections
-fold with a click. The wire is unchanged. See `dct_kernels/README.md` and
-`docs/transport_v7_spec.md` section 11.4; `tools/v7_kernel_bench.py` ranks
-kernels without any audio.
-
-For a live decoded image with no controls or diagnostics, use the regular
-receiver with `--image-only`:
+**The sender from the command line:**
 
 ```bash
-.venv/bin/python tools/v7_live.py receive \
-  --device 'BlackHole 2ch' --experimental-fold 500 --image-only
+./vi.modem-send --device "Your audio output" --source screen
+./vi.modem-send --device "Your audio output" --source video --video-source clip.mp4
+./vi.modem-send --device "Your audio output" --source camera
 ```
 
-Image-only mode fills the screen with the decoded picture; press Esc to exit.
-
-For a non-interactive send, specify the source. `screen` is a simple live
-capture; for a clip, use `--source video --video-source PATH`:
+**Your picture folder**, from the main app:
 
 ```bash
-./vi.modem-send --device "BlackHole 2ch" --source screen --encode-filter box
-# or
-./vi.modem-send --device "BlackHole 2ch" --source video \
-  --video-source clip.mp4 --encode-filter box
+.venv/bin/python main.py --mode modem --modem-source images --dir images \
+  --device "Your audio output"
 ```
 
-Camera capture is scaled directly by FFmpeg to the V7 80×96 sampling grid,
-using the selected encode filter (`box` maps to FFmpeg's area scaler). The
-sender separately puts the camera's original dimensions into the packet aspect
-code, so the nonuniform sampling-grid scale does not change the displayed
-source aspect. `--capture-filter` overrides the camera's direct-scale filter;
-perceptual-resize experiments retain their separate preprocessing path.
+Add `--modem-pair 0,0` to send one fixed face and float folder. Add
+`--modem-wav out.wav --modem-frames 100` to save the sound to a file instead
+of playing it.
 
-`--device` is required on both commands. Route the sender's output into the
-receiver's input; device names can differ on separate machines. List PortAudio
-devices with `.venv/bin/python -m sounddevice`. Press Ctrl-C in each terminal to
-stop it. `box` is the recommended encode filter. For the experimental fold,
-start both ends with the same setting:
+To list your audio devices:
 
 ```bash
-./vi.modem-receive --device "BlackHole 2ch" --experimental-fold 500
-./vi.modem-send --device "BlackHole 2ch" --source screen \
-  --encode-filter box --experimental-fold 500
+.venv/bin/python -m sounddevice
 ```
 
-See
-[`test_modem_v7/HOWTO.md`](test_modem_v7/HOWTO.md) for prototype details.
+### Ways to send
 
-## Runtime and development notes
+The default sends the picture on both channels. You can pick another way with
+`--profile` (in the sender window, it is the Wire profile setting):
 
-- The normal image clock is free-running. MTC/MIDI/LTC synchronization is not
-  active for ordinary local, web, ASCII/ASCII-WebSocket, or scope playback.
-- `scripts/run_app.sh` re-anchors to the repository root and restarts the app
-  after it exits. With no arguments it starts local mode.
-- On Linux, `setup_app.sh` creates systemd units for local, web, ASCII, and
-  ASCII-WebSocket modes. Scope and modem are launched with `main.py`.
-- Runtime logs are written under `logs/`.
-- Run the V7 synthetic/unit tests with:
+- `aspect-fold-500`: both channels, the default
+- `aspect-mono-500`: picture on one channel, sound on the other
+- `stereo-nested`, `aspect-mono-nested`: more detail, still being tested
+- `adaptive-stereo-nested`, `adaptive-mono-nested`: more detail, still being
+  tested
 
-  ```bash
-  .venv/bin/python -m unittest discover -s modem_tests -p 'test_v7_*.py' -v
-  ```
+**Pixel encode** sends hard square pixels instead of a smooth picture. It is
+good for pixel art. Turn it on in the sender window, or add `--pixel-encode`.
 
-## Repository map
+### Where the default settings live
 
-| Path | Purpose |
+The best settings found so far are kept in one file,
+`tools/v7_send_defaults.py`. The sender window, the command-line sender and
+`main.py` all start from it, so a change there changes all three.
+
+### More reading
+
+- [`docs/MODEM_MODE.md`](docs/MODEM_MODE.md): the modem in detail
+- [`docs/transport_v7_spec.md`](docs/transport_v7_spec.md): how the sound is
+  built
+- [`docs/V7_FIXES.md`](docs/V7_FIXES.md): known problems and what is being
+  worked on
+
+## Tests
+
+```bash
+.venv/bin/python -m unittest discover -s modem_tests -p 'test_v7_*.py'
+.venv/bin/python -m unittest discover -s tests
+```
+
+## What is where
+
+| Path | What it is |
 | --- | --- |
-| `main.py` | CLI configuration and mode dispatch |
-| `animation_modem/` | Standalone modem transport package |
-| `modem_v7_display.py` | Application V7 modem sender |
-| `scope_display.py`, `scope_out.py` | Scope mode and audio output |
-| `utilities/` | Bakers and setup diagnostics |
-| `modem_tests/`, `tests/` | Modem and application test suites |
-| `docs/` | Mode guides and transport specifications |
-| `scripts/` | Setup, launcher, and kiosk scripts |
+| `main.py` | Starts the app in the mode you choose |
+| `vi.*` | Short commands for the modem and scope windows |
+| `tools/` | The modem sender and receiver, and other tools |
+| `animation_modem/` | How pictures become sound and back |
+| `utilities/` | Picture converters and the setup check |
+| `docs/` | Guides and details |
+| `scripts/` | Install and start-up scripts |
+| `modem_tests/`, `tests/` | Tests |
+
+Logs go to `logs/`.
