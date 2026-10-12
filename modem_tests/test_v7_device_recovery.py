@@ -396,17 +396,12 @@ class ReceiverReconnectTests(unittest.TestCase):
 
 class AdaptiveProfileTimelineTests(unittest.TestCase):
     def _decoder(self):
-        decoder = object.__new__(v7_live._AdaptiveProfileDecoder)
-        decoder.supported_modes = frozenset((5,))
-        decoder.mono_status_modes = frozenset((5,))
-        decoder.preferred_side = 'auto'
-        decoder.input_channels = 2
+        # The real receiver's profile decoder (built by hand it went stale
+        # each time the decoder gained a setting), on mono colour Fold 500.
+        decoder = v7_live._make_auto_profile_decoder(
+            v7_live.parser().parse_args(['receive', '--device', '0']),
+            v7_live._experimental_fold(500))
         decoder.active_mode, decoder.active_side = 5, 1
-        decoder.candidate = decoder.candidate_last_seen = None
-        decoder.candidate_scale = None
-        decoder.streak = decoder.generation = 0
-        decoder.last_packet = decoder.last_decoded_packet = None
-        decoder.state = None
         return decoder
 
     @staticmethod
@@ -423,7 +418,12 @@ class AdaptiveProfileTimelineTests(unittest.TestCase):
         # reset every packet reads as already seen and nothing decodes.
         self.assertEqual(decoder.observe_packets(self._packet(5000), now=2.0), ())
         decoder.reset_capture_timeline()
-        decision, = decoder.observe_packets(self._packet(5000), now=3.0)
+        # Heard again from zero. A reopened input starts from the base
+        # profile, so the profile is confirmed again by the usual streak.
+        span = 3920
+        for packet in range(decoder.REQUIRED_STREAK):
+            decision, = decoder.observe_packets(
+                self._packet(5000+packet*span), now=3.0+packet)
         self.assertTrue(decision['confirmed'])
         self.assertTrue(decoder.claim(decision))
         self.assertEqual((decoder.active_mode, decoder.active_side), (5, 1))

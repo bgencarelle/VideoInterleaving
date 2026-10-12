@@ -949,8 +949,12 @@ class KernelSettingsPerModeTests(unittest.TestCase):
         from tools.v7_send_gui import PROFILE_CHOICES
         for _label, profile in PROFILE_CHOICES:
             name = default_kernel_for_profile(profile)
-            self.assertIsNotNone(
-                self.registry.select(name, profile=kernel_profiles(profile)))
+            selection = self.registry.select(name,
+                                             profile=kernel_profiles(profile))
+            if name == K.REFERENCE:
+                self.assertIsNone(selection)     # the reference is no kernel
+            else:
+                self.assertIsNotNone(selection, profile)
 
     def test_settings_did_not_move(self):
         from tools.v7_send_defaults import kernel_profiles

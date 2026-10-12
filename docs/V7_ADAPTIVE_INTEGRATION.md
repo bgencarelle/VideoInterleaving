@@ -1,12 +1,56 @@
-# Adaptive experimental pipeline integration
+# Adaptive nested profiles
 
-Exact implemented equations and legacy differences: [V7_SERPENTINE_MATH.md](V7_SERPENTINE_MATH.md).
+How the two adaptive profiles work today. The maths of the serpentine slot
+mapping is in [V7_SERPENTINE_MATH.md](V7_SERPENTINE_MATH.md).
 
-## Working sample feed
+## What they are
 
-The committed launcher runs the sample configuration through the real public
-sender and receiver. Start the receiver first, using your existing routed audio
-devices (substitute their names for the placeholders below):
+- `adaptive-mono-nested` (wire profile ID 2): picture on one channel, sound on
+  the other.
+- `adaptive-stereo-nested` (wire profile ID 4): picture on both channels.
+
+They send the picture on a larger grid than the other profiles: 120×100 for
+brightness and 60×50 for colour, with the coefficients placed by the table
+`test_modem_v7/experimental_tables/chroma50.npz` (SHA-256 starting `2d4d7f09`).
+Both ends must have the same table. The receiver recognises both profiles on
+its own; there is nothing to set.
+
+## How they are sent
+
+- **Fold.** They run on the stock nested fold with the serpentine slot
+  mapping. The level of each picture is chosen per picture, by trying the
+  levels and keeping the one that decodes best (the stock nested rule). An
+  older fixed-level path (host level −1, guest factors 1 to 16) is still in
+  the code behind `adaptive_guest_range`; the sender does not use it.
+- **Detail guests (stereo).** On folded slots the first channel's guest
+  carries the detail itself, and the receiver blends it with the two-channel
+  reading. `NESTED_FOLD_DETAIL_GUESTS=0` at both ends turns this off.
+- **Table shape.** The table's brightness guests fill outward from the hosts
+  by radius (`tools/v7_reshape_guests.py`), which removed the cross through a
+  Siemens star and the streaks in a flat sky. The colour guests are not
+  reshaped yet; the faint streaks left in a sky are colour.
+- **From the source picture.** With the Reference kernel (no kernel), the
+  sender averages the source's pixels straight onto the exact 120×100 and
+  60×50 grids. Any other kernel keeps its own path. Pixel encode skips this.
+- **Sound.** The picture part of each packet is shaped with a 17-tap filter
+  and set 0.8 dB under the end marker (the other profiles use 1.5 dB):
+  `BODY_FILTER_TAPS` and `BODY_LEVEL_BELOW_EOF_DB` in
+  `tools/v7_adaptive_pipeline.py`.
+
+## Settings
+
+Choosing either adaptive profile in the sender window applies one fixed
+preset, `sample_sender_settings()` in `tools/v7_adaptive_pipeline.py`:
+Reference kernel, neutral brightness and gamma, 768-pixel capture, no luma
+adjustment, no sharpening. The shared sender defaults
+(`tools/v7_send_defaults.py`) also give both profiles the Reference kernel, so
+the command line and `main.py --mode modem --modem-profile ...` match the
+window. You can still pick another kernel by hand.
+
+## Sample feed
+
+A launcher runs the preset through the real sender and receiver. Start the
+receiver first:
 
 ```bash
 .venv/bin/python tools/v7_sample_feed.py receive --device INPUT_DEVICE
@@ -14,83 +58,11 @@ devices (substitute their names for the placeholders below):
 .venv/bin/python tools/v7_sample_feed.py send --mode stereo --device OUTPUT_DEVICE --video-source picture.mkv
 ```
 
-The receiver opens the live viewer and detects both new modes automatically.
-Only run one sender at a time; Ctrl-C stops it. The launcher does not configure
-audio routing or override the OS sampling rate. Existing public CLI options
-can follow the launcher arguments, including a deliberate `--rate 96000` for
-the authorised software test route. `--print-command` prints the exact command
-without opening a stream.
+Run one sender at a time. `--print-command` shows the command without opening
+any audio. Other sender options can follow, for example `--rate 96000`.
 
-The sample uses Reference, neutral brightness/gamma, 768-pixel capture, no luma
-adjustment, and no sharpening/clarity. `sample_sender_settings()` in
-`tools/v7_adaptive_pipeline.py` is also directly consumable by the sender GUI's
-`build_command()`. It uses the existing adaptive mono/stereo modes rather than
-introducing another wire identity. Legal-range reconstruction remains the
-explicit option described below; it is not hidden inside this preset.
+## Optional: legal-range reconstruction
 
-Selecting either adaptive profile in the GUI applies that same sample preset.
-Saved adaptive preferences predating sample revision 1 migrate once to it;
-subsequent explicitly saved adjustments are retained. Reference is now the
-adaptive kernel default in both CLI and GUI. Legacy profile defaults are
-unchanged. A direct CLI invocation can still explicitly select another kernel
-or capture width; use the sample launcher for the complete matched preset.
-
-GUI-selection verification: selecting each adaptive profile through
-`SenderGui._assign` and launching its generated command produced live received
-RGB at 96 kHz on channels 24/25 (2 mono frames, 3 paired stereo frames in the
-short coloured-text run). The first sender-grid NPZ was byte-identical to the
-sample-preset run for both modes, SHA-256
-`3eafaa3735050539f6cb646dd3234fd4e1716bb5b5ccd9a4766c99d7de771085`.
-This verifies source-value/configuration parity, not bit-identical audio-route
-decodes or elimination of the remaining mono artifacts. 199 focused tests
-passed, including profile selection and one-time preference migration.
-
-The public adaptive mono (ID 2) and stereo (ID 4) paths share the table-scoped
-serpentine codec: exact inverse, host level -1, stair factor 0.25, guest range
-factors 1/2/4/8/16, and bundled chroma50 geometry. Stereo enables the additional
-chroma-detail allocation and paired reconstruction. Legacy profiles retain
-their existing codec and body filter.
-
-Direct CLI sends now install the same codec/table as GUI-wrapped sends.
-Adaptive emission uses the experimental 17-tap, 14-kHz FIR and 0.8-dB body/EOF
-target. Final transmitted peaks must be measured after resampling and mixing;
-the target is not the measured header/body separation.
-
-Reference source conversion uses compiled area integration onto the exact
-100x120 Y and 50x60 Cb/Cr grids. Enhanced kernels retain their own full source
-conversion, prefilter, coefficient gains and post-processing; area conversion
-must not overwrite them. Selecting an enhanced kernel therefore deliberately
-differs from the area/Reference experiment.
-
-Legal-range reconstruction remains available through the public experimental
-launcher with `--luma-range-passes 16 --range-host-cells`. It is not enabled by
-default: lettering improved but texture and isolated darkening had tradeoffs.
-Filter bypass, white filling, source-informed concealment and learned priors
-are not included.
-
-This is code integration, not completed fidelity acceptance. The previously
-captured portrait candidate is not a valid before/after comparison: the
-same-source pushed baseline receiver exited without a received frame. Both
-mono and stereo still require matched live RGB acceptance on the exact final
-code and settings. Unit tests do not substitute for that evidence.
-
-## Direct integration check
-
-197 focused adaptive/profile/GUI/mono-video/audio tests passed. The compiled
-17-tap filter measured 0.329 ms/packet versus 0.385 ms for the existing FIR
-implementation (200 warmed calls, 3920x2 float32, this workspace).
-
-Live checks on the temporary Pulse 96-kHz, 25-channel route (24/25) produced
-14 mono viewer_solve frames and 32 stereo Reference frames, including 31 paired
-stereo frames. A separate mono Reference run also produced received RGB.
-Visual inspection found a substantially cleaner stereo portrait but severe
-crosshatching in mono viewer_solve and residual grid artifacts in mono
-Reference. These are functional integration checks, not a matched baseline
-quality pass. Artifacts: tmp/v7-self-integration/ and tmp/v7-self-reference.log.
-
-The final sample preset (Reference, neutral tone, 768 capture) subsequently
-produced 29 live mono frames and 26 live stereo frames, all 26 stereo frames
-paired. Received RGB still shows mono grid artifacts. The sample feed works;
-the integration is not presented as a completed mono fidelity correction.
-198 focused tests pass, including public sample command parsing. Sample feed
-artifacts: tmp/v7-self-integration/integrated-sample/.
+`--luma-range-passes 16 --range-host-cells` on the experimental launcher
+(`tools/v7_nested_experiment.py`) keeps the decoded brightness inside the legal
+range. It helped lettering but darkened some texture, so it is off by default.

@@ -546,7 +546,8 @@ def run_modem(args):
         midi_input = _open_midi_input(index_calculator)
         with PacketOutput(device(args.scope_device), channels, output_latency,
                           frame=_v7.PULSE_FRAME, packet=_v7.PULSE_FRAME,
-                          speed=speed) as output:
+                          speed=speed,
+                          block=getattr(args, 'modem_block_samples', None)) as output:
             print(f'[MODEM/V7] output {output.rate:g} Hz, {output.fps:.2f} fps')
             packet_ns = round(output.emit_frame/output.rate * 1_000_000_000)
             while not args.modem_frames or sent < args.modem_frames:

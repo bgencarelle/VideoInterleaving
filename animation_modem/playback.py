@@ -34,7 +34,7 @@ class Slot:
 
 class PacketOutput:
     def __init__(self, device=None, channels=(0, 1), requested_latency='low',
-                 frame=None, packet=None, speed=1.0):
+                 frame=None, packet=None, speed=1.0, block=None):
         # V7 supplies its canonical packet geometry explicitly. Keeping it out
         # of this audio adapter prevents legacy wire layouts from returning.
         if frame is None or packet is None:
@@ -44,6 +44,12 @@ class PacketOutput:
         if not 0 < self.packet <= self.frame:
             raise ValueError('Packet must be positive and fit inside the frame')
         self.channels = channels
+        # Samples per audio callback: small for low latency, larger with the
+        # high-latency buffer so each callback has more time in hand.
+        self.block = int(block if block is not None else
+                         (256 if requested_latency == 'low' else 1024))
+        if not 16 <= self.block <= 16384:
+            raise ValueError('block must be 16 to 16384 samples')
         self.speed = float(speed)
         if not np.isfinite(self.speed) or self.speed <= 0:
             raise ValueError('speed must be finite and positive')
@@ -73,7 +79,7 @@ class PacketOutput:
         # our back -- a conversion nobody asked for and nobody could see.
         self.stream = self.sd.OutputStream(
             channels=max(channels)+1, dtype='float32',
-            device=device, blocksize=256, latency=requested_latency,
+            device=device, blocksize=self.block, latency=requested_latency,
             callback=self._callback, finished_callback=self._on_finished)
         # Whatever the device reported once it was open. Everything below that
         # converts samples to seconds uses this, never a constant.
@@ -97,7 +103,7 @@ class PacketOutput:
                           'device_rate_hz': self.rate,
                           'frame_rate_fps': round(self.fps, 3),
                           'emit_frame_samples': self.emit_frame,
-                          'pending_frames': 1, 'block_samples': 256}), file=sys.stderr)
+                          'pending_frames': 1, 'block_samples': self.block}), file=sys.stderr)
         self.started = False
         return self
 
@@ -143,7 +149,7 @@ class PacketOutput:
             # Some audio servers deliver a few callbacks while their stream
             # clock is still settling. Wait for it to advance by two blocks so
             # the first DAC reservation uses the running device clock.
-            clock_ready = initial_clock + 2*256/self.rate
+            clock_ready = initial_clock + 2*self.block/self.rate
             deadline = time.monotonic() + 5.0
             while self.stream.time < clock_ready:
                 remaining = deadline-time.monotonic()
@@ -156,7 +162,7 @@ class PacketOutput:
         now = self.stream.time
         after = time.time_ns()
         wall_ns = (before + after)//2
-        earliest = now + self.stream.latency + 256/self.rate + prepare_ms/1000
+        earliest = now + self.stream.latency + self.block/self.rate + prepare_ms/1000
         with self.lock:
             start = max(self.next_start or earliest, earliest)
         target = wall_ns + round((start-now + self.emit_packet/self.rate + receive_margin_ms/1000)*1e9)

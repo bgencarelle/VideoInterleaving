@@ -835,10 +835,9 @@ class SenderTests(unittest.TestCase):
             self.assertIn('Adaptive nested', names[profile])
             self.assertIn(profile, gui.FOLDED_PROFILES)
             self.assertIn(profile, gui.ASPECT_PROFILES)
-            # Each fold's default downscale kernel is the benchmark winner
-            # through its own chain; the sender CLI agrees with the GUI.
-            expected = {'adaptive-mono-nested': 'viewer_solve',
-                        'adaptive-stereo-nested': 'upscale_precomp'}[profile]
+            # The adaptive profiles default to the reference (no kernel),
+            # matching their sample-feed preset; the sender CLI agrees.
+            expected = 'reference'
             self.assertEqual(gui.default_kernel_for_profile(profile), expected)
             self.assertEqual(v7_live._default_kernel_for_profile(profile), expected)
             # Kernel values shown, saved and sent are the base wire's.

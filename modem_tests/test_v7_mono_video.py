@@ -635,14 +635,13 @@ class MonoVideoWireTests(unittest.TestCase):
                             self.assertEqual(result.diag['wire_profile'],
                                              'adaptive-stereo-nested')
                         values = profile.values(self.model, result)
+                        self.assertEqual(values.shape,
+                                         (self.model.coder.source_count,))
                         if mode == ADAPTIVE_STEREO:
-                            # An unrecognized adaptive signature holds the
-                            # prior picture; it is never replaced with black.
-                            self.assertIsNone(values)
-                        else:
-                            self.assertEqual(
-                                values.shape,
-                                (self.model.coder.source_count,))
+                            # One channel of adaptive stereo is read as well
+                            # as both (about 0.07 off the source either way).
+                            self.assertLess(np.sqrt(np.mean(
+                                (values-self.values)**2)), .15)
         finally:
             profile.uninstall()
 

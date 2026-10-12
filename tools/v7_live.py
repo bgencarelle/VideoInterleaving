@@ -2982,6 +2982,8 @@ class _AdaptiveProfileDecoder:
             self.reset_candidate()
         else:
             key = (mode, side if mode in self.mono_status_modes else None)
+            # The saved profile only speaks for the first packet heard.
+            hint, self.startup_hint = getattr(self, 'startup_hint', None), None
             if mode == self.active_mode:
                 self.reset_candidate()
                 if mode in self.mono_status_modes and side is not None:
@@ -2993,6 +2995,11 @@ class _AdaptiveProfileDecoder:
                 else:
                     self.candidate = key
                     self.streak = 1
+                if hint is not None and (
+                        key == hint or (key[0] == hint[0] and key[1] is None)):
+                    # The profile confirmed last run (fixes list item 33),
+                    # named by this packet's own status: no streak needed.
+                    self.streak = self.REQUIRED_STREAK
                 self.candidate_last_seen = now
                 self.candidate_scale = scale
                 if self.streak >= self.REQUIRED_STREAK:

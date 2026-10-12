@@ -161,26 +161,28 @@ class KernelGuiTests(unittest.TestCase):
         self.assertIn('antiring', names)
 
     def test_profile_switch_retains_unsupported_kernel_with_notice(self):
+        # (Not the adaptive profiles: they load a fixed sample preset,
+        # kernel included.)
         gui = SenderGui(self.devices)
-        gui.settings.update(profile='adaptive-mono-nested',
+        gui.settings.update(profile='aspect-mono-nested',
                             dct_kernel='antiring')
-        gui._assign('profile', 'adaptive-stereo-nested')
+        gui._assign('profile', 'stereo-nested')
         self.assertEqual(gui.settings['dct_kernel'], 'antiring')
         self.assertIn('antiring', gui.notice)
         self.assertIn('no settings', gui.notice)
         self.assertIn('retained', gui.notice)
         choices = [name for _label, name in gui._choices('dct_kernel')]
         self.assertNotIn('antiring', choices)
-        gui._assign('profile', 'adaptive-mono-nested')
+        gui._assign('profile', 'aspect-mono-nested')
         self.assertEqual(gui.settings['dct_kernel'], 'antiring')
 
     def test_retained_but_unsupported_kernel_fails_closed_at_start(self):
         gui = _gui(self.devices)
-        gui.settings.update(profile='adaptive-mono-nested',
+        gui.settings.update(profile='aspect-mono-nested',
                             dct_kernel='antiring')
-        gui._assign('profile', 'adaptive-stereo-nested')
+        gui._assign('profile', 'stereo-nested')
         with self.assertRaisesRegex(ValueError,
-                                    'antiring has no settings for adaptive-stereo-nested'):
+                                    'antiring has no settings for stereo-nested'):
             validate_settings(gui.settings, self.devices, self.sd)
 
     def test_a_chosen_kernel_shows_its_parameters_and_reaches_the_command(self):

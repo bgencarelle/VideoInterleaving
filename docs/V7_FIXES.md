@@ -416,6 +416,11 @@ Copy this and fill it in. Leave out what is not known; do not guess lines.
   second run 70 of 70 from the first packet; switching the sender to mono,
   the next run confirmed mono after three packets as before and saved it;
   the run after that showed every packet from the first.
+- Second report: a later upstream change (`d676d3f`) turned the saved
+  profile into a hint that nothing read, so every run waited for three
+  packets again. Now the first packet heard is confirmed at once when its own
+  status names the saved profile (the status still decides); any other
+  profile needs three agreeing packets as before.
 
 ### 35. The body peaks about 2 dB under the header and EOF, not 1 to 1.5
 - Status: open
