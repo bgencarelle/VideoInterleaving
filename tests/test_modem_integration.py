@@ -31,6 +31,20 @@ def source_tree(root, count=3):
             Image.new('RGBA', (80, 45), color).save(folder / f'frame_{i}.png')
 
 
+def _default_wire_status_mode():
+    """The coded status of the V7 sender's default wire, which main.py
+    sends (tools/v7_send_defaults.py; the sender GUI's default too)."""
+    import argparse
+    import modem_v7_display
+    from tools.v7_send_defaults import DEFAULT_PROFILE
+    assert modem_v7_display.send_args(argparse.Namespace()).profile is None
+    assert DEFAULT_PROFILE == 'aspect-fold-500'
+    if str(REPO / 'test_modem_v7') not in sys.path:
+        sys.path.insert(0, str(REPO / 'test_modem_v7'))
+    from aspect_fold import AspectFoldWire
+    return AspectFoldWire('auto').status_mode
+
+
 class ModemV7IntegrationTests(unittest.TestCase):
     def test_generated_bake_matches_v7_geometry(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -118,8 +132,8 @@ runpy.run_path(target, run_name='__main__')
                 item.diag['pilot_timing']['mode_applied'] == 'tone-seeded'
                 for item in decoded))
             self.assertTrue(all(
-                item.diag['pilot_timing']['coded_status_mode'] == 1
-                for item in decoded))
+                item.diag['pilot_timing']['coded_status_mode'] ==
+                _default_wire_status_mode() for item in decoded))
             self.assertTrue(all(
                 profile.values(model, item).shape ==
                 (sum(rows*cols for rows, cols in v7.V7_GRIDS),)
@@ -172,8 +186,8 @@ runpy.run_path(target, run_name='__main__')
             self.assertEqual(len(decoded), 5, info)
             self.assertEqual(info['eof_markers_validated'], 5)
             self.assertTrue(all(
-                item.diag['pilot_timing']['coded_status_mode'] == 1
-                for item in decoded))
+                item.diag['pilot_timing']['coded_status_mode'] ==
+                _default_wire_status_mode() for item in decoded))
             self.assertEqual(
                 [item.diag['source_index'] for item in decoded[:4]],
                 [0, 2, 1, 1])

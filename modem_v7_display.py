@@ -18,7 +18,6 @@ from animation_modem.playback import PacketOutput, latency
 from modem_bake import ModemLibrary
 from animation_modem import v7 as _v7
 from animation_modem.v7_coded_pilot import add_fold500_coded_pilot
-from animation_modem.v7_fold import Fold500
 
 
 TARGET_RMS = .1521
@@ -185,6 +184,65 @@ def packet(library, model, absolute, source_index, selection, *,
     }
 
 
+def send_args(args):
+    """The V7 sender's arguments for ``main.py --mode modem``.
+
+    Nothing but what the application was asked for: every other choice is
+    the sender's shipped default (tools/v7_send_defaults.py), the same one an
+    untouched sender GUI starts with, so a new best default reaches both.
+    """
+    from tools import v7_live
+    # The encode opens no device; the name only satisfies the parser.
+    argv = ['send', '--device', 'main.py']
+    if getattr(args, 'modem_profile', None):
+        argv += ['--profile', args.modem_profile]
+    if getattr(args, 'modem_pixel_encode', False):
+        argv.append('--pixel-encode')
+    argv += list(getattr(args, 'modem_send_arg', None) or ())
+    return v7_live.parser().parse_args(argv)
+
+
+def build_encoder(args):
+    """The V7 sender's picture encode and wire (v7_live.build_send_encoder)."""
+    from tools import v7_live
+    return v7_live.build_send_encoder(send_args(args))
+
+
+def encoder_packet(encoder, library, absolute, source_index, selection, *,
+                   background=(4, 4, 4), rotation=0, mirror=False,
+                   loop=None, direction=1):
+    """One 48 kHz packet of the composited picture, encoded exactly as the
+    V7 sender encodes a frame, carrying ``source_index`` and the loop."""
+    index, main_folder, float_folder = selection
+    from tools.v7_capture import CapturedFrame
+    image = library.composite(index, main_folder, float_folder,
+                              background, rotation, mirror)
+    # A bake can be smaller than its source: the aspect code is named from
+    # the source picture's size, as the sender names it from a capture's.
+    frame = CapturedFrame(
+        np.asarray(image.convert('RGB')),
+        tuple(image.info.get('source_dimensions', image.size)))
+    value, aspect_code = encoder.frame_values(frame)
+    stamps = {} if loop is None else {int(source_index): (loop, direction)}
+    with _v7.send_stamps(stamps):
+        audio = encoder.wire_audio([value], [aspect_code], absolute,
+                                   [int(source_index)])
+    wire = (encoder.aspect_wire or encoder.mono_wire or encoder.slice_wire)
+    return audio, {
+        'frame': absolute,
+        'source_index': source_index,
+        'face_folder': main_folder,
+        'float_folder': float_folder,
+        'aspect_code': aspect_code,
+        'packet_samples': len(audio),
+        'peak': float(np.max(np.abs(audio))) if audio.size else 0.0,
+        'pcm_clip_samples': int(np.count_nonzero(np.abs(audio) >= 1.0)),
+        'limiter_active': False,
+        'fold_slots': int(getattr(wire, 'fold_slots', 0) or
+                          getattr(encoder.fold, 'slots', 0) or 0),
+    }
+
+
 def _folders(args, library, index, selected, previous):
     if selected is not None:
         return selected, index
@@ -245,24 +303,13 @@ def run_modem(args):
     rotation = rotation if rotation is not None else getattr(settings, 'INITIAL_ROTATION', 0)
     mirror = getattr(args, 'mirror', None)
     mirror = mirror if mirror is not None else bool(getattr(settings, 'INITIAL_MIRROR', 0))
-    encode_filter = getattr(args, 'modem_encode_filter', None)
-    if encode_filter is None:
-        encode_filter = 'box'
-    if encode_filter != 'box':
-        raise ValueError('stereo Fold 500 requires --modem-encode-filter box')
-    pilot_tones = bool(getattr(args, 'modem_pilot_tones', True))
-    if not pilot_tones:
-        raise ValueError('stereo Fold 500 requires coded pilot tones')
-
-    # The V7 statistics are a wire profile, not a property of whichever frame
-    # happens to be sent first.  The canonical profile ships as frozen,
-    # hash-checked tables (animation_modem/v7_model_tables.npz), so the
-    # application sender and the standalone receiver build identical models
-    # without the reference image or any runtime derivation.
-    model = _v7.load_model(
-        TARGET_RMS / math.sqrt(1 + 10**(_v7.CLOCK_REL_DB/10)),
-        encode_filter=encode_filter)
-    fold = Fold500(model)
+    # The picture encode and wire are the V7 sender's, with its shipped
+    # defaults: what an untouched sender GUI sends (tools/v7_send_defaults.py).
+    from tools import v7_live
+    sender = send_args(args)
+    encoder = v7_live.build_send_encoder(sender)
+    encoder.warmup()
+    profile_name = sender.profile
 
     channels = pair(args.modem_channels)
     output_latency = latency(args.modem_latency)
@@ -298,7 +345,10 @@ def run_modem(args):
           f'source {settings.IPS:g} IPS, '
           f'loop N={loop.frames} p='
           f'{"none (MIDI clock)" if not loop.clocked else loop.phase} in CRC metadata; '
-          f'profile=stereo Fold 500; '
+          f'profile={profile_name}; '
+          f'encode={"pixel" if sender.pixel_encode else "direct DCT" if sender.dct_encode else "resize"}'
+          f'{" linear-light" if sender.dct_encode and not sender.pixel_encode and sender.linear_preshrink else ""}; '
+          f'kernel={encoder.kernel_controls.listing()["selected"]}; '
           f'pilot tones=coded')
 
     def make_packet(absolute, index, folders, at_time_ns=None):
@@ -308,11 +358,10 @@ def run_modem(args):
         # its own clock.
         direction = (_v7.loop_direction(_v7.loop_ticks(at_time_ns), loop)
                      if loop.clocked and at_time_ns is not None else 1)
-        audio, report = packet(
-            library, model, absolute, index, (index, *folders),
+        audio, report = encoder_packet(
+            encoder, library, absolute, index, (index, *folders),
             background=background, rotation=rotation, mirror=mirror,
-            encode_filter=encode_filter, loop=loop, direction=direction,
-            pilot_tones=pilot_tones, fold=fold)
+            loop=loop, direction=direction)
         report['direction'] = direction
         report['encode_ms'] = (time.perf_counter() - started) * 1000
         if runtime_library is not None:

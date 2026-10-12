@@ -410,14 +410,17 @@ def configure_runtime():
                         type=float, default=1.0,
                         help="V7 playback speed 0.25..4x (default 1; 1x is tape-safe). "
                              "Above the output Nyquist limit, high-frequency detail is lost")
-    parser.add_argument("--modem-pilot-tones",
-                        action=argparse.BooleanOptionalAction, default=True,
-                        help="V7 bin-1/bin-3 timing references (required for Fold 500)")
-    parser.add_argument("--modem-encode-filter",
-                        choices=("nearest", "box"),
-                        default=None,
-                        help="V7 source resize filter (default: box; stereo Fold 500 "
-                             "requires box)")
+    # The picture encode is the V7 sender's own, with its shipped defaults
+    # (tools/v7_send_defaults.py): what the sender GUI starts with.
+    parser.add_argument("--modem-profile", default=None,
+                        help="V7 wire profile (default: the sender's, "
+                             "tools/v7_send_defaults.py)")
+    parser.add_argument("--modem-pixel-encode", action="store_true",
+                        help="V7 Pixel encode instead of Direct DCT")
+    parser.add_argument("--modem-send-arg", action="append", default=[],
+                        metavar="ARG",
+                        help="Pass one more option to the V7 sender's encode, "
+                             "e.g. --modem-send-arg=--no-linear-preshrink")
     modem_length = parser.add_mutually_exclusive_group()
     modem_length.add_argument(
         "--modem-frames", type=int, default=0,
@@ -453,12 +456,6 @@ def configure_runtime():
     _set_process_title(args.mode)
 
     if args.mode == "modem":
-        if args.modem_encode_filter is None:
-            args.modem_encode_filter = "box"
-        if args.modem_encode_filter != "box":
-            parser.error("stereo Fold 500 requires --modem-encode-filter box")
-        if not args.modem_pilot_tones:
-            parser.error("stereo Fold 500 requires coded pilot tones")
         if args.modem_frames < 0:
             parser.error("Modem frame count must be nonnegative")
         if args.modem_cycles is not None and args.modem_cycles <= 0:

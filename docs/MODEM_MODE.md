@@ -433,13 +433,21 @@ section 14.8; its known limits are in section 15 there.
 The remaining instructions here are for the application path through
 `main.py --mode modem`, not the standalone `vi.modem-*` V7 capture tools above.
 
-This path sends the **stereo Fold 500** V7 profile by default, using the pinned
-Box model, coded pilot status, and the EOF marker. Fold 500 requires the Box
-model, coded pilot tones, and the EOF marker, so `--modem-encode-filter nearest`,
-`--no-modem-pilot-tones` and `--no-modem-eof-marker` are rejected. The earlier
-`--modem-baseline` fold-off option was removed. The
-standalone tools and application sender now use the same stereo Fold 500
-profile.
+This path encodes exactly as the standalone V7 sender does with no switches,
+which is what an untouched sender GUI sends: profile, Direct DCT, luma
+adjustment, kernel and the linear-light pre-shrink all come from
+`tools/v7_send_defaults.py` (both build their encode with
+`tools/v7_live.build_send_encoder`). A new best default set there reaches the
+GUI, the sender and `main.py` together. `--modem-profile NAME` and
+`--modem-pixel-encode` pick another profile or Pixel encode;
+`--modem-send-arg=OPTION` (repeatable) passes any other sender encode option,
+e.g. `--modem-send-arg=--no-linear-preshrink`. The startup line names the
+profile, encode and kernel in use.
+
+`--modem-source images` encodes each composited picture at its full size, as
+the sender encodes a capture. A bake (`--modem-source bake`, from
+`utilities/convert_to_modem_dct.py`) stores pictures already reduced to 80×96,
+so its pictures cannot be sharper than the bake.
 
 List PortAudio devices with:
 

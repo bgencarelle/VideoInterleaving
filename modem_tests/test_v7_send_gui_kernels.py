@@ -152,7 +152,9 @@ class KernelGuiTests(unittest.TestCase):
                                       gui._choices('dct_kernel')])
         gui.settings['profile'] = 'adaptive-stereo-nested'
         names = [name for _label, name in gui._choices('dct_kernel')]
-        self.assertEqual(names, ['reference', 'upscale_precomp'])
+        # native_source has nothing to tune and runs on every folded profile.
+        self.assertEqual(names, ['reference', 'native_source',
+                                 'upscale_precomp'])
 
         gui.settings['profile'] = 'adaptive-mono-nested'
         names = [name for _label, name in gui._choices('dct_kernel')]
@@ -230,10 +232,10 @@ class KernelGuiTests(unittest.TestCase):
     def test_pixel_encode_and_direct_dct_off_hide_and_drop_the_kernel(self):
         gui = _gui(self.devices)
         gui._assign('dct_kernel', 'lanczos')
-        gui.settings['pixel_encode'] = True
+        gui._assign('pixel_encode', True)        # turns Direct DCT off
         self.assertNotIn('dct_kernel', gui._visible_fields())
         self.assertNotIn('--dct-kernel', self.command(gui))
-        gui.settings['pixel_encode'] = False
+        gui._assign('pixel_encode', False)       # back to Direct DCT
         gui.settings['dct_encode'] = False
         self.assertNotIn('dct_kernel', gui._visible_fields())
         self.assertNotIn('--dct-kernel', self.command(gui))

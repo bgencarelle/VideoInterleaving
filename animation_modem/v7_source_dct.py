@@ -859,9 +859,10 @@ def _tone_lut_fixed(brightness, gamma):
 # fine bright-on-dark pattern keeps its brightness instead of sinking toward
 # the code mean (half-on 1-pixel lines: code 188, not 127), and a Siemens
 # star's centre goes an even grey instead of a dark blot. About 0.4 ms more
-# per 1080p frame. V7_LINEAR_PRESHRINK=0 at the sender averages codes again.
+# per 1080p frame. The sender's choice is ``linear_preshrink`` (its default
+# lives in tools/v7_send_defaults.py); this is the value when none is given.
 # (With it, luma adjustment's target is the linear light either way.)
-LINEAR_PRESHRINK = os.environ.get('V7_LINEAR_PRESHRINK', '1') != '0'
+LINEAR_PRESHRINK = True
 
 
 @lru_cache(maxsize=16)
@@ -1180,7 +1181,7 @@ PRESHRINK_FACTOR = 4
 
 def _direct_planes(rgb, grids, shapes, brightness, gamma, sharpen,
                    sharpen_strength, clarity, chroma_gain, luminance=False,
-                   preshrink=None):
+                   preshrink=None, linear_preshrink=None):
     """Validated, pre-shrunk and pixel-enhanced Y[/Cb/Cr] planes in [0, 1].
 
     With ``luminance`` the result also carries the source's linear luminance
@@ -1235,7 +1236,8 @@ def _direct_planes(rgb, grids, shapes, brightness, gamma, sharpen,
     decimate_y = height % (2*block_y) == 0 and rows//2 >= 1.75*luma_rows
     decimate_x = width % (2*block_x) == 0 and cols//2 >= 1.75*luma_cols
 
-    linear_shrink = LINEAR_PRESHRINK and data.dtype == np.uint8
+    linear_shrink = (LINEAR_PRESHRINK if linear_preshrink is None
+                     else bool(linear_preshrink)) and data.dtype == np.uint8
     if linear_shrink:
         # Average the light, not the gamma-coded values: tone, decode to
         # linear, block-average and decimate, then code back (below).
@@ -1622,6 +1624,8 @@ def warmup_direct_dct(grids, shapes):
         direct_dct_values(data, grids, shapes, luminance_out=[],
                           linear_light=True)
         direct_dct_values(data, grids, shapes, brightness=1.05)
+        direct_dct_values(data, grids, shapes, linear_preshrink=False)
+        direct_dct_values(data, grids, shapes, linear_preshrink=True)
 
 
 @lru_cache(maxsize=8)
@@ -1899,7 +1903,7 @@ def direct_dct_values(rgb, grids, shapes, *, brightness=1.0, gamma=1.0,
                       chroma_gain=1.0, luminance_out=None,
                       linear_light=False, kernel=None, kernel_masks=None,
                       kernel_frame_out=None, preshrink=None,
-                      defer_kernel_gain=False):
+                      defer_kernel_gain=False, linear_preshrink=None):
     """Direct DCT encode: native RGB frame to the sender's coder-grid values.
 
     Stages (see the direct-encode spec): tone per pixel at full resolution,
@@ -1950,7 +1954,7 @@ def direct_dct_values(rgb, grids, shapes, *, brightness=1.0, gamma=1.0,
         clarity, chroma_gain,
         luminance=(luminance_out is not None and
                    ('linear' if linear_light else True)),
-        preshrink=preshrink)
+        preshrink=preshrink, linear_preshrink=linear_preshrink)
     frame = None
     defer_kernel_gain = bool(
         defer_kernel_gain and kernel is not None and

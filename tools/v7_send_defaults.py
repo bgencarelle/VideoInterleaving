@@ -20,6 +20,8 @@ SENDER_DEFAULTS = {
     'profile': DEFAULT_PROFILE,
     'dct_encode': True,
     'luma_adjust': True,
+    # Direct DCT's pre-shrink averages light, not gamma-coded values.
+    'linear_preshrink': True,
 }
 
 REFERENCE_KERNEL = 'reference'

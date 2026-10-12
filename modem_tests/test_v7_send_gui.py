@@ -462,7 +462,7 @@ class SenderGuiTests(unittest.TestCase):
         visible = gui._visible_fields()
         self.assertIn('pixel_encode', visible)
         self.assertIn('pixel_detail', visible)
-        for dest in ('luma_adjust', 'luma_adjust_linear', 'dct_sharpen',
+        for dest in ('luma_adjust', 'linear_preshrink', 'dct_sharpen',
                      'dct_clarity', 'dct_chroma_gain', 'dct_kernel',
                      'capture_filter', 'capture_width'):
             self.assertNotIn(dest, visible)
@@ -555,8 +555,9 @@ class SenderGuiTests(unittest.TestCase):
             'sharpen': 'taper', 'sharpen_strength': .5, 'clarity': .15,
             'chroma_gain': 1.1, 'preshrink': 4.0, 'aggregation': 'off', 'band_profile': 'off',
             'linear_light': False, 'pixel': False,
-            'pixel_detail': 'average'})
-        self.assertNotIn('--luma-adjust-linear', command)
+            'pixel_detail': 'average', 'linear_preshrink': True})
+        self.assertNotIn('--linear-preshrink', command)     # the default
+        self.assertNotIn('--no-linear-preshrink', command)
         self.assertNotIn('--pixel-encode', command)
         self.settings.update(pixel_encode=True, dct_encode=False)
         command = build_command(self.settings, self.devices, self.sd)
@@ -588,10 +589,12 @@ class SenderGuiTests(unittest.TestCase):
             '--pixel-grid', build_command(self.settings, self.devices, self.sd))
         self.settings.update(profile=profile, pixel_grid='robust')
         self.settings.update(pixel_encode=False, dct_encode=True)
-        self.settings.update(luma_adjust=True, luma_adjust_linear=True)
+        self.settings.update(luma_adjust=True, linear_preshrink=False)
         command = build_command(self.settings, self.devices, self.sd)
+        self.assertIn('--no-linear-preshrink', command)
         args = v7_live.parser().parse_args(command[2:])
-        self.assertTrue(v7_live._dct_encode_options(args)['linear_light'])
+        self.assertFalse(v7_live._dct_encode_options(args)['linear_preshrink'])
+        self.settings.update(linear_preshrink=True)
         v7_live._send_profile(args, 500)
 
     def test_direct_dct_is_the_default_and_only_turning_it_off_is_said(self):
@@ -735,15 +738,32 @@ class SenderGuiTests(unittest.TestCase):
             kernel = args.dct_kernel or v7_live._default_kernel_for_profile(
                 args.profile)
             return (args.profile, args.dct_encode, args.luma_adjust, kernel,
-                    bool(args.pixel_encode), bool(args.clip_aware_encode))
+                    bool(args.pixel_encode), bool(args.clip_aware_encode),
+                    args.linear_preshrink,
+                    tuple(sorted(v7_live._dct_encode_options(args).items())))
 
         gui = SenderGui(self.devices)
         gui.settings.update(device=3, source='video', video_source='clip.mp4')
         command = build_command(gui.settings, self.devices, self.sd)
         bare = ['send', '--device', '3', '--source', 'video']
         self.assertEqual(resolved(command[2:]), resolved(bare))
-        self.assertEqual(resolved(bare), (
-            'aspect-fold-500', True, True, 'viewer_solve', False, False))
+        self.assertEqual(resolved(bare)[:7], (
+            'aspect-fold-500', True, True, 'viewer_solve', False, False, True))
+        # main.py --mode modem sends with the same encode: its sender
+        # arguments are only what the application was asked for.
+        import argparse
+        import modem_v7_display
+        main = modem_v7_display.send_args(argparse.Namespace())
+        v7_live._apply_profile_option(main)
+        v7_live._apply_encode_defaults(main, 500)
+        main_kernel = main.dct_kernel or v7_live._default_kernel_for_profile(
+            main.profile)
+        self.assertEqual(
+            (main.profile, main.dct_encode, main.luma_adjust, main_kernel,
+             bool(main.pixel_encode), bool(main.clip_aware_encode),
+             main.linear_preshrink,
+             tuple(sorted(v7_live._dct_encode_options(main).items()))),
+            resolved(bare))
         for name in ('aspect-mono-500',):
             gui.settings.update(profile=name)
             gui.settings['dct_kernel'] = v7_live._default_kernel_for_profile(name)
@@ -1865,7 +1885,7 @@ class SenderGuiButtonLayoutTests(unittest.TestCase):
             'aspect_layout', 'mono_video_side', 'brightness', 'gamma',
             'speed', 'perceptual_resize', 'perceptual_detail_strength',
             'dct_encode', 'pixel_encode', 'pixel_detail',
-            'pixel_grid', 'luma_adjust', 'luma_adjust_linear', 'dct_sharpen',
+            'pixel_grid', 'luma_adjust', 'linear_preshrink', 'dct_sharpen',
             'dct_sharpen_strength', 'dct_clarity', 'dct_chroma_gain',
             'dct_kernel', 'dct_preshrink', 'clip_aware', 'screen_backend', 'region', 'ffmpeg_input',
             'capture_width', 'capture_filter')
@@ -2028,7 +2048,7 @@ class SenderGuiButtonLayoutTests(unittest.TestCase):
             'region': '', 'capture_width': '160', 'capture_filter': 'auto',
             'perceptual_resize': 'off', 'perceptual_detail_strength': '0.25',
             'dct_encode': True, 'clip_aware': True, 'luma_adjust': True,
-            'luma_adjust_linear': True, 'pixel_encode': False,
+            'linear_preshrink': False, 'pixel_encode': False,
             'pixel_detail': 'average', 'pixel_grid': 'robust',
             'dct_sharpen': 'taper', 'dct_sharpen_strength': '0.5',
             'dct_clarity': '0.15', 'dct_chroma_gain': '1',
@@ -2047,7 +2067,7 @@ class SenderGuiButtonLayoutTests(unittest.TestCase):
             '0.9', '--dct-sharpen', 'taper',
             '--dct-sharpen-strength', '0.5', '--dct-clarity', '0.15',
             '--dct-kernel', 'viewer_solve',
-            '--luma-adjust-linear', '--clip-aware-encode',
+            '--no-linear-preshrink', '--clip-aware-encode',
             '--capture-fps', '30.0', '--screen-backend', 'mss',
             '--region=0,0,1920,1080', '--capture-width', '160',
             '--gui-control', '--image-preview-port', '5005',

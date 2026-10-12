@@ -125,7 +125,7 @@ DCT_SHARPEN_CHOICES = (
 # Direct DCT encode runs the 500-slot folded profiles with the Box filter.
 DCT_PROFILES = FOLDED_PROFILES
 BOOL_FIELDS = ('video_live', 'dct_encode',
-               'luma_adjust', 'luma_adjust_linear', 'pixel_encode',
+               'luma_adjust', 'linear_preshrink', 'pixel_encode',
                'clip_aware')
 # Settings that take effect while the sender runs (the sender reads them
 # from its control pipe); everything else needs a stop and a new Start.
@@ -215,11 +215,11 @@ FIELD_HELP = {
                      'block art. Soft / Cut / Crisp downscale inside the '
                      'transform: more detail per pixel, with a faint mesh '
                      'next to hard edges that grows from Soft to Crisp.'),
-    'luma_adjust_linear': ('Luma adjustment aims at the light of every source '
-                           'pixel instead of the light of the averaged '
-                           'picture. Fine patterns keep their true brightness; '
-                           'thin dark outlines get lighter. About 2 ms more '
-                           'per 1080p frame. Off by default.'),
+    'linear_preshrink': ('Direct DCT averages the light of the source '
+                         'pixels, not their coded values, before the '
+                         'transform: fine bright detail and thin lines keep '
+                         'their brightness. About 0.4 ms more per 1080p '
+                         'frame. Recommended (default).'),
     'clip_aware': ('Re-fit the sent brightness detail so edge ringing falls '
                    'into the receiver\'s black/white clip. Sender only; '
                    'about 2 ms per frame.'),
@@ -267,7 +267,7 @@ FIELD_LABELS = {
     'perceptual_detail_strength': 'Downscale amount',
     'dct_encode': 'Direct DCT encode',
     'luma_adjust': 'Luma adjustment',
-    'luma_adjust_linear': 'Luma · linear light',
+    'linear_preshrink': 'Pre-shrink · linear light',
     'pixel_encode': 'Pixel encode',
     'pixel_detail': 'Pixel downscale',
     'pixel_grid': 'Pixel grid',
@@ -552,7 +552,7 @@ SAVED_SETTING_FIELDS = (
     'perceptual_detail_strength', 'dct_encode', 'dct_sharpen',
     'dct_sharpen_strength', 'dct_clarity', 'dct_chroma_gain', 'dct_preshrink',
     'aspect_layout', 'clip_aware', 'luma_adjust',
-    'luma_adjust_linear', 'pixel_encode', 'pixel_detail', 'pixel_grid',
+    'linear_preshrink', 'pixel_encode', 'pixel_detail', 'pixel_grid',
     'dct_kernel', 'dct_kernel_params', 'collapsed_sections',
     'matched_nested_test', 'nested_test_tables', 'adaptive_sample_revision',
 )
@@ -1439,7 +1439,8 @@ def validate_settings(settings, devices, sd_module=None, audio_devices=()):
         'luma_adjust': (bool(settings.get('luma_adjust', True)) and
                         dct_encode and profile not in ('adaptive-mono-nested',
                                         'adaptive-stereo-nested')),
-        'luma_adjust_linear': bool(settings.get('luma_adjust_linear', False)),
+        'linear_preshrink': bool(settings.get(
+            'linear_preshrink', SENDER_DEFAULTS['linear_preshrink'])),
         'pixel_encode': pixel_encode,
         'pixel_detail': pixel_detail,
         'pixel_grid': pixel_grid,
@@ -1552,9 +1553,9 @@ def build_command(settings, devices, sd_module=None, python=None,
             command.extend(('--dct-kernel-dir', str(folder)))
         if not checked['luma_adjust']:
             command.append('--no-luma-adjust')
-        else:
-            if checked['luma_adjust_linear']:
-                command.append('--luma-adjust-linear')
+        if checked['linear_preshrink'] != SENDER_DEFAULTS['linear_preshrink']:
+            command.append('--linear-preshrink' if checked['linear_preshrink']
+                           else '--no-linear-preshrink')
     if checked['clip_aware']:
         command.append('--clip-aware-encode')
     if checked['capture_fps'] is not None:
@@ -1736,7 +1737,7 @@ class SenderGui:
                           'source_audio_delay_ms')),
         ('Picture encode', ('dct_encode', 'pixel_encode', 'pixel_detail',
                             'pixel_grid', 'luma_adjust',
-                            'luma_adjust_linear', 'clip_aware',
+                            'linear_preshrink', 'clip_aware',
                             'perceptual_resize',
                             'perceptual_detail_strength')),
         ('Downscale and sharpness', (
@@ -1826,7 +1827,7 @@ class SenderGui:
             'dct_encode': SENDER_DEFAULTS['dct_encode'],
             'clip_aware': False,
             'luma_adjust': SENDER_DEFAULTS['luma_adjust'],
-            'luma_adjust_linear': False,
+            'linear_preshrink': SENDER_DEFAULTS['linear_preshrink'],
             'pixel_encode': False,
             'pixel_detail': 'average',
             'pixel_grid': 'robust',
@@ -2478,7 +2479,7 @@ class SenderGui:
             dest in ('dct_sharpen', 'dct_sharpen_strength', 'dct_clarity',
                      'dct_preshrink',
                      'dct_chroma_gain', 'luma_adjust', 'dct_kernel',
-                     'luma_adjust_linear') and
+                     'linear_preshrink') and
             self.settings.get('pixel_encode') or
             # Direct DCT encode takes the frame at its own size: the capture
             # scaler and width do nothing (mouse-follow still uses the width).
@@ -2489,9 +2490,7 @@ class SenderGui:
                 self.settings['dct_encode'] or
                 self.settings.get('pixel_encode')) and
             source != 'mouse-follow' or
-            dest == 'luma_adjust_linear' and not (
-                self.settings['dct_encode'] and
-                self.settings.get('luma_adjust', True)) or
+            dest == 'linear_preshrink' and not self.settings['dct_encode'] or
             dest == 'aspect_layout' and
             self.settings['profile'] not in ASPECT_PROFILES or
             dest == 'dct_sharpen_strength' and not (
