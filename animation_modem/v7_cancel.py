@@ -37,6 +37,15 @@ TIERS = 3
 # The correction is kept only if it removes at least this share of the
 # pilots' residual energy; a clean or codec-coloured packet is left alone.
 MIN_GAIN = .15
+# Packets whose pilots already sit this close to the noise floor (pilot
+# noise against the pilots' own power, as the receiver's gates measure it)
+# are not worked on at all: a clean or lightly hit chain costs nothing.
+SKIP_BELOW = .03
+# The chain does not change from packet to packet: every curve is tried on
+# the first SEARCH worked packets, the most chosen one is then used alone,
+# and the search is repeated every RESEARCH worked packets.
+SEARCH = 8
+RESEARCH = 256
 
 
 def matrices(n, bins, rate, emphasis=EMPHASIS):
@@ -151,9 +160,11 @@ def _features(xest, ch, phase, scale, resp, inv, gain, synth, analysis, orders,
 
 @njit(cache=True)
 def cancel_packet(Z, H, pilots, is_pilot, is_data, erased, phase, scale,
-                  resp, inv, synth, analysis, orders, tiers, min_gain):
+                  resp, inv, synth, analysis, orders, tiers, min_gain, fixed):
     """Z with the chain's predicted distortion removed, or Z unchanged.
-    Returns (Z', residual energy before, after, chosen emphasis index)."""
+    ``fixed``: the emphasis curve to use, or -1 to try them all.
+    Returns (Z', residual energy before, after, best emphasis index,
+    whether the correction was kept)."""
     symbols, bins = Z.shape[0], Z.shape[1]
     n = synth.shape[0]
     m = len(orders)
@@ -178,7 +189,7 @@ def cancel_packet(Z, H, pilots, is_pilot, is_data, erased, phase, scale,
                 resid[s, b, c] = r
                 before += r.real*r.real+r.imag*r.imag
     if before <= 0.0:
-        return Z.copy(), before, before, -1
+        return Z.copy(), before, before, -1, False
     # Trust per bin: pilot residual against the channel's gain, interpolated.
     pb = np.zeros(bins)
     pc = np.zeros(bins)
@@ -248,7 +259,12 @@ def cancel_packet(Z, H, pilots, is_pilot, is_data, erased, phase, scale,
                     xest[s, b, 1] = pilots[s, b, 1]
                 elif is_data[s, b] and tier_of[b] <= rnd and not erased[s]:
                     xest[s, b, 0], xest[s, b, 1] = _solve2(H[s, b], current[s, b])
-        candidates = range(K) if rnd == 0 else range(chosen, chosen+1)
+        if rnd == 0 and fixed < 0:
+            candidates = range(K)
+        elif rnd == 0:
+            candidates = range(fixed, fixed+1)
+        else:
+            candidates = range(chosen, chosen+1)
         round_best = np.inf
         round_pred = np.zeros((symbols, bins, 2), np.complex128)
         for k in candidates:
@@ -291,5 +307,5 @@ def cancel_packet(Z, H, pilots, is_pilot, is_data, erased, phase, scale,
                 for c in range(2):
                     current[s, b, c] = Z[s, b, c]-round_pred[s, b, c]
     if best_after > (1.0-min_gain)*before:
-        return Z.copy(), before, best_after, -1
-    return current, before, best_after, chosen
+        return Z.copy(), before, best_after, chosen, False
+    return current, before, best_after, chosen, True
