@@ -898,6 +898,24 @@ class SenderGuiTests(unittest.TestCase):
         self.assertEqual(parse_ffmpeg_camera_sources(directshow, 'win32'), (
             ('USB Camera', 'dshow:video=USB Camera'),))
 
+        # FFmpeg 7 on Windows (the owner's machine): no headings, each device
+        # tagged (video) or (audio).
+        newer = (
+            '[dshow @ 000001eeb62dea80] "TANDBERG Video" (video)\n'
+            '[dshow @ 000001eeb62dea80]   Alternative name "@device_pnp_\\\\?\\usb#vid_1f82&pid_0001&mi_00#8&14e796f9&0&0000#{65e8773d-8f56-11d0-a3b9-00a0c9223196}\\global"\n'
+            '[dshow @ 000001eeb62dea80] "OBS Virtual Camera" (video)\n'
+            '[dshow @ 000001eeb62dea80]   Alternative name "@device_sw_{860BB310-5D01-11D0-BD3B-00A0C911CE86}\\{A3FCE0F5-3493-419F-958A-ABA1250EC20B}"\n'
+            '[dshow @ 000001eeb62dea80] "Microphone (TANDBERG Audio)" (audio)\n'
+            '[dshow @ 000001eeb62dea80]   Alternative name "@device_cm_{33D9A762-90C8-11D0-BD43-00A0C911CE86}\\wave_{AB0C5EB9}"\n'
+            '[dshow @ 000001eeb62dea80] "virtual-audio-capturer" (audio)\n'
+            '[dshow @ 000001eeb62dea80] "Line In (Realtek(R) Audio)" (audio)\n'
+            '[dshow @ 000001eeb62dea80] "Stereo Mix (Realtek(R) Audio)" (audio)\n'
+            '[in#0 @ 000001eeb62de700] Error opening input: Immediate exit requested\n'
+            'Error opening input file dummy.')
+        self.assertEqual(parse_ffmpeg_camera_sources(newer, 'win32'), (
+            ('TANDBERG Video', 'dshow:video=TANDBERG Video'),
+            ('OBS Virtual Camera', 'dshow:video=OBS Virtual Camera')))
+
     def test_linux_camera_discovery_reads_device_names_without_consuming_nodes(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

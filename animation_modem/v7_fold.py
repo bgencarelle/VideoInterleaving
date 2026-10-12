@@ -53,7 +53,10 @@ class Fold500:
 
     def __init__(self, model):
         path = Path(__file__).with_name('v7_fold_table_500.json')
-        blob = path.read_bytes()
+        # The table's bytes are pinned. A Windows checkout (git core.autocrlf)
+        # or an unzipped copy can carry CRLF line endings; the table is the
+        # same, so compare it with LF endings.
+        blob = path.read_bytes().replace(b'\r\n', b'\n')
         digest = hashlib.sha256(blob).hexdigest()
         if digest != TABLE_SHA256:
             raise ValueError('Fold 500 table hash does not match the pinned wire table')

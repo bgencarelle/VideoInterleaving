@@ -20,6 +20,57 @@ import tone_code
 FRESH_SLOTS = 1264
 FOLD_SLOTS = 500
 SIGNATURE_SLOTS = 16
+# Rebuild the picture at the size its sent coefficients support, not on the
+# full coder grid. Off until chosen: MONO_RIGHT_SIZE=1 turns it on.
+import os as _os
+RIGHT_SIZE = _os.environ.get('MONO_RIGHT_SIZE', '0') == '1'
+
+
+def _sent_extent(codec):
+    """(rows, cols) of the luma coefficients the packet just decoded can
+    carry, or None. A nested codec says per packet whether it was nested
+    (its guests reach further) or a plain fold packet."""
+    own = vars(codec)
+    nested = bool(own.get('last_nested', False))
+    cache = own.setdefault('_right_size_extents', {})
+    if nested in cache:
+        return cache[nested]
+    fold = own.get('fold')
+    if nested and getattr(fold, 'sent_mask', None) is not None:
+        mask = fold.sent_mask
+    else:
+        stock = own.get('stock', codec)
+        mask = stock.sent_luma_mask()
+    rows, cols = codec.grid.grids[0]
+    mask = np.asarray(mask, bool).ravel()
+    extent = None
+    if mask.size == rows*cols and mask.any():
+        r, c = np.nonzero(mask.reshape(rows, cols))
+        extent = (int(r.max())+1, int(c.max())+1)
+        if extent == (rows, cols):
+            extent = None
+    cache[nested] = extent
+    return extent
+
+
+def right_sized(values, grids, extent):
+    """(values, grids): each plane rebuilt at the share of its grid that the
+    sent luma extent covers. Nothing sent lies outside it, so this drops only
+    zero-filled detail; the display then enlarges the honest smaller picture
+    once, instead of showing a zero-padded enlargement."""
+    from scipy.fft import dctn, idctn
+    rows, cols = grids[0]
+    share = (extent[0]/rows, extent[1]/cols)
+    out, shapes, start = [], [], 0
+    for r, c in grids:
+        plane = np.asarray(values[start:start+r*c], float).reshape(r, c)
+        start += r*c
+        rr = max(1, min(r, int(np.ceil(share[0]*r))))
+        cc = max(1, min(c, int(np.ceil(share[1]*c))))
+        coefficients = dctn(plane, norm='ortho')[:rr, :cc]*np.sqrt(rr*cc/(r*c))
+        out.append(idctn(coefficients, norm='ortho').ravel())
+        shapes.append((rr, cc))
+    return np.concatenate(out), tuple(shapes)
 FOLDED_GUESTS = FOLD_SLOTS-SIGNATURE_SLOTS
 MONO_GROUPS = FRESH_SLOTS//8
 HEAD_GROUPS = v7.HEAD//8
@@ -344,8 +395,13 @@ class MonoFreshFoldWire:
             return None
         # A nested fold's account of its coefficients, for the display.
         result.diag['luma_room'] = getattr(codec, 'last_room', None)
-        result.diag['display_grids'] = codec.grid.grids
-        return codec.grid.inverse(full)
+        values = codec.grid.inverse(full)
+        grids = codec.grid.grids
+        extent = _sent_extent(codec) if RIGHT_SIZE else None
+        if extent is not None:
+            values, grids = right_sized(values, grids, extent)
+        result.diag['display_grids'] = grids
+        return values
 
 
 class MonoColourFoldCodec(FoldCodec):

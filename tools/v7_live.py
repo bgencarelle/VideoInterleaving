@@ -4854,7 +4854,8 @@ def _run_receive_session(args, fold, mono_wire=None, adaptive_profile=None,
                     if args.mono_compatible:
                         noise = result.diag.get('noise') or [0.0]
                         values = stabilize_chroma(
-                            values, previous_values, model.coder.grids,
+                            values, previous_values,
+                            result.diag.get('display_grids', model.coder.grids),
                             pilot_error=max(noise),
                             coverage=result.diag.get('head_coverage'))
                     latest = values

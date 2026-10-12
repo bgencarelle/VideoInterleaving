@@ -69,7 +69,10 @@ class LiveFold:
                              f'(pinned: {sorted(pins)})')
         if not path.exists():
             raise ValueError(f'fold table {path} is missing')
-        blob = path.read_bytes()
+        # The table's bytes are pinned. A Windows checkout (git core.autocrlf)
+        # or an unzipped copy can carry CRLF line endings; the table is the
+        # same, so compare it with LF endings.
+        blob = path.read_bytes().replace(b'\r\n', b'\n')
         digest = hashlib.sha256(blob).hexdigest()
         if digest != pins[slots]:
             raise ValueError(f'{path.name} SHA-256 {digest[:12]}… does not match the '

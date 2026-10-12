@@ -730,6 +730,9 @@ def parse_ffmpeg_camera_sources(output, platform):
                 choices.append((f'{name} · AVFoundation {index}',
                                 f'avfoundation:{name}'))
     elif platform.startswith('win'):
+        # Older FFmpeg lists cameras under a "DirectShow video devices"
+        # heading; newer FFmpeg (5 and later) has no headings and tags each
+        # device "(video)" or "(audio)" instead. Read both.
         in_video = False
         for line in output.splitlines():
             lowered = line.lower()
@@ -738,13 +741,18 @@ def parse_ffmpeg_camera_sources(output, platform):
                 continue
             if 'directshow audio devices' in lowered:
                 in_video = False
-            if not in_video:
                 continue
             if 'alternative name' in lowered:
                 continue
-            match = re.search(r'"([^"]+)"', line)
-            if match:
-                name = match.group(1)
+            match = re.search(r'"([^"]+)"\s*(?:\((video|audio|none)\))?', line)
+            if not match:
+                continue
+            name, kind = match.group(1), match.group(2)
+            if kind is None and not in_video:
+                continue
+            if kind is not None and kind != 'video':
+                continue
+            if (name, f'dshow:video={name}') not in choices:
                 choices.append((name, f'dshow:video={name}'))
     return tuple(choices)
 

@@ -97,6 +97,8 @@ The easiest way is the scope window:
 ./vi.scope-gui
 ```
 
+On Windows, in PowerShell: `.\vi.scope-gui`
+
 Pick your pictures or a video, pick the audio output wired to the scope, and
 press Start. The left channel moves the dot sideways and the right channel
 moves it up and down.
@@ -116,6 +118,18 @@ More in [`docs/SCOPE_UPGRADE.md`](docs/SCOPE_UPGRADE.md).
 The modem turns pictures into sound on two audio channels. Play that sound
 into another computer's audio input (by cable, tape or recorder), and the
 receiver turns it back into pictures.
+
+On Windows, every `./vi.something` command below has a twin you run in
+PowerShell as `.\vi.something`, with the same options, for example:
+
+```powershell
+.\vi.modem-receive-gui
+.\vi.modem-send-gui
+.\vi.modem-send --device 12 --source camera --ffmpeg-input "dshow:video=Camera Name"
+```
+
+You can also double-click them in Explorer. Cameras on Windows need FFmpeg
+(`winget install Gyan.FFmpeg`); the sender window then lists them.
 
 ### 1. Start the receiver
 
@@ -217,7 +231,7 @@ The best settings found so far are kept in one file,
 | Path | What it is |
 | --- | --- |
 | `main.py` | Starts the app in the mode you choose |
-| `vi.*` | Short commands for the modem and scope windows |
+| `vi.*` | Short commands for the modem and scope windows (`.cmd` on Windows) |
 | `tools/` | The modem sender and receiver, and other tools |
 | `animation_modem/` | How pictures become sound and back |
 | `utilities/` | Picture converters and the setup check |
