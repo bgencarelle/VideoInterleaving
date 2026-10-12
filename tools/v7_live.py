@@ -1941,6 +1941,19 @@ def _run_send_session(args):
             if name not in HOST_PARAM_NAMES or value != 1.0))
         say_kernel(f'DCT kernel in use: {label}', applied=label)
 
+    def record_sound(audio, frames):
+        """Like a VCR: put the sound beside the picture as the packet is made.
+
+        The sound is read now, right after the picture was taken and encoded,
+        so picture and sound of a packet come from the same moment; nothing
+        is added at output time, where a queue could split them.
+        """
+        if not mono_fold_profile:
+            return audio
+        return _mix_mono_video_audio(
+            audio, frames, source_audio, audio_delay,
+            mono_wire.carrier_index, output_rate, audio_gain)
+
     def encode_batch(frames, aspects, counter, deferred_gains=None, stamps=None):
         if stamps is not None:
             with P.send_stamps({index: (loop, way) for index, loop, way in stamps}):
@@ -2107,7 +2120,8 @@ def _run_send_session(args):
                     tuple((counter+index, aspects[index], frame)
                           for index, frame in enumerate(preview_images))
                     if image_preview_port is not None else ())
-                batches.put((counter, audio, stats, preview_frames))
+                batches.put((counter, record_sound(audio, len(frames)),
+                             stats, preview_frames))
                 buffered_audio_seconds += len(audio)/output_rate
                 if buffered_audio_seconds >= startup_buffer_seconds:
                     prebuffer_ready.set()
@@ -2132,7 +2146,8 @@ def _run_send_session(args):
                     tuple((counter+index, aspects[index], frame)
                           for index, frame in enumerate(preview_images))
                     if image_preview_port is not None else ())
-                batches.put((counter, audio, stats, preview_frames))
+                batches.put((counter, record_sound(audio, len(frames)),
+                             stats, preview_frames))
                 buffered_audio_seconds += len(audio)/output_rate
                 if buffered_audio_seconds >= startup_buffer_seconds:
                     prebuffer_ready.set()
@@ -2446,10 +2461,8 @@ def _run_send_session(args):
                     offset = 0
                     for index in range(frames):
                         count = base + (index < extra)
-                        packet = _mix_mono_video_audio(
-                            audio[offset:offset+count], 1, source_audio,
-                            audio_delay, mono_wire.carrier_index, output_rate,
-                            audio_gain)
+                        # The sound was recorded beside the picture at encode.
+                        packet = audio[offset:offset+count]
                         # One packet per blocking write lets paced soundtrack
                         # capture advance while the DAC plays this video frame.
                         write_output(packet)
