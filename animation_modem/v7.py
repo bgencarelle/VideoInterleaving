@@ -1184,6 +1184,21 @@ def emitted_pulse_level(profile_code=1):
     return HEADER_PEAK
 
 
+_SEND_STAMPS = threading.local()
+
+
+@contextmanager
+def send_stamps(by_index):
+    """Packets built inside carry, for their source index, the (LoopInfo,
+    direction) given in ``by_index`` unless the caller passes its own loop."""
+    previous = getattr(_SEND_STAMPS, 'by_index', {})
+    _SEND_STAMPS.by_index = dict(by_index)
+    try:
+        yield
+    finally:
+        _SEND_STAMPS.by_index = previous
+
+
 def encode_pulse_frame_coeffs(model, coeffs, counter, aspect_code=0,
                               source_index=None, loop=None, direction=1,
                               pilot_tones=False,
@@ -1206,6 +1221,14 @@ def encode_pulse_frame_coeffs(model, coeffs, counter, aspect_code=0,
     meta = np.zeros((N//2+1, 2), complex)
     if source_index is None:
         source_index = counter - 1
+    if loop is None:
+        # A sender that keeps a clocked index (tools/v7_live.py, outside the
+        # app) stamps each packet's loop and direction by its index, so every
+        # wire that passes the index down carries them without its own
+        # argument (see send_stamps).
+        stamp = getattr(_SEND_STAMPS, 'by_index', {}).get(int(source_index))
+        if stamp is not None:
+            loop, direction = stamp
     vals = metadata_symbols(aspect_code, model.encoding_type,
                             counter % TAIL_PHASES, source_index, loop, direction)
     meta[META_PILOTS, 0] = 1

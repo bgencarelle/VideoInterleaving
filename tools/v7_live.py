@@ -541,10 +541,27 @@ def _dct_preview_image(rgb, brightness, gamma):
     return image.point(table*3)
 
 
+class _SenderIndex:
+    """The index each packet carries when sending outside the app: the count
+    of frames encoded, rolling over at the metadata's 15-bit field, sent with
+    that roll-over as a one-way loop (no clock), so the receiver knows the
+    count's range and where it wraps."""
+
+    FIELD = P.MAX_SOURCE_INDEX+1          # 32767 index values: 0..32766
+    LOOP = P.LoopInfo(FIELD, P.LOOP_NO_CLOCK, pingpong=False)
+
+    def stamp(self, counter):
+        """(source index, LoopInfo, direction) for packet ``counter`` (1-based)."""
+        return (int(counter)-1) % self.FIELD, self.LOOP, 1
+
+
 def _wire_index(counter):
     """Live source index for packet ``counter`` (1-based), wrapping at the
     metadata's 15-bit field instead of failing after about 44 minutes."""
     return (int(counter)-1) % (P.MAX_SOURCE_INDEX+1)
+
+
+_wire_index_plain = _wire_index
 
 
 def _masks_on_grids(masks, grids):
@@ -1712,7 +1729,20 @@ def _run_send_session(args):
             if name not in HOST_PARAM_NAMES or value != 1.0))
         say_kernel(f'DCT kernel in use: {label}', applied=label)
 
-    def encode_batch(frames, aspects, counter, deferred_gains=None):
+    def encode_batch(frames, aspects, counter, deferred_gains=None, stamps=None):
+        if stamps is not None:
+            with P.send_stamps({index: (loop, way) for index, loop, way in stamps}):
+                return encode_batch_inner(frames, aspects, counter, deferred_gains,
+                                          _indexes=[index for index, _, _ in stamps])
+        return encode_batch_inner(frames, aspects, counter, deferred_gains)
+
+    def encode_batch_inner(frames, aspects, counter, deferred_gains=None,
+                           _indexes=None):
+        def _wire_index(packet_counter):
+            # The clocked index when stamped, else the packet count.
+            if _indexes is not None:
+                return _indexes[packet_counter-counter]
+            return _wire_index_plain(packet_counter)
         values = np.asarray(frames)
         if clip_aware:
             values = np.asarray([clip_aware_values(value, aspects[index])
@@ -1846,6 +1876,11 @@ def _run_send_session(args):
             else None)
         next_capture = time.monotonic()
         failure = None
+        # The frames-encoded count, rolling over, with its loop length (see
+        # _SenderIndex); V7_SEND_INDEX=0 sends the bare count as before.
+        keeper = (_SenderIndex() if os.environ.get('V7_SEND_INDEX', '1') != '0'
+                  else None)
+        stamps = []
         try:
             while not stop.is_set() and (args.seconds <= 0 or
                                          time.monotonic()-started < args.seconds):
@@ -1889,13 +1924,17 @@ def _run_send_session(args):
                 # exactly once, directly in coefficient space; a second fold
                 # would quantize the hosts again and erase the guest residuals.
                 frames.append(value); aspects.append(aspect)
+                if keeper is not None:
+                    stamps.append(keeper.stamp(counter+len(frames)-1))
                 # A compressed packet still needs a new source frame at the
                 # faster wire cadence; otherwise the audio stream has gaps.
                 next_capture += 1/wire_fps
                 if len(frames) < batch_size:
                     continue
                 audio, stats = encode_batch(frames, aspects, counter,
-                                            deferred_gains)
+                                            deferred_gains,
+                                            stamps=stamps if keeper else None)
+                stamps = []
                 preview_frames = (
                     tuple((counter+index, aspects[index], frame)
                           for index, frame in enumerate(preview_images))
@@ -1918,7 +1957,8 @@ def _run_send_session(args):
         if failure is None and frames and not stop.is_set():
             try:
                 audio, stats = encode_batch(frames, aspects, counter,
-                                            deferred_gains)
+                                            deferred_gains,
+                                            stamps=stamps if keeper else None)
                 preview_frames = (
                     tuple((counter+index, aspects[index], frame)
                           for index, frame in enumerate(preview_images))
