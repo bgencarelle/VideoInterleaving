@@ -430,6 +430,27 @@ Copy this and fill it in. Leave out what is not known; do not guess lines.
 - What "fixed" looks like: body peak 1 to 1.5 dB under the header peak,
   measured the same way.
 
+### 36. One channel behind the other breaks decoding
+- Status: fixed (not reviewed by owner)
+- What is wrong: dragging one channel of a recording in an editor (owner's
+  test file: right 1,110 samples, 11.6 ms, behind at 96 kHz) gave smeared,
+  noisy pictures or none: headers are found on the channels' sum and both
+  channels are cut at one timing.
+- Where: `tools/v7_live.py` (live input), new
+  `animation_modem/v7_channel_align.py`.
+- Report: the live receiver measures the offset between the channels by
+  cross-correlation over the last 0.4 s, every 0.25 s, up to +-20 ms, takes
+  it when two measurements agree, and delays the leading channel before
+  anything else sees the audio. Plain correlation, not phase-only: on the
+  owner's recording a quiet component common to both channels at zero lag
+  outvoted the real offset under phase-only weighting. Owner's file: offset
+  found as 1,110 in every window; 103 of about 110 packets shown, as clean
+  as the unshifted file (none clean before). Synthetic offsets -200 to
+  +1,500 samples on aspect-fold-500, stereo nested and adaptive stereo
+  found exactly and held. `V7_ALIGN=0` turns it off. Still open: headers
+  are searched on the channels' sum and both channels share one timing;
+  timing each channel on its own headers would remove the need for this.
+
 ## Deleted items
 
 Gone on the second pass and taken off the list. Each line says what fixed it

@@ -3564,6 +3564,11 @@ def _run_receive_session(args, fold, mono_wire=None, adaptive_profile=None,
     recovery = [None]
     last_input_device_error = [None]
     capture_sample_cursor = [0]
+    # Fixes: one input channel a few samples behind the other (an editor
+    # drag, azimuth, interface skew). V7_ALIGN=0 turns the alignment off.
+    from animation_modem.v7_channel_align import ChannelAligner
+    channel_aligner = (ChannelAligner(capture_rate)
+                       if os.environ.get('V7_ALIGN', '1') != '0' else None)
     live_input = LiveInput(
         args.decode_history, args.decode_batch, rate=capture_rate,
         direction=getattr(args, 'direction', 'auto'))
@@ -4293,6 +4298,14 @@ def _run_receive_session(args, fold, mono_wire=None, adaptive_profile=None,
                 # Blocks are private copies of the callback data; LiveInput
                 # applies the leveler's polarity to the stored audio itself.
                 block = blocks.get_nowait()
+                if channel_aligner is not None:
+                    before = channel_aligner.offset
+                    block = channel_aligner.process(block)
+                    meter['channel_offset'] = channel_aligner.offset
+                    if channel_aligner.offset != before and not args.no_log:
+                        print({'status': 'channel_alignment',
+                               'right_lags_left_by_samples': channel_aligner.offset},
+                              flush=True)
                 if (opposite_probe is not None and block.ndim == 2 and
                         block.shape[1] > opposite_input_index):
                     opposite_probe.add(
