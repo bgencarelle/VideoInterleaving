@@ -146,6 +146,13 @@ lines up the left and right channels if one arrives a little late.
 Keys in the receiver window: `P` shows only the picture, `F` goes full
 screen, `I` shows details, `Esc` goes back.
 
+With a mono sender, one channel is the picture and the other is sound, which
+the receiver plays. **Mono picture side** (Auto, Left or Right) says which
+channel is the picture; Auto finds it. The sound is played 0.6 seconds late
+on purpose: that is enough time to cut out any picture signal that turns up
+on the sound channel (for example when the sender switches to stereo), so it
+never reaches the speakers.
+
 Without the window:
 
 ```bash

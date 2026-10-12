@@ -3461,6 +3461,19 @@ class SenderGui:
             pass
         events.put(('line', 'Sender did not stop promptly; requesting termination.'))
         wake()
+        if os.name == 'nt':
+            # End the sender with everything it started (its FFmpeg capture
+            # would otherwise keep the camera busy for the next Start).
+            try:
+                subprocess.run(['taskkill', '/T', '/F', '/PID', str(process.pid)],
+                               capture_output=True, timeout=5, check=False)
+            except (OSError, subprocess.TimeoutExpired):
+                pass
+            try:
+                process.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                pass
+            return
         try:
             process.terminate()
         except OSError:

@@ -12,6 +12,70 @@ from tools.v7_receiver_audio import (AudioPassthrough,
                                      resolve_device_index)
 
 
+_GATE = AudioPassthrough.GATE_DELAY_SECONDS
+
+
+def setUpModule():
+    # The playback-mechanics tests below expect captured sound to be queued
+    # at once; the packet gate (a fixed hold) has its own tests.
+    AudioPassthrough.GATE_DELAY_SECONDS = 0.0
+
+
+def tearDownModule():
+    AudioPassthrough.GATE_DELAY_SECONDS = _GATE
+
+
+class PacketGateTests(unittest.TestCase):
+    RATE = 48000
+
+    def _gate(self, seconds=.25):
+        passthrough = AudioPassthrough(
+            self.RATE, sounddevice_module=_FakeSoundDevice,
+            gate_seconds=seconds)
+        passthrough.set_route('right')
+        return passthrough
+
+    def _played(self, passthrough):
+        return passthrough.buffer.read(passthrough.buffer.available)
+
+    def test_a_packet_reported_within_the_hold_is_cut_before_it_plays(self):
+        passthrough = self._gate()
+        tone = np.full((self.RATE, 2), .5, np.float32)       # 1 s of "sound"
+        packet = (int(.3*self.RATE), int(.38*self.RATE))     # 80 ms
+        block = 512
+        out = []
+        for start in range(0, len(tone), block):
+            passthrough.queue_capture(start, tone[start:start+block])
+            # Reported 100 ms after the packet ends (decoder lag).
+            if start <= packet[1]+int(.1*self.RATE) < start+block:
+                passthrough.gate_packet(1, *packet)
+            out.append(self._played(passthrough))         # playback drains it
+        played = np.concatenate(out)
+        held = int(.25*self.RATE)
+        self.assertEqual(len(played), len(tone)-held)       # fixed latency
+        margin = int(.003*self.RATE)
+        self.assertTrue(np.all(played[packet[0]-margin:packet[1]+margin] == 0))
+        fade = int(.002*self.RATE)
+        self.assertTrue(np.allclose(played[:packet[0]-margin-fade], .5))
+        self.assertTrue(np.allclose(
+            played[packet[1]+margin+fade:], .5))
+        # Smooth edges: no step bigger than the fade allows.
+        self.assertLess(np.max(np.abs(np.diff(played))), .5/fade*2)
+        self.assertEqual(passthrough.gate_late_samples, 0)
+
+    def test_a_packet_on_the_video_leg_does_not_touch_the_sound(self):
+        passthrough = self._gate()
+        tone = np.full((self.RATE, 2), .5, np.float32)
+        passthrough.gate_packet(0, 1000, 5000)              # left: not played
+        passthrough.queue_capture(0, tone)
+        self.assertTrue(np.allclose(self._played(passthrough), .5))
+
+    def test_off_queues_at_once(self):
+        passthrough = self._gate(0)
+        passthrough.queue_capture(0, np.full((4800, 2), .5, np.float32))
+        self.assertEqual(passthrough.buffer.available, 4800)
+
+
 class ReceiverChannelRouterTests(unittest.TestCase):
     ADAPTIVE_MONO = 2
     ADAPTIVE_STEREO = 4
@@ -1039,3 +1103,44 @@ class AudioPassthroughTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class PacketGateDrainTests(unittest.TestCase):
+    RATE = 48000
+
+    def test_sound_stopping_plays_held_sound_up_to_the_first_packet(self):
+        passthrough = AudioPassthrough(
+            48000, sounddevice_module=_FakeSoundDevice, gate_seconds=.6)
+        passthrough.set_route('left')
+        tone = np.full((2*self.RATE, 2), .5, np.float32)
+        played = []
+        for start in range(0, self.RATE, 480):           # 1 s of sound
+            passthrough.queue_capture(start, tone[start:start+480])
+            played.append(passthrough.buffer.read(passthrough.buffer.available))
+        # A packet at 0.9 s is reported, then the receiver stops the sound.
+        passthrough.gate_packet(0, int(.9*self.RATE), int(.98*self.RATE))
+        passthrough.set_route(None)
+        self.assertEqual(passthrough.route, 'left')        # draining
+        for start in range(self.RATE, 2*self.RATE, 480):
+            passthrough.queue_capture(start, tone[start:start+480])
+            played.append(passthrough.buffer.read(passthrough.buffer.available))
+            if passthrough.route is None:
+                break
+        played = np.concatenate(played)
+        self.assertIsNone(passthrough.route)               # then stopped
+        margin = int(.003*self.RATE)
+        fade = int(.002*self.RATE)
+        cut = int(.9*self.RATE)-margin
+        # Everything before the packet played; nothing after it.
+        self.assertTrue(np.allclose(played[:cut-fade], .5))
+        self.assertLessEqual(len(played), cut+fade)
+
+    def test_back_to_mono_while_draining_keeps_playing(self):
+        passthrough = AudioPassthrough(
+            48000, sounddevice_module=_FakeSoundDevice, gate_seconds=.6)
+        passthrough.set_route('left')
+        passthrough.queue_capture(0, np.full((self.RATE, 2), .5, np.float32))
+        passthrough.set_route(None)
+        passthrough.set_route('left')
+        self.assertEqual(passthrough.route, 'left')
+        self.assertIsNone(passthrough._drain_to)

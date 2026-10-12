@@ -1555,3 +1555,32 @@ class GuiTransportTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class SenderStopTests(unittest.TestCase):
+    def test_closed_control_input_asks_the_sender_to_stop(self):
+        import io
+        import threading
+        from tools import v7_live
+        asked = []
+        v7_live._read_live_tone_controls(
+            io.StringIO(''), v7_live.LiveToneControls(1.0, 1.0),
+            threading.Event(), on_eof=lambda: asked.append(True))
+        self.assertEqual(asked, [True])
+        # An ended session (its own stop set) does not ask again.
+        stop = threading.Event()
+        stop.set()
+        v7_live._read_live_tone_controls(
+            io.StringIO(''), v7_live.LiveToneControls(1.0, 1.0), stop,
+            on_eof=lambda: asked.append(True))
+        self.assertEqual(asked, [True])
+
+    def test_only_the_first_stop_request_interrupts(self):
+        from tools import v7_live
+        v7_live._STOP_REQUESTED.clear()
+        try:
+            with self.assertRaises(KeyboardInterrupt):
+                v7_live._stop_signal()
+            v7_live._stop_signal()           # a repeat leaves cleanup alone
+        finally:
+            v7_live._STOP_REQUESTED.clear()

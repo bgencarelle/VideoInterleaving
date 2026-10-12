@@ -351,12 +351,43 @@ class LiveTransportControls:
         return True
 
 
+# A sender run by the sender window stops once, cleanly: the first request
+# (the window closing our control input, Ctrl+C, or Ctrl+Break on Windows)
+# raises KeyboardInterrupt in the main thread, which closes FFmpeg and the
+# audio stream on the way out; later requests are ignored so they cannot cut
+# that cleanup short.
+_STOP_REQUESTED = threading.Event()
+
+
+def _stop_signal(_signum=None, _frame=None):
+    if _STOP_REQUESTED.is_set():
+        return
+    _STOP_REQUESTED.set()
+    raise KeyboardInterrupt
+
+
+def _install_gui_stop_handlers():
+    import signal
+    signal.signal(signal.SIGINT, _stop_signal)
+    if hasattr(signal, 'SIGBREAK'):                  # Windows Ctrl+Break
+        signal.signal(signal.SIGBREAK, _stop_signal)
+
+
+def _stop_from_gui():
+    """The window closed our control input: stop as Ctrl+C does."""
+    import _thread
+    _thread.interrupt_main()                          # runs _stop_signal
+
+
 def _read_live_tone_controls(stream, controls, stop, transport=None,
-                             kernels=None):
-    """Consume newline-delimited GUI updates until EOF or shutdown."""
+                             kernels=None, on_eof=None):
+    """Consume newline-delimited GUI updates until EOF or shutdown. EOF means
+    the window asked us to stop (``on_eof``)."""
     while not stop.is_set():
         line = stream.readline()
         if not line:
+            if on_eof is not None and not stop.is_set():
+                on_eof()
             return
         controls.update(line)
         if transport is not None:
@@ -1362,6 +1393,9 @@ def run_send(args):
     import sounddevice as sd
     from tools.v7_device_recovery import device_identity
 
+    if getattr(args, 'gui_control', False):
+        _install_gui_stop_handlers()
+
     _resolve_named_send_device(sd, args)
     try:
         identity = device_identity(sd, args.device, 'output')
@@ -1819,7 +1853,7 @@ def _run_send_session(args):
         threading.Thread(
             target=_read_live_tone_controls,
             args=(sys.stdin, tone_controls, control_stop, transport,
-                  kernel_controls),
+                  kernel_controls, _stop_from_gui),
             name='v7-live-tone-controls', daemon=True).start()
     # A file resumes where the GUI last left it, or where this send was when
     # its output device was lost.
@@ -2707,8 +2741,10 @@ class _ProfileStatusProbe:
                     P._tone_eof_marker(mono, position, scale) is None):
                 continue
             mode = profile_by_position.get(int(round(position)))
+            # A whole packet (header to end marker): the audio gate cuts it.
             events.append({'position': absolute, 'scale': scale,
-                           'side_index': self.side_index, 'mode': mode})
+                           'side_index': self.side_index, 'mode': mode,
+                           'packet': True})
         self.input.decoded()
         return tuple(events)
 
@@ -3740,6 +3776,17 @@ def _run_receive_session(args, fold, mono_wire=None, adaptive_profile=None,
          for index in range(input_channels)]
         if adaptive_profile is not None else None)
     blocks = queue.Queue(maxsize=INPUT_AUDIO_QUEUE_BLOCKS)
+    # (probe sample count, capture position, length) of recent decoder blocks:
+    # turns a packet's probe position into the capture position the audio
+    # gate works in.
+    probe_blocks = deque(maxlen=256)
+
+    def capture_position(position):
+        for start, capture, length in reversed(probe_blocks):
+            if position >= start:
+                return capture+(position-start)
+        return position if not probe_blocks else probe_blocks[0][1]+(
+            position-probe_blocks[0][0])
     input_gap = threading.Event()
     input_ready = threading.Event()
     input_paused = threading.Event()
@@ -3917,7 +3964,9 @@ def _run_receive_session(args, fold, mono_wire=None, adaptive_profile=None,
             return
         block = np.array(indata, copy=True)
         try:
-            blocks.put_nowait(block)
+            # With its capture position: silent blocks are not sent, so the
+            # decoder's own sample count is not the capture count.
+            blocks.put_nowait((capture_start, block))
         except queue.Full:
             # Dropping an input block is an explicit discontinuity; keeping
             # stale audio would make the V7 clock appear to run backward.
@@ -4480,7 +4529,10 @@ def _run_receive_session(args, fold, mono_wire=None, adaptive_profile=None,
             try:
                 # Blocks are private copies of the callback data; LiveInput
                 # applies the leveler's polarity to the stored audio itself.
-                block = blocks.get_nowait()
+                block_capture_start, block = blocks.get_nowait()
+                if profile_probes is not None:
+                    probe_blocks.append((profile_probes[0].input.total,
+                                         block_capture_start, len(block)))
                 if channel_aligner is not None:
                     before = channel_aligner.offset
                     block = channel_aligner.process(block)
@@ -4521,6 +4573,22 @@ def _run_receive_session(args, fold, mono_wire=None, adaptive_profile=None,
             profile_events = []
             for probe in profile_probes:
                 profile_events.extend(probe.scan(now))
+            if passthrough is not None:
+                # Sampler-style gate: a packet heard on the leg being played
+                # as sound is cut from it before it reaches the speakers.
+                # The aligner delays the leading channel before the probes;
+                # the gate works on raw capture positions.
+                offset = (channel_aligner.offset
+                          if channel_aligner is not None else 0)
+                delayed = 0 if offset > 0 else 1 if offset < 0 else None
+                for event in profile_events:
+                    if event.get('packet'):
+                        start = event['position']-(
+                            abs(offset) if event['side_index'] == delayed else 0)
+                        end = start+P.PULSE_FRAME*event['scale']
+                        passthrough.gate_packet(
+                            event['side_index'], capture_position(start),
+                            capture_position(end))
             adaptive_profile.reset_candidate_if_stale(
                 now, runtime_options.snapshot().get('freewheel_seconds', 2.0))
             profile_decisions = adaptive_profile.observe_packets(
@@ -5277,8 +5345,10 @@ def parser():
                        help='stabilize weak chroma for mono/one-leg playback')
     recv.add_argument('--mono-video-side', choices=('auto', 'left', 'right'),
                       default='auto',
-                      help=('all-fresh mono video input leg (default: auto; '
-                            'validates the mono status and prefers right if both work)'))
+                      help=('mono profiles: the channel that carries the '
+                            'picture; the other is played as sound. auto '
+                            '(default) finds it from the packets, preferring '
+                            'right if both work'))
     _add_aspect_arguments(recv)
     recv.set_defaults(show_diagnostics=True)
     recv.add_argument('--no-log', dest='no_log', action='store_true',

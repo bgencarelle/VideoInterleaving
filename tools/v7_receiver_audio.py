@@ -1,5 +1,6 @@
 """Runtime routing and packet-aligned audio passthrough for the V7 receiver."""
 from collections import deque
+import os
 import threading
 import time
 
@@ -355,10 +356,22 @@ class AudioPassthrough:
     # 96 kHz in, 44.1 kHz out). Keeps total monitor delay near the old path.
     BLOCKING_TARGET_SECONDS = 0.05
 
+    # Packet gate (sampler-style): the played leg is held a fixed time behind
+    # capture, so a modem packet heard on it (a sender switching between mono
+    # and stereo) is cut out, sample for sample, before it reaches the
+    # speakers. The hold covers a packet plus the decoder's lag in reporting
+    # it (measured 0.47-0.51 s after the packet's end on the test machine;
+    # the picture shows with about the same lag, so sound stays near it).
+    # Each cut gets a few milliseconds of margin and short fades outside it.
+    # V7_AUDIO_GATE_DELAY sets the hold in seconds; 0 turns the gate off.
+    GATE_DELAY_SECONDS = 0.6
+    GATE_MARGIN_SECONDS = 0.003
+    GATE_FADE_SECONDS = 0.002
+
     def __init__(self, input_rate, sounddevice_module=None, status_callback=None,
                  volume=DEFAULT_AUDIO_VOLUME, target_seconds=None,
                  output_latency=None, output_blocksize=None,
-                 output_mode=None):
+                 output_mode=None, gate_seconds=None):
         if sounddevice_module is None:
             import sounddevice as sounddevice_module
         from tools.v7_source_audio import SampleBuffer
@@ -430,6 +443,23 @@ class AudioPassthrough:
         self._output_underflow_active = False
         self._input_status_counts = {}
         self._output_status_counts = {}
+        gate = os.environ.get('V7_AUDIO_GATE_DELAY') if gate_seconds is None \
+            else gate_seconds
+        self.gate_seconds = (self.GATE_DELAY_SECONDS if gate is None
+                             else max(0.0, float(gate)))
+        self._held = deque()             # (capture start, samples) not yet played
+        self._held_end = None
+        self._released_end = None
+        self._cuts = {0: [], 1: []}      # per input channel: (start, end)
+        self._drain_to = self._drain_cut = None
+        self.gate_cuts = 0
+        self.gate_late_samples = 0
+        self._set_gate_rate(self.input_rate)
+
+    def _set_gate_rate(self, rate):
+        self._gate_delay = int(round(self.gate_seconds*rate))
+        self._gate_margin = int(round(self.GATE_MARGIN_SECONDS*rate))
+        self._gate_fade = max(1, int(round(self.GATE_FADE_SECONDS*rate)))
 
     def _report(self, error):
         self.error = None if error is None else str(error)
@@ -466,6 +496,11 @@ class AudioPassthrough:
                 'underflow_events': self._output_underflow_events,
                 'underflow_callbacks': self._output_underflow_callbacks,
                 'input_status': dict(self._input_status_counts),
+                # Packet gate: cuts made, and samples a late report could
+                # not cut (nonzero: raise V7_AUDIO_GATE_DELAY).
+                'gate_seconds': self.gate_seconds,
+                'gate_cuts': self.gate_cuts,
+                'gate_late_ms': round(1000.0*self.gate_late_samples/self.input_rate, 1),
                 'output_status': dict(self._output_status_counts),
                 # Measured against the wall clock. A measured output rate
                 # below nominal while input matches nominal means output
@@ -675,6 +710,11 @@ class AudioPassthrough:
             raise ValueError('audio input sample rate must be positive')
         with self._lock:
             self.input_rate = rate
+            self._set_gate_rate(rate)
+            self._held.clear()
+            self._held_end = self._released_end = None
+            self._cuts = {0: [], 1: []}
+            self._drain_to = self._drain_cut = None
             output_rate = self.output_rate
             if output_rate:
                 self.reader = self._make_clock_reader(rate, output_rate)
@@ -757,7 +797,103 @@ class AudioPassthrough:
             # Capture blocks set the arrival granularity the servo target must
             # cover (decoded-frame queuing is paced by the decoder instead).
             self._largest_push = max(self._largest_push, len(audio))
-            return self._queue_samples_locked(sample_start, audio)
+            if self._gate_delay <= 0:
+                return self._queue_samples_locked(sample_start, audio)
+            sample_start = int(sample_start)
+            self._held.append((sample_start, audio))
+            self._held_end = sample_start+len(audio)
+            until = self._held_end-self._gate_delay
+            if self._drain_to is not None:
+                # Only up to the cut point and its fade; then let it play out.
+                until = min(until, self._drain_to+self._gate_fade)
+            self._release_held_locked(channel, until)
+            if (self._drain_to is not None and self._released_end is not None
+                    and self._released_end >= self._drain_to and
+                    self.buffer.available == 0):
+                self._end_drain_locked()
+            return True
+
+    def gate_packet(self, channel, start, end):
+        """Cut capture samples [start, end) of input ``channel`` (0 left, 1
+        right) from the played leg: a modem packet heard on it."""
+        start = int(start)-self._gate_margin
+        end = int(end)+self._gate_margin
+        with self._lock:
+            self._cuts.setdefault(int(channel), []).append((start, end))
+            self.gate_cuts += 1
+            if self._released_end is not None and start < self._released_end:
+                # Reported after part of it was played: the hold was short.
+                self.gate_late_samples += max(0, min(end, self._released_end)-start)
+
+    def _start_drain_locked(self):
+        channel = 0 if self.route == 'left' else 1
+        released = self._released_end if self._released_end is not None else 0
+        pending = [start for start, end in self._cuts.get(channel, [])
+                   if end > released]
+        boundary = min(pending) if pending else self._held_end
+        self._drain_to = int(boundary)
+        self._drain_cut = (int(boundary), 1 << 62)
+        self._cuts.setdefault(channel, []).append(self._drain_cut)
+
+    def _end_drain_locked(self, cancel=False):
+        channel = 0 if self.route == 'left' else 1
+        cuts = self._cuts.get(channel, [])
+        if self._drain_cut in cuts:
+            cuts.remove(self._drain_cut)
+        self._drain_to = self._drain_cut = None
+        if not cancel:
+            # Drained: the route change happens now.
+            self.route = None
+            self._held.clear()
+            self._held_end = None
+            self.buffer.clear()
+            self._queued_sample_end = None
+            self._queued_last_sample = None
+            self._fade_in_after_underflow = False
+            self._audio_primed = False
+            self._declick_pending = True
+            if self.output_rate:
+                self.reader = self._make_clock_reader(
+                    self.input_rate, self.output_rate)
+
+    def _release_held_locked(self, channel, until):
+        """Play held samples older than ``until``, with the cuts applied."""
+        cuts = self._cuts.get(channel, [])
+        while self._held:
+            start, audio = self._held[0]
+            if start >= until:
+                break
+            take = min(len(audio), until-start)
+            if take < len(audio):
+                part = audio[:take]
+                self._held[0] = (start+take, audio[take:])
+            else:
+                part = audio
+                self._held.popleft()
+            part = self._gated(part, start, cuts)
+            self._released_end = start+len(part)
+            self._queue_samples_locked(start, part)
+        # Cuts wholly played (with their fade) are no longer needed.
+        horizon = (self._released_end or 0)-self._gate_fade
+        for key in self._cuts:
+            self._cuts[key] = [cut for cut in self._cuts[key] if cut[1] > horizon]
+
+    def _gated(self, part, start, cuts):
+        """``part`` (capture samples from ``start``) with the cuts applied:
+        silent inside a cut, smooth fades just outside its edges."""
+        end = start+len(part)
+        fade = self._gate_fade
+        gain = None
+        for cut_start, cut_end in cuts:
+            if cut_end+fade <= start or cut_start-fade >= end:
+                continue
+            positions = np.arange(start, end, dtype=np.float64)
+            before = np.clip((cut_start-positions)/fade, 0.0, 1.0)
+            after = np.clip((positions-(cut_end-1))/fade, 0.0, 1.0)
+            edge = np.maximum(before, after)
+            edge = (edge*edge*(3.0-2.0*edge)).astype(np.float32)
+            gain = edge if gain is None else np.minimum(gain, edge)
+        return part if gain is None else part*gain
 
     def _queue_samples_locked(self, sample_start, audio):
         """Append samples and gently bridge timestamp gaps or overlaps."""
@@ -796,6 +932,10 @@ class AudioPassthrough:
     def clear_audio(self):
         """Discard captured history and queued output after a capture gap."""
         with self._lock:
+            self._held.clear()
+            self._held_end = self._released_end = None
+            self._cuts = {0: [], 1: []}
+            self._drain_to = self._drain_cut = None
             self.history.clear()
             self._history_end = None
             self._queued_sample_end = None
@@ -949,11 +1089,27 @@ class AudioPassthrough:
         if side not in (None, 'left', 'right'):
             raise ValueError('audio route must be left, right, or None')
         with self._lock:
-            changed = side != self.route
-            self.route = side
             if muted is not None:
                 self.muted = bool(muted)
+            if self._drain_to is not None:
+                if side == self.route:
+                    # Back before the drain ended (mono again): keep playing.
+                    self._end_drain_locked(cancel=True)
+                    return
+                if side is None:
+                    return                       # still draining
+                self._end_drain_locked(cancel=True)
+            if (side is None and self.route in ('left', 'right') and
+                    self._gate_delay > 0 and self._held):
+                # Sound stops (stereo, or lost): play what is held up to the
+                # first packet waiting to be cut, then fall silent, then stop.
+                self._start_drain_locked()
+                return
+            changed = side != self.route
+            self.route = side
             if changed:
+                self._held.clear()
+                self._held_end = None
                 self.buffer.clear()
                 self._queued_sample_end = None
                 self._queued_last_sample = None

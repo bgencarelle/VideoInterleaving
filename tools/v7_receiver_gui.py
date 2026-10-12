@@ -229,7 +229,7 @@ HIDDEN_DECODE_OPTIONS = frozenset((
     'direction', 'fixture', 'experimental_fold',
     'experimental_mono_fold', 'experimental_mono_colour',
     'mono_compatible',
-    'mono_video_side', 'profile_ui', 'decode_batch', 'decode_history',
+    'profile_ui', 'decode_batch', 'decode_history',
     'no_tail_memory', 'force_float32', 'pilot_timing',
     'tone_equalization'))
 
@@ -454,7 +454,7 @@ def _field_label(action):
         'tone_equalization': 'Tone equalization',
         'experimental_fold': 'Fold profile',
         'experimental_mono_fold': 'Experimental mono video fold',
-        'mono_video_side': 'Mono video input side',
+        'mono_video_side': 'Mono picture side',
         'aspect_layout': 'Aspect layout',
         'temporal_fusion': 'Held-picture averaging',
     }
