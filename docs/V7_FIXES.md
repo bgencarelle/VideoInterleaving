@@ -202,6 +202,28 @@ Copy this and fill it in. Leave out what is not known; do not guess lines.
      The receiver weights carriers by it; the sender keeps important carriers
      above what the codec drops. The pilot tones already serve as the
      calibration signal; no new packet.
+- Fourth pass (not reviewed by owner): next step 1 is in the receiver
+  (`animation_modem/v7_cancel.py`, called from `v7.decode_frame`;
+  `V7_CANCEL=0` turns it off). Per packet the chain's bend is fitted on the
+  scattered pilots as a sum of odd piecewise-linear hinges of the signal
+  after one of four pre-emphasis curves (flat, 50, 70, 120 us; best fit
+  wins), the packet is rebuilt from its most trusted carriers plus the
+  known pilots, the predicted distortion is subtracted in three widening
+  tiers, and the channel is measured again. Kept only if it removes at least
+  15% of the pilots' error, so clean packets are untouched. Compiled; about
+  5 ms a packet; warmed up before audio starts. Live, 96 kHz, default gates,
+  test frame through a cassette recorded over a normal level: clean 14.6 ->
+  14.6 dB (no packet changed); +4 dB 14.3 -> 14.5; +8 dB 11.3 -> 12.1 (pilot
+  noise 1.01 -> 0.75); +12 dB nothing shown -> 45 of 50 shown at 10.3 dB.
+  A polynomial bend explained about half as much as the hinges. Codec map
+  (step 2) not started.
+  CPU: decode time per packet 2 ms without it; with it, packets whose pilot
+  noise is under 0.03 are skipped (clean: 2.2 ms), and the pre-emphasis
+  curve is chosen on the first 8 packets worked on and then reused
+  (re-searched every 256): hot packets 8.6 to 10.4 ms (were 13 to 14), about
+  10% of one core at 12 packets a second on the 2-core test machine. The
+  first run after an update compiles the kernels (about 10 s) before audio
+  starts.
 
 
 ### 13. The photo score marks a sharper picture as worse

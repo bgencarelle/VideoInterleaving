@@ -4740,6 +4740,16 @@ def _run_receive_session(args, fold, mono_wire=None, adaptive_profile=None,
             if args.diagnostics and not args.no_log:
                 print({'status': 'reacquiring', **info}, flush=True)
 
+    if P.CANCEL:
+        # Compile the distortion-cancelling kernels before audio starts, so
+        # the first packets are not lost to compilation (fixes list item 28).
+        _warm = P.load_model(.1, 'box')
+        _z = np.zeros((P.F, P.N//2+1, 2), complex)
+        _h = np.zeros((P.F, P.N//2+1, 2, 2), complex)
+        _h[..., 0, 0] = _h[..., 0, 1] = _h[..., 1, 0] = 2**-.5
+        _h[..., 1, 1] = -2**-.5
+        P._cancel(_warm, _z+1e-3, _h, None)
+        P._CANCEL_STATE['votes'] = None
     try:
         stream = sd.InputStream(samplerate=capture_rate, channels=input_channels,
                                 dtype='float32',

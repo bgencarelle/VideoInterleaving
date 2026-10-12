@@ -3342,6 +3342,53 @@ def _gate_floor(model, force_float32=False):
     return cache[key]
 
 
+# Fixes list item 28: cancel the transmission chain's own distortion before
+# decoding (animation_modem/v7_cancel.py). V7_CANCEL=0 turns it off.
+CANCEL = __import__('os').environ.get('V7_CANCEL', '1') != '0'
+
+
+def _cancel_tables(model):
+    cache = model.__dict__.setdefault('_receive_cache', {})
+    if 'cancel' not in cache:
+        from animation_modem import v7_cancel
+        synth, analysis, resp, inv = v7_cancel.matrices(N, N//2+1, RATE)
+        is_pilot = np.ascontiguousarray(np.abs(SCATTERED_PILOTS).sum(axis=2) > 0)
+        is_data = np.zeros(F*(N//2+1), bool)
+        for cells in (CELLS_I, CELLS_Q):
+            is_data[np.asarray(cells)//2] = True
+        is_data = np.ascontiguousarray(is_data.reshape(F, N//2+1) & ~is_pilot)
+        cache['cancel'] = (v7_cancel, synth, analysis, resp, inv, is_pilot, is_data,
+                           np.ascontiguousarray(SCATTERED_PILOTS.astype(complex)),
+                           np.ascontiguousarray(np.asarray(model.phase, complex)))
+    return cache['cancel']
+
+
+_CANCEL_STATE = {'votes': None, 'worked': 0, 'fixed': -1}
+
+
+def _cancel(model, Z, H, erased):
+    """(Z', before, after, emphasis, kept). The emphasis curve is searched
+    on the first packets worked on, then fixed (re-searched now and then)."""
+    (mod, synth, analysis, resp, inv, is_pilot, is_data, pilots,
+     phase) = _cancel_tables(model)
+    state = _CANCEL_STATE
+    if state['votes'] is None or len(state['votes']) != len(resp):
+        state['votes'], state['worked'], state['fixed'] = np.zeros(len(resp)), 0, -1
+    if state['worked'] % mod.RESEARCH == 0:
+        state['votes'][:], state['fixed'] = 0, -1
+    gone = (np.zeros(F, bool) if erased is None else np.asarray(erased, bool))
+    out = mod.cancel_packet(
+        np.ascontiguousarray(Z, complex), np.ascontiguousarray(H, complex), pilots,
+        is_pilot, is_data, gone, phase, float(model.scale), resp, inv, synth,
+        analysis, mod.ORDERS, mod.TIERS, mod.MIN_GAIN, int(state['fixed']))
+    state['worked'] += 1
+    if state['fixed'] < 0 and out[3] >= 0:
+        state['votes'][out[3]] += 1
+        if state['votes'].sum() >= mod.SEARCH:
+            state['fixed'] = int(np.argmax(state['votes']))
+    return out
+
+
 def decode_frame(model, x, tmap, counter, prev_tail, cancel=True,
                  diagnostics=None, direct_body=None, force_float32=False,
                  pilot_timing='baseline', pilot_counter=None,
@@ -3398,50 +3445,68 @@ def decode_frame(model, x, tmap, counter, prev_tail, cancel=True,
         diagnostics.setdefault('stage_ms', {}).setdefault('sample_fft', []).append(
             (perf_counter()-stage_started)*1000)
     stage_started = perf_counter()
-    timing_metrics = {}
-    if pilot_timing == 'baseline':
-        H, timing_diag = channel_joint(
-            Z, force_float32=force_float32, return_timing_diag=True)
-        timing_metrics['pilot_residual'] = timing_diag['pilot_residual']
-        timing_metrics['timing_residual_samples'] = (
-            timing_diag['timing_residual_samples'])
-    else:
-        H, timing_diag = channel_joint(
-            Z, force_float32=force_float32, pilot_timing=pilot_timing,
-            model=model, counter=(counter if pilot_counter is None
-                                  else pilot_counter),
-            return_timing_diag=True)
-        timing_metrics['pilot_timing'] = timing_diag
-        timing_metrics['pilot_residual'] = timing_diag['pilot_residual']
-        timing_metrics['timing_residual_samples'] = (
-            timing_diag['timing_residual_samples'])
-    fade_input = Z
-    if erased is not None:
-        # The per-symbol fade refit and pilot residual see the fitted pilots
-        # on missing symbols, so they neither correct nor smear noise there.
-        fade_input = Z.copy()
-        for symbol in np.flatnonzero(erased):
-            bins = PILOT_PAD_BINS[symbol][PILOT_PAD_VALID[symbol]]
-            values = PILOT_PAD_VALUES[symbol][PILOT_PAD_VALID[symbol]]
-            fade_input[symbol, bins, :] = np.einsum(
-                'pci,pi->pc', H[symbol, bins], values)
-    H, noise, tone_eq_diag = fade_and_noise(
-        fade_input, H, force_float32=force_float32,
-        tone_reference=(tone_equalization == 'm-reference'),
-        return_tone_diag=True)
-    # The quality gates judge the pilot residual against the pilots' own
-    # received power, so they do not depend on the input level. (The
-    # equaliser below keeps the absolute residual, which it weighs against H
-    # in the same units.)
-    pilot_noise = noise/_pilot_reference_power(H)[None, :]
-    stereo_erasures = _stereo_erasure_mask(pilot_noise)
-    if erased is not None:
-        stereo_erasures[erased, :] = True
-    effective_noise = _effective_pilot_noise(pilot_noise, stereo_erasures)
-    # The affected observation is absent only for these OFDM symbols. Keep the
-    # other channel and the rest of this leg's packet in the joint solve.
-    noise[stereo_erasures] = np.maximum(
-        1.0, np.max(noise)*1e6)
+    def _channel(Z):
+        timing_metrics = {}
+        if pilot_timing == 'baseline':
+            H, timing_diag = channel_joint(
+                Z, force_float32=force_float32, return_timing_diag=True)
+            timing_metrics['pilot_residual'] = timing_diag['pilot_residual']
+            timing_metrics['timing_residual_samples'] = (
+                timing_diag['timing_residual_samples'])
+        else:
+            H, timing_diag = channel_joint(
+                Z, force_float32=force_float32, pilot_timing=pilot_timing,
+                model=model, counter=(counter if pilot_counter is None
+                                      else pilot_counter),
+                return_timing_diag=True)
+            timing_metrics['pilot_timing'] = timing_diag
+            timing_metrics['pilot_residual'] = timing_diag['pilot_residual']
+            timing_metrics['timing_residual_samples'] = (
+                timing_diag['timing_residual_samples'])
+        fade_input = Z
+        if erased is not None:
+            # The per-symbol fade refit and pilot residual see the fitted pilots
+            # on missing symbols, so they neither correct nor smear noise there.
+            fade_input = Z.copy()
+            for symbol in np.flatnonzero(erased):
+                bins = PILOT_PAD_BINS[symbol][PILOT_PAD_VALID[symbol]]
+                values = PILOT_PAD_VALUES[symbol][PILOT_PAD_VALID[symbol]]
+                fade_input[symbol, bins, :] = np.einsum(
+                    'pci,pi->pc', H[symbol, bins], values)
+        H, noise, tone_eq_diag = fade_and_noise(
+            fade_input, H, force_float32=force_float32,
+            tone_reference=(tone_equalization == 'm-reference'),
+            return_tone_diag=True)
+        # The quality gates judge the pilot residual against the pilots' own
+        # received power, so they do not depend on the input level. (The
+        # equaliser below keeps the absolute residual, which it weighs against H
+        # in the same units.)
+        pilot_noise = noise/_pilot_reference_power(H)[None, :]
+        stereo_erasures = _stereo_erasure_mask(pilot_noise)
+        if erased is not None:
+            stereo_erasures[erased, :] = True
+        effective_noise = _effective_pilot_noise(pilot_noise, stereo_erasures)
+        # The affected observation is absent only for these OFDM symbols. Keep the
+        # other channel and the rest of this leg's packet in the joint solve.
+        noise[stereo_erasures] = np.maximum(
+            1.0, np.max(noise)*1e6)
+        return (H, noise, timing_metrics, tone_eq_diag, pilot_noise,
+                stereo_erasures, effective_noise)
+
+    (H, noise, timing_metrics, tone_eq_diag, pilot_noise, stereo_erasures,
+     effective_noise) = _channel(Z)
+    if (CANCEL and not force_float32 and
+            float(np.max(effective_noise)) >= _cancel_tables(model)[0].SKIP_BELOW):
+        # The chain's own distortion, fitted on the pilots and removed
+        # (v7_cancel); the channel is then measured again on what is left.
+        Z2, before, after, chosen, kept = _cancel(model, Z, H, erased)
+        timing_metrics['cancel'] = (float(before), float(after), int(chosen))
+        if kept:
+            Z = Z2
+            cancel_diag = timing_metrics['cancel']
+            (H, noise, timing_metrics, tone_eq_diag, pilot_noise,
+             stereo_erasures, effective_noise) = _channel(Z)
+            timing_metrics['cancel'] = cancel_diag
     if tone_equalization != 'off':
         timing_metrics['tone_equalization'] = tone_eq_diag
     if diagnostics is not None:
