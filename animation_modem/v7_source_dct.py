@@ -9,6 +9,7 @@ from functools import lru_cache
 
 import math
 
+import os
 import numpy as np
 from numba import njit, prange
 from scipy.fft import dctn, idctn
@@ -854,6 +855,36 @@ def _tone_lut_fixed(brightness, gamma):
     return table
 
 
+# The direct encode's pre-shrink averages light, not gamma-coded values: a
+# fine bright-on-dark pattern keeps its brightness instead of sinking toward
+# the code mean (half-on 1-pixel lines: code 188, not 127), and a Siemens
+# star's centre goes an even grey instead of a dark blot. About 0.4 ms more
+# per 1080p frame. V7_LINEAR_PRESHRINK=0 at the sender averages codes again.
+# (With it, luma adjustment's target is the linear light either way.)
+LINEAR_PRESHRINK = os.environ.get('V7_LINEAR_PRESHRINK', '1') != '0'
+
+
+@lru_cache(maxsize=16)
+def _linear_lut_fixed(brightness, gamma):
+    toned = _tone_lut(brightness, gamma)
+    light = np.where(toned <= .04045, toned/12.92,
+                     ((toned+.055)/1.055)**2.4)
+    table = np.rint(light*FIXED_ONE).astype(np.int64)
+    table.setflags(write=False)
+    return table
+
+
+@njit(cache=True, nogil=True)
+def _srgb_encode(plane):
+    out = np.empty_like(plane)
+    for i in range(plane.shape[0]):
+        for j in range(plane.shape[1]):
+            v = min(max(plane[i, j], 0.0), 1.0)
+            out[i, j] = (12.92*v if v <= .0031308 else
+                         1.055*v**(1.0/2.4)-.055)
+    return out
+
+
 @njit(cache=True, nogil=True)
 def _toned_block_means_u8(data, lut, block_y, block_x, out_rows, out_cols):
     """Tone uint8 RGB through the fixed-point ``lut`` and average
@@ -1204,7 +1235,15 @@ def _direct_planes(rgb, grids, shapes, brightness, gamma, sharpen,
     decimate_y = height % (2*block_y) == 0 and rows//2 >= 1.75*luma_rows
     decimate_x = width % (2*block_x) == 0 and cols//2 >= 1.75*luma_cols
 
-    if data.dtype == np.uint8:
+    linear_shrink = LINEAR_PRESHRINK and data.dtype == np.uint8
+    if linear_shrink:
+        # Average the light, not the gamma-coded values: tone, decode to
+        # linear, block-average and decimate, then code back (below).
+        data = np.ascontiguousarray(data)
+        means = _toned_block_means_u8(
+            data, _linear_lut_fixed(brightness, gamma), block_y, block_x,
+            rows, cols)
+    elif data.dtype == np.uint8:
         # One compiled signature for every capture layout (mss hands over
         # strided BGRA->RGB views); the sender's warm-up compiles this one.
         data = np.ascontiguousarray(data)
@@ -1234,6 +1273,8 @@ def _direct_planes(rgb, grids, shapes, brightness, gamma, sharpen,
     if decimate_y or decimate_x:
         means = [_decimate(plane, decimate_y, decimate_x) for plane in means]
         rows, cols = means[0].shape
+    if linear_shrink:
+        means = [_srgb_encode(plane) for plane in means]
     red, green, blue = (np.ascontiguousarray(plane) for plane in means)
     target = (source_luminance(means, grids[0], light)
               if luminance and len(grids) == 3 else None)

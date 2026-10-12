@@ -197,12 +197,13 @@ FIELD_HELP = {
                     'luminance with the colour the receiver will show. Keeps '
                     'saturated edges from darkening or ringing. Sender only. '
                     'Recommended (default).'),
-    'pixel_encode': ('Send the picture as hard pixels on the wire\'s own '
+    'pixel_encode': ('Instead of Direct DCT: send the picture as hard '
+                     'pixels on the wire\'s own '
                      'pixel grid, exactly. Pixel art at a whole multiple of '
                      'the grid passes unchanged. On Aspect Fold 500 the grid '
                      'follows the picture shape (see Pixel grid); on Fold '
                      '500 it is 40×48. Use the receiver\'s Pixel display. '
-                     'Turns off the DCT enhancements and luma adjustment.'),
+                     'Turning it on turns Direct DCT off, and back.'),
     'pixel_grid': ('Pixel encode on Aspect Fold 500. Robust fits the '
                    'ordinary slots and stays exact on tape and MP3: 52×36 '
                    'for 3:2, 58×32 for 16:9, 50×38 for 4:3, 42×42 square. '
@@ -404,6 +405,9 @@ def _load_sender_preferences(path):
                 settings.pop(key, None)
         # The tail is the profile's now, not a setting (fixes list item 9).
         settings.pop('aspect_tail', None)
+        if settings.get('pixel_encode') is True:
+            # Pixel encode used to sit inside Direct DCT; it is its own now.
+            settings['dct_encode'] = False
         if version < 6:
             if settings.get('dct_kernel', 'reference') == 'reference':
                 settings.pop('dct_kernel', None)
@@ -1260,6 +1264,18 @@ def validate_settings(settings, devices, sd_module=None, audio_devices=()):
         raise ValueError('Choose a supported pixel grid.')
     dct_strength, dct_clarity, dct_chroma_gain = .25, 0.0, 1.0
     dct_preshrink = 4.0
+    pixel_encode = bool(settings.get('pixel_encode', False))
+    if pixel_encode:
+        if dct_encode:
+            raise ValueError('Pixel encode and Direct DCT are two different '
+                             'encodes; choose one.')
+        if profile not in DCT_PROFILES:
+            raise ValueError('Pixel encode requires a folded profile.')
+        if encode_filter != 'box':
+            raise ValueError('Pixel encode requires the Box encode filter.')
+        if perceptual_resize != 'off':
+            raise ValueError('Pixel encode cannot be combined with the '
+                             'pre-encode downscaler.')
     if dct_encode:
         if profile not in DCT_PROFILES:
             raise ValueError('Direct DCT encode requires a folded profile.')
@@ -1421,10 +1437,10 @@ def validate_settings(settings, devices, sd_module=None, audio_devices=()):
         'dct_encode': dct_encode,
         'clip_aware': bool(settings.get('clip_aware', False)),
         'luma_adjust': (bool(settings.get('luma_adjust', True)) and
-                        profile not in ('adaptive-mono-nested',
+                        dct_encode and profile not in ('adaptive-mono-nested',
                                         'adaptive-stereo-nested')),
         'luma_adjust_linear': bool(settings.get('luma_adjust_linear', False)),
-        'pixel_encode': bool(settings.get('pixel_encode', False)),
+        'pixel_encode': pixel_encode,
         'pixel_detail': pixel_detail,
         'pixel_grid': pixel_grid,
         'aspect_layout': aspect_layout,
@@ -1496,7 +1512,16 @@ def build_command(settings, devices, sd_module=None, python=None,
         if checked['perceptual_detail_strength'] != 0.25:
             command.extend(('--perceptual-detail-strength',
                             str(checked['perceptual_detail_strength'])))
-    if not checked['dct_encode']:
+    if checked['pixel_encode']:
+        # Its own encode: the sender reads the full-size source for it and
+        # sends the pixels as they are (no kernel, no luma adjustment).
+        command.append('--pixel-encode')
+        if checked['pixel_detail'] != 'average':
+            command.extend(('--pixel-detail', checked['pixel_detail']))
+        if (checked['profile'] == 'aspect-fold-500' and
+                checked['pixel_grid'] != 'robust'):
+            command.extend(('--pixel-grid', checked['pixel_grid']))
+    elif not checked['dct_encode']:
         # A downscaler already rules Direct DCT out on the command line.
         if checked['perceptual_resize'] == 'off':
             command.append('--no-dct-encode')
@@ -1525,13 +1550,6 @@ def build_command(settings, devices, sd_module=None, python=None,
             command.extend(('--dct-kernel', 'reference'))
         for folder in KERNEL_DIRS:
             command.extend(('--dct-kernel-dir', str(folder)))
-        if checked['pixel_encode']:
-            command.append('--pixel-encode')
-            if checked['pixel_detail'] != 'average':
-                command.extend(('--pixel-detail', checked['pixel_detail']))
-            if (checked['profile'] == 'aspect-fold-500' and
-                    checked['pixel_grid'] != 'robust'):
-                command.extend(('--pixel-grid', checked['pixel_grid']))
         if not checked['luma_adjust']:
             command.append('--no-luma-adjust')
         else:
@@ -2443,18 +2461,17 @@ class SenderGui:
             dest in ('screen_backend', 'region') and source != 'screen' or
             dest == 'perceptual_detail_strength' and
             self.settings['perceptual_resize'] == 'off' or
-            dest == 'perceptual_resize' and self.settings['dct_encode'] or
-            dest == 'dct_encode' and
+            dest == 'perceptual_resize' and (
+                self.settings['dct_encode'] or
+                self.settings.get('pixel_encode')) or
+            dest in ('dct_encode', 'pixel_encode') and
             self.settings['profile'] not in DCT_PROFILES or
             dest in ('dct_sharpen', 'dct_clarity', 'dct_chroma_gain',
                      'dct_preshrink',
-                     'luma_adjust', 'pixel_encode', 'dct_kernel') and
+                     'luma_adjust', 'dct_kernel') and
             not self.settings['dct_encode'] or
-            dest == 'pixel_detail' and not (
-                self.settings['dct_encode'] and
-                self.settings.get('pixel_encode')) or
+            dest == 'pixel_detail' and not self.settings.get('pixel_encode') or
             dest == 'pixel_grid' and not (
-                self.settings['dct_encode'] and
                 self.settings.get('pixel_encode') and
                 self.settings['profile'] == 'aspect-fold-500') or
             # Pixel encode sends the pixels as they are: no enhancement.
@@ -2465,8 +2482,12 @@ class SenderGui:
             self.settings.get('pixel_encode') or
             # Direct DCT encode takes the frame at its own size: the capture
             # scaler and width do nothing (mouse-follow still uses the width).
-            dest == 'capture_filter' and self.settings['dct_encode'] or
-            dest == 'capture_width' and self.settings['dct_encode'] and
+            dest == 'capture_filter' and (
+                self.settings['dct_encode'] or
+                self.settings.get('pixel_encode')) or
+            dest == 'capture_width' and (
+                self.settings['dct_encode'] or
+                self.settings.get('pixel_encode')) and
             source != 'mouse-follow' or
             dest == 'luma_adjust_linear' and not (
                 self.settings['dct_encode'] and
@@ -2915,11 +2936,20 @@ class SenderGui:
                 self.settings['perceptual_resize'] = 'off'
             if value not in DCT_PROFILES:
                 self.settings['dct_encode'] = False
+                self.settings['pixel_encode'] = False
         elif dest == 'dct_encode' and value:
-            # The direct encode replaces the resize the downscaler shapes.
+            # The direct encode replaces the resize the downscaler shapes,
+            # and Pixel encode is the other full-size encode.
             self.settings['perceptual_resize'] = 'off'
+            self.settings['pixel_encode'] = False
+        elif dest == 'pixel_encode':
+            self.settings['perceptual_resize'] = 'off'
+            # Off again goes back to the default encode, Direct DCT.
+            self.settings['dct_encode'] = (not value and
+                                           self.settings['profile'] in DCT_PROFILES)
         elif dest == 'perceptual_resize' and value != 'off':
             self.settings['dct_encode'] = False
+            self.settings['pixel_encode'] = False
         elif dest == 'device':
             self.output_device_identity = _device_identity(self._device())
         elif dest == 'source_audio_device':
@@ -3780,6 +3810,7 @@ class SenderGui:
         facts = [source, profile.split(' · ')[0],
                  (device.name if device else 'No output') + ' · ' +
                  device_rate_text(device),
+                 'Pixel' if settings.get('pixel_encode') else
                  'Direct DCT' if settings.get('dct_encode') else 'Resize']
         if settings.get('profile') in ASPECT_PROFILES:
             layout = settings.get('aspect_layout', 'auto')

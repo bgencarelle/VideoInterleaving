@@ -453,13 +453,24 @@ class SenderGuiTests(unittest.TestCase):
         gui.settings.update(source='video', dct_encode=False)
         self.assertIn('capture_filter', gui._visible_fields())
         self.assertIn('capture_width', gui._visible_fields())
-        # Pixel encode hides the enhancements it turns off.
-        gui.settings.update(dct_encode=True, pixel_encode=True)
+        # Pixel encode is offered next to Direct DCT, not inside it, and
+        # hides the Direct DCT enhancements and the capture scaler.
+        gui.settings.update(dct_encode=False, pixel_encode=False)
+        self.assertIn('pixel_encode', gui._visible_fields())
+        gui._assign('pixel_encode', True)
+        self.assertFalse(gui.settings['dct_encode'])
         visible = gui._visible_fields()
         self.assertIn('pixel_encode', visible)
+        self.assertIn('pixel_detail', visible)
         for dest in ('luma_adjust', 'luma_adjust_linear', 'dct_sharpen',
-                     'dct_clarity', 'dct_chroma_gain'):
+                     'dct_clarity', 'dct_chroma_gain', 'dct_kernel',
+                     'capture_filter', 'capture_width'):
             self.assertNotIn(dest, visible)
+        gui._assign('pixel_encode', False)        # back to Direct DCT
+        self.assertTrue(gui.settings['dct_encode'])
+        gui._assign('pixel_encode', True)
+        gui._assign('dct_encode', True)           # and Direct DCT turns it off
+        self.assertFalse(gui.settings['pixel_encode'])
         gui.settings.update(pixel_encode=False, source='camera')
         self.assertNotIn('baseline', tuple(value for _label, value in
                                            gui._choices('profile')))
@@ -547,10 +558,17 @@ class SenderGuiTests(unittest.TestCase):
             'pixel_detail': 'average'})
         self.assertNotIn('--luma-adjust-linear', command)
         self.assertNotIn('--pixel-encode', command)
-        self.settings.update(pixel_encode=True)
+        self.settings.update(pixel_encode=True, dct_encode=False)
         command = build_command(self.settings, self.devices, self.sd)
         args = v7_live.parser().parse_args(command[2:])
         self.assertTrue(v7_live._dct_encode_options(args)['pixel'])
+        # Pixel encode stands alone on the command line.
+        for flag in ('--dct-encode', '--no-dct-encode', '--dct-kernel',
+                     '--no-luma-adjust'):
+            self.assertNotIn(flag, command)
+        v7_live._apply_encode_defaults(args, 500)
+        self.assertTrue(args.dct_encode)          # full-size source path
+        self.assertFalse(args.luma_adjust)
         self.assertNotIn('--pixel-detail', command)
         self.settings.update(pixel_detail='crisp')
         command = build_command(self.settings, self.devices, self.sd)
@@ -569,7 +587,7 @@ class SenderGuiTests(unittest.TestCase):
         self.assertNotIn(
             '--pixel-grid', build_command(self.settings, self.devices, self.sd))
         self.settings.update(profile=profile, pixel_grid='robust')
-        self.settings.update(pixel_encode=False)
+        self.settings.update(pixel_encode=False, dct_encode=True)
         self.settings.update(luma_adjust=True, luma_adjust_linear=True)
         command = build_command(self.settings, self.devices, self.sd)
         args = v7_live.parser().parse_args(command[2:])
@@ -1147,7 +1165,7 @@ class SenderGuiTests(unittest.TestCase):
 
     def test_pixel_choices_open_as_dropdowns(self):
         gui = SenderGui(self.devices)
-        gui.settings.update(profile='aspect-fold-500', dct_encode=True,
+        gui.settings.update(profile='aspect-fold-500', dct_encode=False,
                             pixel_encode=True)
         for dest in ('pixel_detail', 'pixel_grid'):
             self.assertIn(dest, gui.DROPDOWN_FIELDS)
@@ -1714,6 +1732,11 @@ class SenderGuiButtonLayoutTests(unittest.TestCase):
                 self._click(gui, f'field:{dest}')
                 changed = {key for key in before
                            if gui.settings[key] != before[key]}
+                # Pixel encode and Direct DCT are the two full-size encodes:
+                # turning one on turns the other off.
+                partner = {'pixel_encode': 'dct_encode',
+                           'dct_encode': 'pixel_encode'}.get(dest)
+                changed.discard(partner)
                 self.assertEqual(changed, {dest}, dest)
                 self.assertEqual(gui.settings[dest], not before[dest])
                 self.assertIsNone(gui.dropdown)

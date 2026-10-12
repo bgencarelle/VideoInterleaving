@@ -30,6 +30,38 @@ from modem_v7_display import (
     encode_folded_coefficients_packet, encode_folded_source_packet)
 
 
+from animation_modem import v7_source_dct as _source_dct
+
+
+def setUpModule():
+    # These tests pin the encoder to its gamma-coded averaging spec; the
+    # shipped linear-light pre-shrink has its own test below.
+    global _LINEAR
+    _LINEAR = _source_dct.LINEAR_PRESHRINK
+    _source_dct.LINEAR_PRESHRINK = False
+
+
+def tearDownModule():
+    _source_dct.LINEAR_PRESHRINK = _LINEAR
+
+
+class LinearPreshrinkTests(unittest.TestCase):
+    def test_fine_lines_keep_their_light(self):
+        frame = np.zeros((960, 800, 3), np.uint8)
+        frame[:, ::2] = 255                 # half-on 1-pixel lines
+        luma = v7.V7_GRIDS[0][0]*v7.V7_GRIDS[0][1]
+        means = {}
+        for linear in (False, True):
+            _source_dct.LINEAR_PRESHRINK = linear
+            try:
+                values = direct_dct_values(frame, v7.V7_GRIDS, v7.V7_SHAPES)
+            finally:
+                _source_dct.LINEAR_PRESHRINK = False
+            means[linear] = (values[:luma].mean()+1)*127.5
+        self.assertAlmostEqual(means[False], 127.5, delta=2)
+        self.assertAlmostEqual(means[True], 187.5, delta=3)   # half the light
+
+
 class SourceDCTTests(unittest.TestCase):
     def test_viewport_crop_excludes_letterbox_bars(self):
         aspect = .75

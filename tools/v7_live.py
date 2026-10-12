@@ -1280,6 +1280,21 @@ def _apply_encode_defaults(args, profile_slots):
     An explicit --dct-encode/--no-dct-encode or --luma-adjust/--no-luma-adjust
     is left alone (and refused later if the wire cannot do it).
     """
+    if getattr(args, 'pixel_encode', False):
+        # Pixel encode is its own picture encode, not a Direct DCT option.
+        # It reads the full-size source like the direct path does, so the
+        # unprepared-source plumbing (``dct_encode``) is switched on for it.
+        if getattr(args, '_pixel_resolved', False):
+            return                          # this runs once per profile pass
+        if getattr(args, 'dct_encode', None) is not None:
+            raise ValueError('--pixel-encode is its own encode; drop '
+                             '--dct-encode / --no-dct-encode')
+        if getattr(args, 'luma_adjust', None):
+            raise ValueError('--luma-adjust does not apply to --pixel-encode')
+        args.dct_encode = True
+        args.luma_adjust = False
+        args._pixel_resolved = True
+        return
     if getattr(args, 'dct_encode', None) is None:
         args.dct_encode = bool(
             SENDER_DEFAULTS['dct_encode'] and profile_slots == 500 and
@@ -1438,6 +1453,8 @@ def _run_send_session(args):
     kernel_registry = K.open_registry(getattr(args, 'dct_kernel_dir', None) or ())
     try:
         kernel_name = getattr(args, 'dct_kernel', None)
+        if kernel_name is None and dct_options.get('pixel'):
+            kernel_name = K.REFERENCE      # pixels are sent as they are
         if kernel_name is None:
             # The default follows the profile as named (a nested fold has its
             # own); kernel parameter defaults follow the wire it rides on.
@@ -1912,8 +1929,9 @@ def _run_send_session(args):
                     defer_kernel_gain=(fold is not None and
                                        not luma_adjusted and not clip_aware),
                     deferred_gains_out=deferred_gains,
-                    adaptive_source_area=bool(getattr(
-                        args, 'adaptive_nested_family', False)))
+                    adaptive_source_area=bool(
+                        getattr(args, 'adaptive_nested_family', False) and
+                        not frame_options.get('pixel')))
                 report_kernel(frame_options.get('kernel'))
                 if image_preview_port is not None:
                     value, aspect, resized_preview = processed
@@ -2199,7 +2217,14 @@ def _run_send_session(args):
             if not args.no_log:
                 camera_text = (f'camera={args.ffmpeg_input or args.camera} '
                                if args.source == 'camera' else '')
-                if (args.source == 'camera' and
+                if (getattr(args, 'dct_encode', False) and
+                        args.source in ('camera', 'video', 'screen') and
+                        not (args.source == 'screen' and
+                             args.screen_backend == 'mss')):
+                    # Direct DCT and Pixel encode read the frame at its own
+                    # size: FFmpeg's width and scaler are not used.
+                    capture_text = 'full-size'
+                elif (args.source == 'camera' and
                         getattr(args, 'perceptual_resize', 'off') == 'off'):
                     capture_text = f'80x96/{_capture_scale_flags(args)}'
                 elif args.source == 'local':
@@ -4936,7 +4961,8 @@ def parser():
               'coloured edges from darkening or ringing; sender only)'))
     send.add_argument(
         '--pixel-encode', action='store_true',
-        help=('with --dct-encode: send the picture area-averaged to the '
+        help=('picture encode of its own (instead of Direct DCT): send '
+              'the picture area-averaged to the '
               "wire's own pixel grid, exactly (hard pixels; pixel art at a "
               'whole multiple of the grid passes unchanged). On '
               'aspect-fold-500 the grid follows the picture shape (see '
