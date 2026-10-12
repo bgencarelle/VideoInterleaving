@@ -519,7 +519,10 @@ python main.py --mode modem --modem-dir images_modem \
   --device "BlackHole 2ch" --modem-channels 1,2
 ```
 
-`--modem-latency` defaults to `low`; callbacks contain 256 samples. The existing
+`--modem-latency` defaults to `high`, as the standalone sender's output does:
+with `low` a short slowdown (macOS throttling the app when its desktop is
+out of view) emptied the 2.7 ms buffer and dropped whole packets. The image
+clock already allows for the output delay. Callbacks contain 256 samples. The existing
 `--modem-time-offset-ms` hook now adds EXTRA receiver allowance to the scheduled
 target; it is no longer a manually guessed total transmission offset. Prefer
 `--modem-receive-margin-ms` to set the allowance directly, e.g. 30 on a slower

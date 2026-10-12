@@ -399,7 +399,11 @@ def configure_runtime():
                              "encoded at runtime (default: bake)")
     parser.add_argument("--modem-dir", help="RGBA modem bake from utilities/convert_to_modem_dct.py")
     parser.add_argument("--modem-channels", default="1,2", help="1-based stereo output pair")
-    parser.add_argument("--modem-latency", default="low", help="low, high, or seconds")
+    parser.add_argument("--modem-latency", default="high",
+                        help="low, high, or seconds (default high, as the V7 "
+                             "sender: a bigger output buffer rides out the "
+                             "system slowing the app down, e.g. on another "
+                             "desktop; the image clock allows for it)")
     parser.add_argument("--modem-time-offset-ms", type=float, default=0.0,
                         help="Additional receiver allowance; scheduled transmission is already compensated")
     parser.add_argument("--modem-receive-margin-ms", type=float, default=15.0,

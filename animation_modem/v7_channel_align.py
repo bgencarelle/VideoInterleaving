@@ -17,8 +17,10 @@ channel.
 """
 import numpy as np
 
-WINDOW_SECONDS = .4      # audio each measurement looks at
-EVERY_SECONDS = .25      # how often the offset is measured
+WINDOW_SECONDS = .2      # audio each measurement looks at (>= 2 packets)
+EVERY_SECONDS = .25      # how often the offset is measured until locked
+LOCKED_SECONDS = 2.0     # how often once several measurements agree
+LOCK_AFTER = 4           # agreeing measurements that count as locked
 MAX_SECONDS = .02         # largest offset searched (20 ms: a dragged track)
 MIN_CLARITY = 8.0        # peak against the median correlation magnitude
 AGREE = 2                # measurements that must agree before a change
@@ -28,7 +30,7 @@ def measure(left, right, max_lag):
     """(offset, clarity): how many samples ``right`` lags ``left`` (negative:
     it leads), by cross-correlation."""
     n = len(left)
-    size = 1 << int(np.ceil(np.log2(2*n)))
+    size = 1 << int(np.ceil(np.log2(n+max_lag+1)))
     a = np.fft.rfft(left-np.mean(left), size)
     b = np.fft.rfft(right-np.mean(right), size)
     # Plain correlation: the loud common part (the headers) dominates. A
@@ -51,6 +53,7 @@ class ChannelAligner:
         self.rate = float(rate)
         self.window = int(round(WINDOW_SECONDS*self.rate))
         self.every = int(round(EVERY_SECONDS*self.rate))
+        self.every_locked = int(round(LOCKED_SECONDS*self.rate))
         self.max_lag = max(1, int(round(MAX_SECONDS*self.rate)))
         self.offset = 0                  # applied: right lags left by this
         self.candidate, self.agreed = 0, 0
@@ -85,7 +88,8 @@ class ChannelAligner:
         # Measure on what arrives, before alignment.
         self.history = np.concatenate((self.history, block.astype(np.float32)))[-self.window:]
         self.since += len(block)
-        if self.since >= self.every:
+        locked = self.agreed >= LOCK_AFTER and self.candidate == self.offset
+        if self.since >= (self.every_locked if locked else self.every):
             self.since = 0
             self._remeasure()
         # Delay line: the leading channel waits |offset| samples.
