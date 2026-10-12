@@ -2060,6 +2060,12 @@ def _run_send_session(args):
                     frame = grab()
                 if frame is None and getattr(grab, 'ended', False):
                     break
+                # A file soundtrack is the clock: take the picture for the
+                # sound this packet will carry, chosen now, not on arrival.
+                timed = getattr(source_audio, 'picture', None)
+                timed = timed() if timed is not None else None
+                if timed is not None:
+                    frame = timed
                 report_playback()
                 current_tones = tone_controls.snapshot()
                 source_preview = (getattr(frame, 'rgb', frame)

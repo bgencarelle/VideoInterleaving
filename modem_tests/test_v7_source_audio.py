@@ -255,7 +255,7 @@ class SourceAudioTests(unittest.TestCase):
         self.assertIn('0:a:0?', command)
         self.assertIn('pcm_f32le', command)
         self.assertIn('48000', command)
-        self.assertIn('aresample=async=1:first_pts=0', command)
+        self.assertIn('aresample=async=1:min_hard_comp=0.005:first_pts=0', command)
         self.assertIn('-re', command)
         self.assertIn('-stream_loop', command)
 

@@ -300,7 +300,7 @@ class FFmpegSourceAudio:
             command += ['-ss', f'{start:.3f}']
         command += [
             '-i', self._source, '-map', '0:a:0?', '-vn', '-sn', '-dn',
-            '-af', 'aresample=async=1:first_pts=0',
+            '-af', 'aresample=async=1:min_hard_comp=0.005:first_pts=0',
             '-ac', '1', '-ar', str(self.sample_rate), '-c:a', 'pcm_f32le',
             '-f', 'f32le', 'pipe:1',
         ]
@@ -423,7 +423,17 @@ def _probe_stream_types(text):
 
 
 class SharedVideoAudioSource:
-    """One FFmpeg demux/clock feeding the video and embedded-audio paths."""
+    """One FFmpeg demux/clock feeding the video and embedded-audio paths.
+
+    With a soundtrack, the sound is the clock: FFmpeg writes pictures at a
+    fixed rate, so picture k belongs at k/PICTURE_RATE seconds, and each grab
+    hands over the picture for the next unplayed sample. A loop, a stall or
+    a backlog of sound can then never pull picture and sound apart.
+    """
+
+    PICTURE_RATE = 30
+    # Pictures kept so one for the sound's position is at hand (seconds).
+    PICTURE_RING_SECONDS = 1.0
 
     def __init__(self, source, sample_rate, width=320, scale_flags='bicubic',
                  live=None, target_samples=None, buffer_seconds=2.0,
@@ -513,6 +523,9 @@ class SharedVideoAudioSource:
         self._priming = False
         self._needs_reset = False
         self._reader = None
+        self._asked = self._reads = 0    # pictures taken, packets of sound read
+        self._packet_samples = (int(target_samples) if target_samples
+                                else round(int(sample_rate)*.08))
         try:
             os.mkfifo(self.video_path)
             if self.has_audio:
@@ -547,12 +560,14 @@ class SharedVideoAudioSource:
             self._source, self._width, self._scale_flags, self._preserve_size)
         if video_filter is not None:
             command += ['-vf', video_filter]
-        command += ['-fps_mode', 'passthrough', '-pix_fmt', 'rgb24',
+        command += (['-fps_mode', 'cfr', '-r', str(self.PICTURE_RATE)]
+                    if self.has_audio else ['-fps_mode', 'passthrough'])
+        command += ['-pix_fmt', 'rgb24',
                     '-c:v', 'ppm', '-f', 'image2pipe',
                     str(self.video_path)]
         if self.has_audio:
             command += [
-                '-map', '0:a:0', '-af', 'aresample=async=1:first_pts=0',
+                '-map', '0:a:0', '-af', 'aresample=async=1:min_hard_comp=0.005:first_pts=0',
                 '-ac', '1', '-ar', str(self.sample_rate),
                 '-c:a', 'pcm_f32le', '-f', 'f32le', str(self.audio_path),
             ]
@@ -611,6 +626,9 @@ class SharedVideoAudioSource:
             self._stop = stop
             self._ended = not self.has_audio
             self._priming = bool(prime and self.has_audio)
+            self._pushed = 0             # soundtrack samples since this launch
+            self._pictures = deque(maxlen=max(1, round(
+                self.PICTURE_RATE*self.PICTURE_RING_SECONDS)))
             self._audio_thread = None
             if self.has_audio:
                 self._audio_thread = threading.Thread(
@@ -628,7 +646,9 @@ class SharedVideoAudioSource:
                     target, target/self.sample_rate+.5,
                     lambda: self._ended or stop.is_set())
             try:
-                return _read_ppm(video_pipe)
+                frame = _read_ppm(video_pipe)
+                return (self._picture_for_sound(frame) if self.has_audio
+                        else frame)
             except RuntimeError as exc:
                 if tail:
                     code = proc.poll()
@@ -719,6 +739,39 @@ class SharedVideoAudioSource:
                     self.buffer.clear()
                 self._needs_reset = True
 
+    def _picture_for_sound(self, frame):
+        """Keep `frame` (picture k belongs at k/PICTURE_RATE s)."""
+        pictures = self._pictures
+        pictures.append((pictures[-1][0]+1 if pictures else 0, frame))
+        return frame
+
+    def picture(self):
+        """The picture for the packet being built now, or None.
+
+        The sender delays the sound by one packet, so this packet's picture is
+        on screen while the sound this packet will read plays. That sound
+        starts after what is already read and after the packets built but not
+        yet read; the picture is taken for its middle.
+        """
+        if not self.has_audio:
+            return None
+        pictures = list(self._pictures)
+        if not pictures:
+            return None
+        packet = self._packet_samples
+        pending = max(0, self._asked-self._reads)
+        self._asked += 1
+        # Samples pushed minus samples still queued: shed samples count too.
+        played = self._pushed-self.buffer.available
+        moment = played+pending*packet+packet/2
+        wanted = int(moment*self.PICTURE_RATE//self.sample_rate)
+        chosen = pictures[0][1]
+        for picture_index, picture in pictures:
+            if picture_index > wanted:
+                break
+            chosen = picture
+        return chosen
+
     def _pump_audio(self, pipe, stop):
         remainder = b''
         try:
@@ -730,6 +783,7 @@ class SharedVideoAudioSource:
                 usable = len(data)-(len(data) % 4)
                 if usable:
                     self.buffer.push(np.frombuffer(data[:usable], dtype='<f4'))
+                    self._pushed += usable//4
                 remainder = data[usable:]
         except (OSError, ValueError):
             pass
@@ -741,6 +795,8 @@ class SharedVideoAudioSource:
     def read(self, count):
         if not self.has_audio:
             return np.zeros(max(0, int(count)), dtype=np.float32)
+        self._reads += 1
+        self._packet_samples = max(1, int(count))
         silence = _transport_silence(self, count)
         return self.clock_match.read(count) if silence is None else silence
 
