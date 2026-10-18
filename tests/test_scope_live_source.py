@@ -186,6 +186,33 @@ class RuntimeScopeImageSourceTests(unittest.TestCase):
         second = self._wait_for_pair(source, 1, 0, 0)
         self.assertNotEqual(first.requested_at_ns, second.requested_at_ns)
 
+    def test_deadline_playback_keeps_exact_pairs_and_decode_timestamps(self):
+        source = RuntimeScopeImageSource(
+            [[str(self.main_path)] for _ in range(2)],
+            [[str(self.float_path)] for _ in range(2)], width=32)
+        self.addCleanup(source.close)
+        source.configure_deadlines(None, lambda:1/30)
+        source.prefetch(1,0,0)
+        pair = self._wait_for_pair(source,1,0,0)
+        self.assertIsNone(source.ready_pair(0,0,0))
+        self.assertLessEqual(pair.requested_at_ns,pair.decode_started_at_ns)
+        self.assertLessEqual(pair.decode_started_at_ns,pair.ready_at_ns)
+        self.assertLessEqual(source.snapshot()['deadline_preparation']['peak_pairs'],12)
+
+    def test_deadline_pair_survives_until_remaining_fields_have_consumed_it(self):
+        source = RuntimeScopeImageSource(
+            [[str(self.main_path)] for _ in range(2)],
+            [[str(self.float_path)] for _ in range(2)], width=32)
+        self.addCleanup(source.close)
+        source.configure_deadlines(None,lambda:1/60)
+        source.prefetch(0,0,0)
+        first=self._wait_for_pair(source,0,0,0)
+        source.prefetch(1,0,0)  # UI advances while the output finishes old fields.
+        self.assertIs(source.ready_pair(0,0,0),first)
+        second=self._wait_for_pair(source,1,0,0)
+        self.assertIsNot(first,second)
+        self.assertIsNone(source.ready_pair(0,0,0))
+
     def test_pair_cache_keeps_the_existing_thumbnail_memory_bound(self):
         source = RuntimeScopeImageSource(
             [[str(self.main_path)] for _ in range(5)],

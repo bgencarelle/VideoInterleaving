@@ -18,6 +18,21 @@ modem).
 
 If you leave out `--mode`, you get `local`.
 
+## Bake once for any mode
+
+The unified baker keeps face and float layers separate; playback still selects
+and composites them live:
+
+```bash
+.venv/bin/python utilities/bake.py -i images_sbs --modes all --estimate
+.venv/bin/python utilities/bake.py -i images_sbs -o images_bakes --modes all
+.venv/bin/python main.py --mode web --bake-dir images_bakes
+```
+
+Choose a subset with `--modes scope modem`, or any of the six modes above.
+Decoded display bakes trade substantially more disk space for less runtime decode
+work. See [unified bakes](docs/UNIFIED_BAKES.md) for formats, costs and playback.
+
 ## Install
 
 On Debian, Ubuntu or Raspberry Pi OS, one script installs everything:
@@ -197,6 +212,41 @@ To list your audio devices:
 ```bash
 .venv/bin/python -m sounddevice
 ```
+
+### Playback, recording and WAV files
+
+In the sender window, **Output mode** chooses live sending, sending while
+recording, or offline WAV export. **Playback and limits** provides packet,
+duration and video-pass limits, rotation and mirroring. Zero means unlimited
+for live runs; one video pass plays once and stops. Existing pause, seek and
+restart controls remain on the live page.
+
+```bash
+# Play a video once, then stop. --source-passes 3 sends three passes.
+./vi.modem-send --device "Your audio output" --source video \
+  --video-source clip.mp4 --no-loop
+
+# Export exactly 100 modem packets without opening an audio device.
+./vi.modem-send --source video --video-source clip.mp4 \
+  --write out.wav --frames 100 --rate 48000
+
+# Record the modem samples while sending a screen capture.
+./vi.modem-send --device "Your audio output" --source screen --record capture.wav
+
+# Decode a recording and save its pictures, without playing audio.
+./vi.modem-receive --read capture.wav --headless --save-dir decoded
+```
+
+Both sender and receiver accept a 1-based `--channels 3,4` pair. Left/right in
+a mono profile refers to the order within that pair. The sender GUI also offers
+an optional requested sample rate; blank follows the device setting.
+
+See [Playback and WAV workflows](docs/V7_PLAYBACK_FILE_IO.md) for limits,
+file formats and source-time behavior.
+
+Standalone V7 sessions use a one-worker BLAS budget to reduce CPU overhead in
+small matrix operations. See [Runtime CPU measurements](docs/V7_RUNTIME_CPU.md)
+for results and the `V7_BLAS_THREADS` override.
 
 ### Ways to send
 

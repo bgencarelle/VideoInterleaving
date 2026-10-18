@@ -770,6 +770,7 @@ for _s in range(F):
             SCATTERED_PILOTS[_s, _b] = PILOT_AMP*np.array([1, 1j*(-1)**_v])
 
 
+@lru_cache(maxsize=32)
 def windows(n_groups):
     """(group index within tier, member t) -> position in tier sequence."""
     pos = np.empty((n_groups, 8), int)
@@ -779,6 +780,7 @@ def windows(n_groups):
         for j in range(k):
             pos[start+j] = start*8 + j + k*np.arange(8)
         start += k
+    pos.setflags(write=False)
     return pos
 
 
@@ -1260,10 +1262,6 @@ def encode_pulse_frame_coeffs(model, coeffs, counter, aspect_code=0,
                                  10**(BODY_AUTO_LEVEL_MAX_DB/20)))
     header, _ = _shaped_preamble(int(pulse_profile_code))
     eof_mark = _shaped_eof_marker()
-    body_region = slice(PULSE.SYNC_LEN, PULSE.SYNC_LEN+FRAME)
-    header_region = slice(0, PULSE.SYNC_LEN)
-    metadata_region = slice(meta_start, meta_start+META_SYMBOL)
-    eof_region = slice(EOF_MARKER_OFFSET, PULSE_FRAME)
     body_below_eof_db = BODY_BELOW_EOF_DB
     if adaptive_profile:
         from tools.v7_adaptive_pipeline import BODY_LEVEL_BELOW_EOF_DB
@@ -1271,18 +1269,13 @@ def encode_pulse_frame_coeffs(model, coeffs, counter, aspect_code=0,
     body_ratio = 10**(-body_below_eof_db/20)
     metadata_ratio = 10**(-METADATA_BELOW_BODY_DB/20)
 
-    def assemble_unmixed(body_gain, metadata_gain):
-        packet = shaped*np.float32(body_gain)
-        packet += header
-        packet[metadata_region] += meta_pcm[:, None]*np.float32(metadata_gain)
-        packet += eof_mark
-        return packet
-
     # Both built-in and Fold-500 pilot overlays are body-RMS-scaled, so their
     # complete waveform can be measured once at unit body gain and then scaled
     # with the body during the limiter search. This keeps phase and tone mixing
     # in the measured packet without rebuilding the tone template each trial.
-    unit_packet = assemble_unmixed(1.0, 1.0)
+    from animation_modem.v7_packet_kernels import assemble_unmixed, limit_packet
+    unit_packet = assemble_unmixed(shaped, header, eof_mark, meta_pcm, meta_start,
+                                   1.0, 1.0)
     unit_mixed = unit_packet
     if pilot_tones:
         unit_mixed = _add_pilot_tones(
@@ -1294,50 +1287,12 @@ def encode_pulse_frame_coeffs(model, coeffs, counter, aspect_code=0,
         unit_mixed = np.asarray(extra_tone_mixer(unit_mixed), dtype=np.float32)
     tone_overlay = unit_mixed-unit_packet
 
-    def assemble(body_gain, metadata_gain):
-        packet = assemble_unmixed(body_gain, metadata_gain)
-        packet += tone_overlay*np.float32(body_gain)
-        return packet
-
-    def region_peak(packet, region):
-        return float(np.max(np.abs(packet[region])))
-
-    def body_is_below_framing(packet):
-        framing_peak = min(region_peak(packet, header_region),
-                           region_peak(packet, eof_region))
-        return region_peak(packet, body_region) <= framing_peak*body_ratio
-
     # Find the highest image-body gain that leaves a 1.5 dB final-sample
     # margin under both framing regions. Tone amplitude follows body RMS, so
     # every trial reassembles the actual post-tone packet.
-    body_gain = 1.0
-    packet = assemble(body_gain, 1.0)
-    if not body_is_below_framing(packet):
-        low, high = 0.0, body_gain
-        for _ in range(16):
-            trial_gain = (low+high)*.5
-            trial = assemble(trial_gain, 1.0)
-            if body_is_below_framing(trial):
-                low = trial_gain
-            else:
-                high = trial_gain
-        body_gain = low
-        packet = assemble(body_gain, 1.0)
-
-    # Metadata is a separate, quieter payload symbol. Limit it only when its
-    # final peak (including the timing tone) would reach the image-body peak.
-    metadata_limit = region_peak(packet, body_region)*metadata_ratio
-    if region_peak(packet, metadata_region) > metadata_limit:
-        low, high = 0.0, 1.0
-        for _ in range(16):
-            trial_gain = (low+high)*.5
-            trial = assemble(body_gain, trial_gain)
-            if region_peak(trial, metadata_region) <= metadata_limit:
-                low = trial_gain
-            else:
-                high = trial_gain
-        packet = assemble(body_gain, low)
-    return packet
+    return limit_packet(shaped, header, eof_mark, meta_pcm, tone_overlay, meta_start,
+                        PULSE.SYNC_LEN, PULSE.SYNC_LEN+FRAME, EOF_MARKER_OFFSET,
+                        body_ratio, metadata_ratio)
 
 
 def encode_pulse_stream(model, values, start_counter=1, aspect_codes=None,

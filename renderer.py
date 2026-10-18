@@ -39,6 +39,7 @@ _mirror_mode: int = 0
 
 # Viewport / FBO size
 _viewport_size: tuple[int, int] = (0, 0)
+_viewport_pixel_aspect: float = 1.0
 _quad_data: np.ndarray | None = None
 _quad_dirty: bool = True
 
@@ -328,9 +329,10 @@ def _update_bg_linear(background_color: tuple[int, int, int]) -> tuple[float, fl
     return _bg_linear_color
 
 
-def set_viewport_size(width: int, height: int) -> None:
-    global _viewport_size, _quad_dirty
+def set_viewport_size(width: int, height: int, *, pixel_aspect: float = 1.0) -> None:
+    global _viewport_size, _quad_dirty, _viewport_pixel_aspect
     _viewport_size = (width, height)
+    _viewport_pixel_aspect = pixel_aspect
     _quad_dirty = True
     if _backend == "legacy":
         gl = _lazy_import_gl()
@@ -562,6 +564,58 @@ def _return_texture_to_pool(texture: moderngl.Texture):
     except Exception:
         texture.release()  # On error, just release
 
+class TexturePairStage:
+    """Two reusable GL slots: visible layers and one prepared handoff.
+
+    Called only on the context-owning thread. Asset identity is safe for the
+    loader's immutable decoded buffers; slots keep their source references.
+    """
+
+    def __init__(self):
+        self.slots = []
+        self.active = None
+        self.uploads = 0
+
+    def stage(self, key, layers):
+        for slot in self.slots:
+            if slot['key'] == key:
+                return slot['textures']
+        slot = next((s for s in self.slots if s['key'] != self.active), None)
+        if slot is None:
+            slot = dict(key=None, images=(None, None), textures=(None, None))
+            self.slots.append(slot)
+        textures = list(slot['textures'])
+        for i, image in enumerate(layers[:2]):
+            if image is not slot['images'][i]:
+                textures[i] = (create_texture(image) if textures[i] is None else
+                               update_texture(textures[i], image))
+                self.uploads += 1
+        slot.update(key=key, images=layers[:2], textures=tuple(textures))
+        return slot['textures']
+
+    def select(self, key, layers):
+        textures = self.stage(key, layers)
+        self.active = key
+        return textures
+
+    def close(self):
+        for slot in self.slots:
+            for texture in slot['textures']:
+                if texture is not None:
+                    if _backend == 'legacy':
+                        _lazy_import_gl().glDeleteTextures([int(texture)])
+                        _legacy_texture_dims.pop(int(texture), None)
+                    else:
+                        texture.release()
+        self.slots.clear()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        self.close()
+
+
 def update_texture(texture: moderngl.Texture, new_image: np.ndarray) -> moderngl.Texture:
     """
     Update texture with new image data.
@@ -628,7 +682,7 @@ def compute_transformed_quad():
     if view_w > 0 and view_h > 0:
         img_w, img_h = _image_size
 
-        target_aspect = view_w / view_h
+        target_aspect = view_w * _viewport_pixel_aspect / view_h
         image_aspect = (img_w / img_h) if img_h > 0 else 1.0
 
         if image_aspect > target_aspect:

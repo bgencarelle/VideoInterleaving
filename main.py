@@ -136,8 +136,9 @@ def configure_runtime():
         type=float,
         metavar="F",
         help="ASCII grading brightness, a straight multiply on value "
-             "(default: ASCII_BRIGHTNESS, 1.0 = neutral, 0 = black). "
-             "Applies after contrast"
+              "(default: ASCII_BRIGHTNESS, 1.0 = neutral, 0 = black). "
+              "Applies after contrast; truecolour tint exposure is separately "
+              "set by ASCII_COLOR_BRIGHTNESS"
     )
 
     parser.add_argument(
@@ -153,6 +154,7 @@ def configure_runtime():
         "--dir",
         help="Path to image source folder (overrides settings.py)"
     )
+    parser.add_argument("--bake-dir", help="Unified bake package; selects the output for --mode")
 
     # Private handoff used only when the sender GUI owns a local-mode process.
     parser.add_argument("--local-frame-port", type=int, help=argparse.SUPPRESS)
@@ -446,6 +448,28 @@ def configure_runtime():
     parser.add_argument("--modem-frame-duration", type=float, default=1.0,
                         help="Existing MIDI clock's frame scaling factor")
     args = parser.parse_args()
+    settings.LAYER_BAKE_DIR = None
+    if args.bake_dir:
+        if args.dir or args.xy_dir or args.modem_dir:
+            parser.error("--bake-dir selects the source; omit --dir/--xy-dir/--modem-dir")
+        if ((args.mode == 'scope' and args.scope_source == 'images') or
+                (args.mode == 'modem' and args.modem_source == 'images')):
+            parser.error("--bake-dir requires baked playback")
+        try:
+            from baked_layers import package_output
+            output = str(package_output(args.bake_dir, args.mode))
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            parser.error(str(exc))
+        if args.mode == 'scope':
+            if args.scope_list_from_images:
+                parser.error('--bake-dir reads its own folder manifest; omit --scope-list-from-images')
+            args.xy_dir = output
+            args.scope_source = 'bake'
+            args.scope_list_from_images = False
+        elif args.mode == 'modem':
+            args.modem_dir = output
+        else:
+            settings.LAYER_BAKE_DIR = output
     if args.local_frame_port is not None:
         if args.mode != "local":
             parser.error("--local-frame-port can only be used with --mode local")
@@ -624,7 +648,7 @@ def configure_runtime():
 
     # 2.5. Clean up existing cache directories for this instance
     # Determine instance identifier pattern
-    if args.mode == "scope":
+    if args.mode == "scope" or settings.LAYER_BAKE_DIR:
         # Scope either reads the bake manifest or validates its image-list
         # cache itself. Deleting those directories here forced a full cache
         # restore on every launch and made separate scope instances interfere.
@@ -990,6 +1014,7 @@ def configure_runtime():
 
     elif args.mode == "ascii":
         validate_ascii_port(primary_port)
+        settings.ASCII_CLIENT_SIZING = True
         print(f">> MODE: ASCII (Telnet) [{source_name}] @ {primary_port}")
         settings.ASCII_MODE = True
         settings.SERVER_MODE = False
@@ -1003,6 +1028,17 @@ def configure_runtime():
 
     elif args.mode == "asciiweb":
         # [NOTE] Validation skipped here so asciiweb can use its own reserved ports
+        settings.ASCII_WEB_SOURCE_SIZE = settings.ASCII_WEB_MAX_SIZE
+        if settings.LAYER_BAKE_DIR:
+            from ascii_rgb_layers import baked_web_source_size
+            # Older compact bakes remain native-resolution sources. Never label
+            # a 90x60 bake as 120x80 or invent missing detail by upsampling it.
+            try:
+                baked_size = baked_web_source_size(settings.LAYER_BAKE_DIR)
+            except (OSError, ValueError, TypeError) as exc:
+                parser.error(str(exc))
+            if baked_size is not None:
+                settings.ASCII_WEB_SOURCE_SIZE = baked_size
         print(f">> MODE: ASCII-WEB (WebSocket) [{source_name}]")
         settings.ASCII_MODE = True
         settings.SERVER_MODE = False
@@ -1165,6 +1201,8 @@ def main(clock=CLOCK_MODE):
         # The scope engine probes the bake once and initializes image lists
         # only for a live source or a bake without a usable manifest.
         print(f">> Scope source: {getattr(settings, 'SCOPE_SOURCE', 'bake')}")
+    elif settings.LAYER_BAKE_DIR:
+        print(f">> Independent baked layers: {settings.LAYER_BAKE_DIR}")
     else:
         print(">> Building file lists...")
         import make_file_lists          # PIL + numpy; not needed off this path

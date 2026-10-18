@@ -1,5 +1,6 @@
 import threading
 import socket
+import gzip
 import settings
 from shared_state import exchange_ascii
 from SimpleWebSocketServer import SimpleWebSocketServer, WebSocket
@@ -18,6 +19,7 @@ ANSI_HOME = "\033[H"
 
 class AsciiWebSocket(WebSocket):
     def handleConnected(self):
+        self.frame_encoding = 'text'
         if not _sem.acquire(blocking=False):
             self.close()
             return
@@ -36,6 +38,11 @@ class AsciiWebSocket(WebSocket):
             client_added = True
             sem_acquired = False  # Client added, handleClose will release semaphore
             self.sendMessage(ANSI_CLEAR)
+            import json
+            width, height = (getattr(settings, 'ASCII_WEB_SOURCE_SIZE', None) or
+                             (getattr(settings, 'ASCII_WIDTH', 60),
+                              getattr(settings, 'ASCII_HEIGHT', 40)))
+            self.sendMessage(json.dumps({'type': 'resize', 'cols': width, 'rows': height}))
         except Exception as e:
             print(f"[WS] Handshake Error: {e}")
             # Cleanup: remove client from list if it was added, and release semaphore
@@ -65,7 +72,11 @@ class AsciiWebSocket(WebSocket):
         """Handle incoming WebSocket messages (e.g., dimension change requests)."""
         try:
             import json
+            if not isinstance(self.data, str) or len(self.data) > 4096:
+                return
             data = json.loads(self.data)
+            if data.get('type') == 'encoding' and data.get('encoding') == 'gzip':
+                self.frame_encoding = 'gzip'
             if data.get('type') == 'resize':
                 # Client requesting dimension change (optional feature)
                 # For now, we'll let the server control dimensions via HTTP API
@@ -90,6 +101,10 @@ def broadcast_loop():
             else:
                 text = frame_data
             payload = ANSI_HOME + text
+            # Encode ONCE per publication, never per viewer or zoom level.
+            compressed = (b'g' + gzip.compress(payload.encode('utf-8'), compresslevel=1, mtime=0)
+                          if any(getattr(client, 'frame_encoding', 'text') == 'gzip'
+                                 for client in list(clients)) else None)
         except Exception:
             continue
 
@@ -114,7 +129,8 @@ def broadcast_loop():
                     client.sendq.clear()
 
                 # If buffer is empty, send the new frame
-                client.sendMessage(payload)
+                client.sendMessage(compressed if getattr(client, 'frame_encoding', 'text') == 'gzip'
+                                   and compressed is not None else payload)
 
             except (BrokenPipeError, ConnectionResetError, OSError) as e:
                 # Connection error - mark for cleanup
@@ -136,8 +152,6 @@ def broadcast_loop():
                 client.close()
             except Exception as e:
                 print(f"[WS] Error cleaning up dead client: {e}")
-
-        last_send_time = now
 
 
 def broadcast_dimension_change(width, height):

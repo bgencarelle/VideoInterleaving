@@ -63,6 +63,11 @@ def _serve_static_file(handler):
     try:
         raw_path = urlparse(handler.path).path
         decoded_path = unquote(raw_path)  # Decode %2e%2e -> ..
+        if decoded_path.startswith('/ascii/static/'):
+            decoded_path = decoded_path[len('/ascii'):]
+        elif decoded_path.startswith('/asciistatic/'):
+            # Existing nginx /ascii/ -> upstream /ascii concatenates suffixes.
+            decoded_path = '/static/' + decoded_path[len('/asciistatic/'):]
         rel_path = decoded_path.lstrip('/')
 
         # Normalize path separators to forward slashes for consistency
@@ -182,7 +187,7 @@ class RobustHandlerMixin:
     def log_message(self, format, *args):
         # Quiet Mode: Filter out internal stats polling and static files
         path = getattr(self, "path", "")
-        if path in ['/stats', '/data'] or path.startswith('/static/'):
+        if path in ['/stats', '/data'] or path.startswith(('/static/', '/ascii/static/', '/asciistatic/')):
             return
 
         ip = get_real_ip(self)
@@ -250,7 +255,7 @@ class MonitorHandler(RobustHandlerMixin, http.server.BaseHTTPRequestHandler):
     timeout = 5
 
     def do_GET(self):
-        if self.path.startswith("/static/"):
+        if self.path.startswith(("/static/", "/ascii/static/", "/asciistatic/")):
             _serve_static_file(self)
             return
 
@@ -335,6 +340,10 @@ class MonitorHandler(RobustHandlerMixin, http.server.BaseHTTPRequestHandler):
 
                 content = content.replace("{{ASCII_WIDTH}}", str(cols))
                 content = content.replace("{{ASCII_HEIGHT}}", str(rows))
+                source_cols, source_rows = (getattr(settings, 'ASCII_WEB_SOURCE_SIZE', None)
+                                             or (cols, rows))
+                content = content.replace("{{ASCII_SOURCE_WIDTH}}", str(source_cols))
+                content = content.replace("{{ASCII_SOURCE_HEIGHT}}", str(source_rows))
                 content = content.replace("{{ASCII_FONT_RATIO}}", str(ratio))
                 content = content.replace("{{WEBSOCKET_PORT}}", str(ws_port))
 

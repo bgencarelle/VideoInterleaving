@@ -3,6 +3,34 @@ import numpy as np
 from numba import njit
 
 
+@njit(cache=True, nogil=True)
+def select_and_measure(samples, channels):
+    """One owned logical-channel copy and float64 meters in one input pass."""
+    count = len(samples)
+    block = np.empty((count, len(channels)), dtype=samples.dtype)
+    peaks = np.zeros(len(channels), np.float64)
+    powers = np.zeros(len(channels), np.float64)
+    has_nan = False
+    for i in range(count):
+        for j in range(len(channels)):
+            sample = samples[i, channels[j]]
+            block[i, j] = sample
+            value = np.float64(sample)
+            magnitude = abs(value)
+            if np.isnan(magnitude):
+                peaks[j] = np.nan
+                has_nan = True
+            elif magnitude > peaks[j]:
+                peaks[j] = magnitude
+            powers[j] += value*value
+    active = False
+    for j in range(len(channels)):
+        powers[j] = np.sqrt(powers[j]/count) if count else 0.0
+        if peaks[j] > 1e-5:
+            active = True
+    return block, peaks, powers, active and not has_nan
+
+
 @njit(cache=True, fastmath=False)
 def _leg_correlation_sums(x):
     """Mean-removed left/right powers and cross product of a stereo block."""

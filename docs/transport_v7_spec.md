@@ -661,6 +661,10 @@ The receiver obtains the equalizer output by wrapping `v7._equalize_numba`,
 
 ## 11. Sender picture preparation
 
+Standalone playback policies, packet limits, channel selection and streaming
+WAV import/export are documented in [V7_PLAYBACK_FILE_IO.md](V7_PLAYBACK_FILE_IO.md).
+These reuse the current wire and profile validation.
+
 ### 11.1 Goal and contracts
 
 Prepare source pictures for the frequencies the wire keeps: recognizable

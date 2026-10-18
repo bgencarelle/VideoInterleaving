@@ -1,10 +1,10 @@
 #image_display.py
 import os
 import time
-from concurrent.futures import ThreadPoolExecutor
 from collections import deque
 import threading
 import atexit
+from contextlib import nullcontext
 
 import numpy as np
 from turbojpeg import TJPF_RGB
@@ -80,6 +80,7 @@ class RollingIndexCompensator:
 
 
 from image_loader import ImageLoader, FIFOImageBuffer
+from image_preparation import DeadlinePreparer, advance_tick
 
 
 class FIFOImageBufferPatched(FIFOImageBuffer):
@@ -137,6 +138,8 @@ def load_and_render_frame(loader, index, main_folder, float_folder,
             baked_h, baked_w = final_chars.shape
             target_w = max(1, int(getattr(settings, 'ASCII_WIDTH', baked_w)))
             target_h = max(1, int(getattr(settings, 'ASCII_HEIGHT', baked_h)))
+            if getattr(settings, 'ASCII_WEB_SOURCE_SIZE', None):
+                target_w, target_h = settings.ASCII_WEB_SOURCE_SIZE
 
             # Scale enough to cover the target grid, then crop the center
             scale_x = target_w / baked_w if baked_w > 0 else 1.0
@@ -273,13 +276,34 @@ def run_display(clock_source=CLOCK_MODE):
     # --------------------
 
     import make_file_lists
-    _, main_folder_path, float_folder_path = make_file_lists.initialize_image_lists(clock_source)
+    baked = None
+    if getattr(settings, 'LAYER_BAKE_DIR', None):
+        from pathlib import Path
+        if (Path(settings.LAYER_BAKE_DIR) / 'rgb_layers.json').exists():
+            from ascii_rgb_layers import RgbWebLayers
+            if get_config().get_mode() != MODE_ASCIIWEB:
+                raise ValueError('RGB web samples are only supported in asciiweb mode')
+            baked = RgbWebLayers(settings.LAYER_BAKE_DIR)
+            try:
+                baked.validate_settings()
+            except Exception:
+                baked.close()
+                raise
+        else:
+            from baked_layers import BakedLayers
+            baked = BakedLayers(settings.LAYER_BAKE_DIR)
+        if is_web and baked.web_size and tuple(baked.web_size) != tuple(HEADLESS_RES):
+            raise ValueError('Web bake target differs from HEADLESS_RES; rebuild with --web-size')
+        main_folder_path, float_folder_path = baked.main_paths, baked.float_paths
+        make_file_lists.initialize_frame_clock(clock_source, baked.frames)
+    else:
+        _, main_folder_path, float_folder_path = make_file_lists.initialize_image_lists(clock_source)
     main_folder_count = len(main_folder_path[0])
     float_folder_count = len(float_folder_path[0])
     png_paths_len = len(main_folder_path)
 
     # 2. Initial Dimension Logic
-    temp_loader = ImageLoader()
+    temp_loader = baked if baked is not None else ImageLoader()
     temp_loader.set_paths(main_folder_path, float_folder_path)
 
     img0, is_sbs0 = temp_loader.read_image(main_folder_path[0][0])
@@ -326,6 +350,13 @@ def run_display(clock_source=CLOCK_MODE):
             # as large as the web target, checking every file's header.
             web_jpeg_min_size = (4 * target_w, 2 * target_h)
 
+    rgb_samples = bool(getattr(baked, 'rgb_samples', False))
+    if rgb_samples:
+        # Source fitting and mirroring were already sampled offline. The tiny
+        # live mix must cover the master grid exactly, without fitting it twice.
+        state.image_size = (baked.size[0] * settings.ASCII_FONT_RATIO, baked.size[1])
+        state.mirror = False
+
     # 3. Initialize Window
     if isinstance(img0, dict):
         window = None
@@ -342,6 +373,23 @@ def run_display(clock_source=CLOCK_MODE):
             has_gl = True
             if not is_headless and glfw:
                 register_callbacks(window, state)
+
+    if rgb_samples:
+        if not has_gl or renderer.using_legacy_gl():
+            baked.close()
+            raise RuntimeError('RGB web samples require ModernGL; no lossy uint8 fallback')
+        profile = 'gles-mediump' if renderer.ctx.version_code < 330 else 'desktop'
+        if profile != baked.manifest['precision']:
+            baked.close()
+            raise ValueError('RGB web bake GL precision differs; rebuild on this backend')
+        print('[ASCII] Compressed independent RGB samples; live grid-only alpha mix')
+
+    def upload_layer(image, texture=None):
+        if rgb_samples:
+            from ascii_rgb_layers import upload_sample
+            return upload_sample(renderer.ctx, image, texture)
+        return (renderer.create_texture(image) if texture is None else
+                renderer.update_texture(texture, image))
 
     def _get_screen_size(window_obj):
         if window_obj is None:
@@ -391,11 +439,9 @@ def run_display(clock_source=CLOCK_MODE):
     
     update_folder_selection(index, float_folder_count, main_folder_count)
 
-    loader = ImageLoader()
+    loader = baked if baked is not None else ImageLoader()
     loader.set_paths(main_folder_path, float_folder_path)
     loader.set_png_paths_len(png_paths_len)
-
-    fifo = FIFOImageBufferPatched(max_size=FIFO_LENGTH)
 
     # Pre-load using the NEW helper directly for the first frame
     initial_folders = folder_dictionary["Main_and_Float_Folders"]
@@ -404,7 +450,6 @@ def run_display(clock_source=CLOCK_MODE):
         source_aspect_ratio=source_aspect_ratio,
         jpeg_scaling_factor=web_jpeg_scale,
         jpeg_min_size=web_jpeg_min_size)
-    fifo.update(index, res0)
 
     # The sender consumes the composed source image, not the fullscreen
     # framebuffer. Keep this in source dimensions so monitor aspect ratio,
@@ -416,57 +461,79 @@ def run_display(clock_source=CLOCK_MODE):
     main_texture = None
     float_texture = None
     # Only create textures if NOT ascii string and GL active
+    texture_stage = renderer.TexturePairStage() if has_gl and not is_headless else None
+    ascii_grid_capture = None
+    ascii_web_size = getattr(settings, 'ASCII_WEB_SOURCE_SIZE', None)
+    if (is_ascii and has_gl and (getattr(settings, 'ASCII_CLIENT_SIZING', False) or ascii_web_size)
+            and not renderer.using_legacy_gl()):
+        from ascii_render import AsciiGridCapture
+        ascii_grid_capture = AsciiGridCapture(renderer.ctx,
+                                             sizes=(ascii_web_size,) if ascii_web_size else None)
+        grid_description = (f'shared {ascii_web_size[0]}x{ascii_web_size[1]} browser master' if ascii_web_size else
+                            '30x20, 45x30, 60x40, 90x60')
+        print(f'[ASCII] Direct source-layer grids: {grid_description}; '
+              f'colour blur={settings.ASCII_COLOR_BLUR}; no post-grid resize; '
+              f'truecolour={settings.ASCII_TRUECOLOR}; tint brightness={settings.ASCII_COLOR_BRIGHTNESS}')
     if has_gl and not isinstance(res0[0], str):
-        main_texture = renderer.create_texture(res0[0])
-        float_texture = renderer.create_texture(res0[1])
+        if texture_stage is not None:
+            main_texture, float_texture = texture_stage.select(
+                (index, tuple(initial_folders)), res0)
+        else:
+            main_texture = upload_layer(res0[0])
+            float_texture = upload_layer(res0[1])
+    cur_main, cur_float, cur_m_sbs, cur_f_sbs = res0
+    shown_index = last_displayed_index = index
+    # Startup inspection must not pin a full-resolution pair for the session.
+    del res0, img0, temp_loader
 
-    compensator = RollingIndexCompensator()
+    def prepare_picture(wanted, folders):
+        return load_and_render_frame(
+            loader, wanted, *folders, source_aspect_ratio=source_aspect_ratio,
+            jpeg_scaling_factor=web_jpeg_scale, jpeg_min_size=web_jpeg_min_size)
 
-    def async_cb(fut, idx):
-        try:
-            fifo.update(idx, fut.result())
-        except Exception as e:
-            if monitor: monitor.record_load_error(idx, e)
+    def load_error(key, exc):
+        if monitor:
+            monitor.record_load_error(key[0], exc)
 
-    # 5. Thread Pool for I/O-bound work
-    # Optimize worker count for I/O-bound image loading
-    # I/O-bound tasks can use more threads than CPU cores
-    cpu_count = os.cpu_count() or 1
-    # Conservative formula that works well across all devices
-    # Reverted from aggressive tiered scaling to universal formula
-    max_workers = min(8, cpu_count + 2)
-
-    with ThreadPoolExecutor(max_workers=max_workers) as pool:
-        next_idx = 1 if index == 0 else (index - 1 if index == png_paths_len - 1 else index + 1)
-        # Use the NEW worker function
-        folders = folder_dictionary["Main_and_Float_Folders"]
-        future = pool.submit(
-            load_and_render_frame, loader, next_idx, *folders,
-            source_aspect_ratio=source_aspect_ratio,
-            jpeg_scaling_factor=web_jpeg_scale,
-            jpeg_min_size=web_jpeg_min_size)
-        future.add_done_callback(lambda f, i=next_idx: async_cb(f, i))
+    period = 1.0 / (loop_fps or 60)
+    # Full-resolution local staging needs enough room to span long reads.
+    # This is an upper bound, not an eagerly filled speculative cache.
+    preparation_capacity = 4 if is_headless else 8
+    with (baked if baked is not None else nullcontext()), \
+            DeadlinePreparer(prepare_picture, period=period, workers=2,
+                          capacity=preparation_capacity, on_error=load_error) as preparation, \
+            (texture_stage if texture_stage is not None else nullcontext()):
+        preparation.seed(index, initial_folders,
+                         (cur_main, cur_float, cur_m_sbs, cur_f_sbs))
+        cur_main = None
 
         frame_times = deque(maxlen=60)
         ticker_period = (1.0 / loop_fps
                          if loop_fps and loop_fps > 0 else None)
         capture_period = ticker_period if is_headless else None
-        next_tick = time.perf_counter()
+        next_tick = time.monotonic()
+        preparation.anchor = next_tick
 
         def pace_iteration(iteration_start):
             """Wait for the next monotonic frame deadline; skip missed ticks."""
             nonlocal next_tick
             if ticker_period is not None:
-                next_tick += ticker_period
-                now = time.perf_counter()
-                remaining = next_tick - now
-                if remaining < 0:
-                    # Do not run catch-up frames after a slow decode/render.
-                    next_tick += (int((-remaining) // ticker_period) + 1) * ticker_period
-                    remaining = next_tick - now
+                now = time.monotonic()
+                next_tick, remaining = advance_tick(
+                    next_tick, ticker_period, now,
+                    swap_consumed=local_swap_seconds >= ticker_period*.5)
                 if remaining > 0:
                     time.sleep(remaining)
             return time.perf_counter() - iteration_start
+
+        def index_at(deadline):
+            wall_deadline = time.time_ns() + round((deadline-time.monotonic())*1e9)
+            return index_calculator.calculate_free_clock_index(
+                png_paths_len, PINGPONG, at_time_ns=wall_deadline, publish=False)[0]
+
+        next_miss_log = 0.0
+        first_render = True
+        shown_folders = tuple(initial_folders)
         
         # Counter for periodic mouse hiding (every 60 frames ~= 2 seconds at 30fps)
         cursor_hide_counter = 0
@@ -477,34 +544,47 @@ def run_display(clock_source=CLOCK_MODE):
         while (state.run_mode and not is_headless) or is_headless:
             iteration_start = time.perf_counter()
             successful_display = False
+            view_dirty = False
+            local_swap_seconds = 0.0
 
             if not is_headless and has_gl and glfw:
                 glfw.poll_events()
                 if not state.run_mode: break
+                if getattr(state, 'needs_redraw', False):
+                    view_dirty = True
+                    state.needs_redraw = False
 
             if state.needs_update and not is_headless and has_gl:
                 # Clear before reconfiguring so a resize callback raised by
                 # macOS during the transition is not discarded afterward.
                 state.needs_update = False
+                view_dirty = True
                 window = display_init(state)
                 if window is not None:
                     _hide_cursor_reliable(window)
 
             prev = index
             index, _ = update_index(png_paths_len, PINGPONG)
-
             if index != prev:
                 update_folder_selection(index, float_folder_count, main_folder_count)
+            folders = tuple(folder_dictionary['Main_and_Float_Folders'])
+            preparation.plan(folders, index,
+                             None if index_calculator.midi_mode else index_at)
+            presentation_started = time.monotonic()
 
-                comp_idx = compensator.get_compensated_index(index)
-                res = fifo.get(comp_idx)
+            # Retry held indices when a previously late exact picture arrives.
+            if (index != prev or cur_main is None or shown_index != index
+                    or shown_folders != folders):
+                layers = preparation.get(index, folders)
+                res = (index, *layers) if layers is not None else None
 
                 if res:
                     d_idx, m_img, f_img, m_sbs, f_sbs = res
-                    compensator.update(index, d_idx)
+                    previous_main, previous_float = cur_main, cur_float
 
                     # Update loop pointers
                     shown_index = d_idx
+                    shown_folders = folders
                     cur_main = m_img
                     cur_float = f_img
                     cur_m_sbs = m_sbs
@@ -528,17 +608,6 @@ def run_display(clock_source=CLOCK_MODE):
                         successful_display = True
                         last_displayed_index = d_idx
 
-                        # Trigger Next Load
-                        next_idx = 1 if index == 0 else (
-                            index - 1 if index == png_paths_len - 1 else (index + 1 if index > prev else index - 1))
-                        folders = folder_dictionary["Main_and_Float_Folders"]
-                        future = pool.submit(
-                            load_and_render_frame, loader, next_idx, *folders,
-                            source_aspect_ratio=source_aspect_ratio,
-                            jpeg_scaling_factor=web_jpeg_scale,
-                            jpeg_min_size=web_jpeg_min_size)
-                        future.add_done_callback(lambda f, i=next_idx: async_cb(f, i))
-
                         # Timing
                         dt = pace_iteration(iteration_start)
                         frame_times.append(dt)
@@ -559,7 +628,7 @@ def run_display(clock_source=CLOCK_MODE):
                                 "index": index,
                                 "displayed": last_displayed_index,
                                 "fps": last_actual_fps,
-                                "fifo_depth": fifo.current_depth(),
+                                "fifo_depth": preparation.snapshot()['pairs'],
                                 "successful_frame": True,
                                 "main_folder": fd["Main_and_Float_Folders"][0],
                                 "float_folder": fd["Main_and_Float_Folders"][1],
@@ -575,28 +644,28 @@ def run_display(clock_source=CLOCK_MODE):
 
                     # GL Texture Update (Only for non-string)
                     if has_gl:
-                        main_texture = renderer.update_texture(main_texture, m_img)
-                        float_texture = renderer.update_texture(float_texture, f_img)
+                        if texture_stage is not None:
+                            main_texture, float_texture = texture_stage.select(
+                                (index, folders), layers)
+                        else:
+                            if m_img is not previous_main:
+                                main_texture = upload_layer(m_img, main_texture)
+                            if f_img is not previous_float:
+                                float_texture = upload_layer(f_img, float_texture)
 
                     successful_display = True
                     last_displayed_index = d_idx
                 else:
-                    if not is_headless: print(f"[MISS] {index}")
+                    if not is_headless and time.monotonic() >= next_miss_log:
+                        print(f"[MISS] {index}")
+                        next_miss_log = time.monotonic()+1.0
                     fifo_miss_count += 1
                     last_fifo_miss = index
 
-                next_idx = 1 if index == 0 else (
-                    index - 1 if index == png_paths_len - 1 else (index + 1 if index > prev else index - 1))
-                folders = folder_dictionary["Main_and_Float_Folders"]
-                future = pool.submit(
-                    load_and_render_frame, loader, next_idx, *folders,
-                    source_aspect_ratio=source_aspect_ratio,
-                    jpeg_scaling_factor=web_jpeg_scale,
-                    jpeg_min_size=web_jpeg_min_size)
-                future.add_done_callback(lambda f, i=next_idx: async_cb(f, i))
-
             # Render (GL)
-            if has_gl:
+            render_now = has_gl and (first_render or is_local_frame_source or successful_display or
+                                    view_dirty or renderer._quad_dirty)
+            if render_now and ascii_grid_capture is None:
                 if is_headless: window.use()
                 renderer.overlay_images_single_pass(
                     main_texture, float_texture, BACKGROUND_COLOR,
@@ -623,14 +692,30 @@ def run_display(clock_source=CLOCK_MODE):
                 # time can reject every other tick at a matched output rate.
                 interval_elapsed = (capture_period is not None or
                                     now - last_server_capture > capture_interval)
-                if index != last_captured_index and interval_elapsed:
+                ascii_sizes = None
+                if ascii_grid_capture is not None:
+                    from ascii_terminal import pictures
+                    ascii_sizes = (ascii_web_size,) if ascii_web_size else pictures.requested_scales()
+                capture_identity = (index, shown_index, shown_folders, ascii_sizes)
+                if capture_identity != last_captured_index and interval_elapsed:
                     should_capture = True
                     last_server_capture = now
-                    last_captured_index = index
+                    last_captured_index = capture_identity
 
-            if should_capture:
+            if should_capture and shown_index == index and shown_folders == folders:
                 # If m_img is a string, we already handled it.
-                if isinstance(cur_main, str):
+                if ascii_grid_capture is not None:
+                    grids = ascii_grid_capture.capture(
+                        main_texture, float_texture, BACKGROUND_COLOR,
+                        cur_m_sbs, cur_f_sbs, window, sizes=ascii_sizes)
+                    if ascii_web_size:
+                        text_frame = ascii_converter.to_ascii(grids[ascii_web_size],
+                            width=ascii_web_size[0], height=ascii_web_size[1], sampled=True)
+                        exchange_ascii.set_frame(text_frame)
+                        exchange.set_frame(text_frame)
+                    else:
+                        pictures.publish(grids)
+                elif isinstance(cur_main, str):
                     pass
                 elif isinstance(cur_main, dict):
                     pass  # Should be caught by str check, but just in case
@@ -678,15 +763,25 @@ def run_display(clock_source=CLOCK_MODE):
                                 exchange_web.set_frame(b'j' + enc)
                                 exchange.set_frame(b'j' + enc)  # Legacy compatibility
                             elif is_ascii:
-                                text_frame = ascii_converter.to_ascii(frame)
+                                if getattr(settings, 'ASCII_CLIENT_SIZING', False):
+                                    from ascii_terminal import pictures
+                                    pictures.publish(frame)
+                                if ascii_web_size:
+                                    text_frame = ascii_converter.to_ascii(frame,
+                                        width=ascii_web_size[0], height=ascii_web_size[1],
+                                        sampled=has_gl)
+                                else:
+                                    text_frame = ascii_converter.to_ascii(frame)
                                 exchange_ascii.set_frame(text_frame)
                                 exchange.set_frame(text_frame)  # Legacy compatibility
 
                     except Exception as e:
                         print(f"[CAPTURE ERROR] {e}")
 
-            if not is_headless and has_gl and glfw:
+            if not is_headless and render_now and glfw:
+                swap_started = time.monotonic()
                 glfw.swap_buffers(window)
+                local_swap_seconds = time.monotonic()-swap_started
                 if glfw.window_should_close(window):
                     state.run_mode = False
                 
@@ -705,6 +800,15 @@ def run_display(clock_source=CLOCK_MODE):
                 if cursor_hide_counter >= 60:
                     _hide_cursor_reliable(window)
                     cursor_hide_counter = 0
+
+            if render_now:
+                first_render = False
+                preparation.record_render(time.monotonic()-presentation_started)
+            if texture_stage is not None:
+                for key, future_layers, deadline in preparation.upcoming():
+                    if key != texture_stage.active and not isinstance(future_layers[0], (str, dict)):
+                        texture_stage.stage(key, future_layers)
+                        break
 
             dt = pace_iteration(iteration_start)
             frame_times.append(dt)
@@ -726,7 +830,10 @@ def run_display(clock_source=CLOCK_MODE):
                     "index": index,
                     "displayed": last_displayed_index,
                     "fps": last_actual_fps,
-                    "fifo_depth": fifo.current_depth(),
+                    "fifo_depth": preparation.snapshot()['pairs'],
+                    "picture_preparation": preparation.snapshot(),
+                    "texture_uploads": texture_stage.uploads if texture_stage else 0,
+                    "local_swap_ms": local_swap_seconds*1000,
                     "successful_frame": successful_display,
                     "main_folder": fd["Main_and_Float_Folders"][0],
                     "float_folder": fd["Main_and_Float_Folders"][1],
@@ -741,7 +848,11 @@ def run_display(clock_source=CLOCK_MODE):
                 state.run_mode = False
 
         if not is_headless and has_gl and glfw:
+            if texture_stage is not None:
+                texture_stage.close()
             glfw.terminate()
+        if ascii_grid_capture is not None:
+            ascii_grid_capture.close()
         if is_headless and has_gl and window is not None and hasattr(window, "close"):
             try:
                 window.close()

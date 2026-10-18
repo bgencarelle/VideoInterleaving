@@ -125,7 +125,7 @@ DCT_SHARPEN_CHOICES = (
 # Direct DCT encode runs the 500-slot folded profiles with the Box filter.
 DCT_PROFILES = FOLDED_PROFILES
 BOOL_FIELDS = ('video_live', 'dct_encode',
-               'luma_adjust', 'linear_preshrink', 'pixel_encode',
+               'luma_adjust', 'luma_adjust_linear', 'linear_preshrink', 'mirror', 'pixel_encode',
                'clip_aware')
 # Settings that take effect while the sender runs (the sender reads them
 # from its control pipe); everything else needs a stop and a new Start.
@@ -144,6 +144,16 @@ MONO_VIDEO_SIDE_CHOICES = (
 )
 
 FIELD_HELP = {
+    'output_mode': 'Send live, send and record, or export a video/test source without an audio device.',
+    'wav_path': 'Output modem WAV filename. Files contain logical channels, before device routing.',
+    'channels': '1-based physical output pair, such as 1,2 or 3,4.',
+    'rate': 'Requested output sample rate in Hz; blank uses the device rate (48 kHz for offline export).',
+    'frames': 'Exact packet limit; 0 means unlimited. The first run limit reached stops the sender.',
+    'seconds': 'Duration limit in seconds; 0 means unlimited.',
+    'source_passes': 'Local video passes before stopping. 0 loops; 1 plays once. A resumed partial pass counts as one.',
+    'rotation': 'Rotate source clockwise before encoding.',
+    'mirror': 'Mirror the rotated source horizontally.',
+    'luma_adjust_linear': 'Use the original source pixels’ linear light as the luma-adjustment target. Separate from pre-shrink.',
     'device': 'Choose the explicit audio output device that feeds the receiver or recording path.',
     'source': ('Choose what the sender captures. Capture begins after Start; '
                'Local output launches its own main.py --mode local window.'),
@@ -245,6 +255,12 @@ FIELD_HELP = {
                       'to the same layout.'),
 }
 FIELD_LABELS = {
+    'output_mode': 'Output mode', 'wav_path': 'Modem WAV filename',
+    'channels': 'Output channel pair', 'rate': 'Sample rate · Hz',
+    'frames': 'Packet limit', 'seconds': 'Duration · seconds',
+    'source_passes': 'Video passes',
+    'rotation': 'Source rotation', 'mirror': 'Mirror source',
+    'luma_adjust_linear': 'Luma target · linear light',
     'device': 'Audio output device',
     'source': 'Capture source',
     'capture_fps': 'Capture FPS',
@@ -542,6 +558,8 @@ def _match_device(devices, identity):
 
 
 SAVED_SETTING_FIELDS = (
+    'output_mode', 'wav_path', 'channels', 'rate', 'frames', 'seconds',
+    'source_passes', 'rotation', 'mirror', 'luma_adjust_linear',
     'source', 'profile', 'mono_video_side', 'source_audio',
     'source_audio_input_side', 'source_audio_gain',
     'source_audio_delay_ms', 'speed', 'encode_filter', 'brightness', 'gamma',
@@ -1159,7 +1177,11 @@ def validate_settings(settings, devices, sd_module=None, audio_devices=()):
     """Validate sender GUI state before launching the sender process."""
     by_index = {device.index: device for device in devices}
     device = by_index.get(settings.get('device'))
-    if device is None:
+    output_mode = settings.get('output_mode', 'live')
+    if output_mode not in ('live', 'record', 'export'):
+        raise ValueError('Choose live output, recording, or WAV export.')
+    offline = output_mode == 'export'
+    if device is None and not offline:
         raise ValueError('Select an audio output device before starting.')
     source = settings.get('source')
     if source not in dict(SOURCE_CHOICES).values():
@@ -1167,21 +1189,43 @@ def validate_settings(settings, devices, sd_module=None, audio_devices=()):
     profile = settings.get('profile')
     if profile not in valid_profiles():
         raise ValueError('Choose a supported wire profile.')
-    channels = 2
-    if device.channels < channels:
+    from animation_modem.audio_common import pair
+    try:
+        output_pair = pair(str(settings.get('channels', '1,2')))
+    except Exception as exc:
+        raise ValueError('Output channels must be a pair such as 1,2 or 3,4.') from exc
+    channels = max(output_pair)+1
+    rate = _integer_setting(settings.get('rate') or '', 'Sample rate', 1, optional=True)
+    frames = _integer_setting(settings.get('frames', '0') or '0', 'Packet limit', 0)
+    passes = _integer_setting(settings.get('source_passes', '0') or '0', 'Source passes', 0)
+    seconds = _float_setting(settings.get('seconds', '0') or '0', 'Duration')
+    if seconds < 0:
+        raise ValueError('Duration must be non-negative.')
+    wav_path = str(settings.get('wav_path', '')).strip()
+    if output_mode != 'live' and not wav_path:
+        raise ValueError('Choose an output WAV filename.')
+    if offline and source not in ('video', 'test'):
+        raise ValueError('Offline export supports video files and test sources.')
+    if offline and source == 'test' and not (frames or seconds):
+        raise ValueError('Test export needs a packet or duration limit.')
+    if passes and (source != 'video' or settings.get('video_live', False)):
+        raise ValueError('Source passes requires a local video file.')
+    rotation = _integer_setting(settings.get('rotation', 0), 'Rotation', 0)
+    if rotation not in (0, 90, 180, 270):
+        raise ValueError('Rotation must be 0, 90, 180 or 270.')
+    if not offline and device.channels < channels:
         raise ValueError(
             f'{device.name} supports {device.channels} output channel(s); '
             f'this configuration needs {channels}. Choose another device.')
 
-    # The sender plays at the rate the OS has the output device set to; the
-    # GUI does not offer other rates (PortAudio cannot list a device's
-    # supported rates portably, and some hosts resample any request).
-    if sd_module is None:
+    # Validate an explicit rate with the host; blank follows its native rate.
+    if sd_module is None and not offline:
         import sounddevice as sd_module
     try:
-        sd_module.check_output_settings(
-            device=device.index, channels=channels, dtype='float32',
-            samplerate=device.default_rate or None)
+        if not offline:
+            sd_module.check_output_settings(
+                device=device.index, channels=channels, dtype='float32',
+                samplerate=rate or device.default_rate or None)
     except Exception as exc:
         sample_text = 'its current OS rate'
         raise ValueError(
@@ -1199,6 +1243,8 @@ def validate_settings(settings, devices, sd_module=None, audio_devices=()):
             source_audio not in dict(SOURCE_AUDIO_CHOICES).values()):
         raise ValueError('Choose video soundtrack, an input device, or Off.')
     source_audio_input_side = 'mix'
+    if offline and source_audio == 'device':
+        raise ValueError('Offline export cannot use a live audio input.')
     source_audio_gain = 1.0
     source_audio_delay_ms = 0.0
     if mono_profile and source_audio != 'off':
@@ -1417,6 +1463,11 @@ def validate_settings(settings, devices, sd_module=None, audio_devices=()):
             raise ValueError('Screen region must be left,top,width,height with positive size.')
 
     return {
+        'output_mode': output_mode, 'wav_path': wav_path, 'rate': rate,
+        'output_pair': output_pair, 'frames': frames, 'seconds': seconds,
+        'source_passes': passes, 'rotation': rotation,
+        'mirror': bool(settings.get('mirror', False)),
+        'luma_adjust_linear': bool(settings.get('luma_adjust_linear', False)),
         'device': device,
         'source': source,
         'channels': channels,
@@ -1483,9 +1534,20 @@ def build_command(settings, devices, sd_module=None, python=None,
         python or sys.executable,
         str(ROOT/'tools'/'v7_live.py'),
         'send',
-        '--device', str(checked['device'].index),
-        '--source', checked['source'],
     ]
+    if checked['output_mode'] != 'export':
+        command.extend(('--device', str(checked['device'].index)))
+    command.extend(('--source', checked['source']))
+    if checked['output_mode'] != 'live':
+        command.extend(('--write' if checked['output_mode'] == 'export' else '--record',
+                        checked['wav_path']))
+    if checked['output_pair'] != (0, 1):
+        command.extend(('--channels', ','.join(str(c+1) for c in checked['output_pair'])))
+    for name in ('rate', 'frames', 'seconds', 'source_passes', 'rotation'):
+        if checked[name]:
+            command.extend(('--'+name.replace('_', '-'), str(checked[name])))
+    if checked['mirror']:
+        command.append('--mirror')
 
     command.extend(('--profile', checked['profile']))
     if checked['profile'] in ASPECT_PROFILES:
@@ -1561,6 +1623,8 @@ def build_command(settings, devices, sd_module=None, python=None,
             command.extend(('--dct-kernel-dir', str(folder)))
         if not checked['luma_adjust']:
             command.append('--no-luma-adjust')
+        elif checked['luma_adjust_linear']:
+            command.append('--luma-adjust-linear')
         if checked['linear_preshrink'] != SENDER_DEFAULTS['linear_preshrink']:
             command.append('--linear-preshrink' if checked['linear_preshrink']
                            else '--no-linear-preshrink')
@@ -1608,7 +1672,7 @@ def build_command(settings, devices, sd_module=None, python=None,
     # A numeric index is only valid inside one PortAudio enumeration. The
     # sender is a new process with its own enumeration, so it also gets the
     # device's name and backend and resolves the index itself.
-    if checked['device'].name:
+    if checked['device'] is not None and checked['device'].name:
         command.extend(('--device-name', checked['device'].name))
         if checked['device'].hostapi:
             command.extend(('--device-hostapi', checked['device'].hostapi))
@@ -1736,7 +1800,8 @@ class SenderGui:
     # choice could only fail validation. --encode-filter remains on the CLI.
     SECTIONS = (
         ('Live controls', LIVE_FIELDS),
-        ('Output', ('device', 'speed')),
+        ('Output', ('output_mode', 'device', 'channels', 'rate', 'speed', 'wav_path')),
+        ('Playback and limits', ('source_passes', 'frames', 'seconds', 'rotation', 'mirror')),
         ('Source', ('source', 'capture_fps', 'preview', 'video_source',
                     'video_live', 'camera', 'screen_target')),
         ('Wire profile', ('profile', 'aspect_layout', 'mono_video_side')),
@@ -1745,7 +1810,7 @@ class SenderGui:
                           'source_audio_delay_ms')),
         ('Picture encode', ('dct_encode', 'pixel_encode', 'pixel_detail',
                             'pixel_grid', 'luma_adjust',
-                            'linear_preshrink', 'clip_aware',
+                            'linear_preshrink', 'luma_adjust_linear', 'clip_aware',
                             'perceptual_resize',
                             'perceptual_detail_strength')),
         ('Downscale and sharpness', (
@@ -1762,8 +1827,9 @@ class SenderGui:
         'pixel_detail', 'pixel_grid',
     )
     DOUBLE_WIDTH_FIELDS = ('device', 'video_source', 'aspect_layout',
-                           'source_audio', 'mono_video_side', 'dct_kernel')
+                            'source_audio', 'mono_video_side', 'dct_kernel', 'wav_path')
     DROPDOWN_FIELDS = (
+        'output_mode', 'rotation',
         'device', 'source', 'capture_fps', 'profile', 'encode_filter',
         'mono_video_side', 'source_audio', 'source_audio_device',
         'source_audio_input_side', 'screen_backend', 'capture_filter',
@@ -1805,6 +1871,9 @@ class SenderGui:
         self.output_device_identity = None
         self.source_audio_device_identity = None
         self.settings = {
+            'output_mode': 'live', 'wav_path': '', 'channels': '1,2', 'rate': '',
+            'frames': '0', 'seconds': '0', 'source_passes': '0',
+            'rotation': 0, 'mirror': False, 'luma_adjust_linear': False,
             'device': None,
             'source': None,
             'profile': DEFAULT_PROFILE,
@@ -1972,6 +2041,11 @@ class SenderGui:
                      if device.index == self.settings['device']), None)
 
     def _choices(self, dest):
+        if dest == 'output_mode':
+            return (('Send live', 'live'), ('Send and record WAV', 'record'),
+                    ('Export WAV · offline', 'export'))
+        if dest == 'rotation':
+            return tuple((f'{angle}°', angle) for angle in (0, 90, 180, 270))
         if dest == 'device':
             return tuple((device.label, device.index) for device in self.devices)
         if dest == 'source_audio_device':
@@ -2460,7 +2534,14 @@ class SenderGui:
     def _shown_fields(self, fields):
         source = self.settings['source']
         fields = [dest for dest in fields if not (
-            dest == 'video_source' and source != 'video' or
+            dest == 'preview' and self.settings.get('output_mode') == 'export' or
+            dest == 'wav_path' and self.settings.get('output_mode', 'live') == 'live' or
+            dest in ('device', 'channels') and self.settings.get('output_mode') == 'export' or
+            dest == 'source_passes' and source != 'video' or
+            dest == 'luma_adjust_linear' and not (
+                self.settings.get('dct_encode') and self.settings.get('luma_adjust')
+                and not self.settings.get('pixel_encode')) or
+             dest == 'video_source' and source != 'video' or
             dest == 'video_live' and source != 'video' or
             dest == 'camera' and source != 'camera' or
             dest == 'screen_target' and source != 'screen' or
@@ -2861,6 +2942,16 @@ class SenderGui:
         return text
 
     def _plain_value_label(self, dest):
+        if dest in ('output_mode', 'rotation'):
+            return next((label for label, value in self._choices(dest)
+                         if value == self.settings.get(dest)), 'Choose…')
+        if dest in ('frames', 'seconds', 'source_passes'):
+            value = self.settings.get(dest, '0')
+            if str(value).strip() in ('', '0', '0.0'):
+                return ('0 · loop' if dest == 'source_passes' else '0 · unlimited')
+        if dest == 'rate' and not self.settings.get(dest):
+            return ('48 kHz · default' if self.settings.get('output_mode') == 'export'
+                    else 'Native · device rate')
         if dest.startswith(KERNEL_PARAM_PREFIX):
             found = self._kernel_param(dest)
             if found is None:
@@ -2995,6 +3086,8 @@ class SenderGui:
 
     # ---- video-file transport ------------------------------------------
     def _file_source(self):
+        if self.settings.get('output_mode') == 'export':
+            return False
         return is_file_source(self.settings)
 
     def _resume_position(self):
@@ -3241,7 +3334,8 @@ class SenderGui:
         try:
             preview_socket = None
             preview_warning = None
-            if self.settings.get('preview') in ('window', 'popout'):
+            if (self.settings.get('output_mode') != 'export' and
+                    self.settings.get('preview') in ('window', 'popout')):
                 try:
                     preview_socket = socket.socket(socket.AF_INET,
                                                    socket.SOCK_DGRAM)
@@ -3304,7 +3398,9 @@ class SenderGui:
         self.preview_reader_error_reported = False
         self.stop_requested = False
         self.page = 'live'
-        self.notice = preview_warning or 'Starting sender…'
+        self.notice = preview_warning or (
+            'Exporting modem WAV…' if self.settings.get('output_mode') == 'export'
+            else 'Starting sender…')
         self.lines.clear()
         self.reader = threading.Thread(
             target=self._read_sender, args=(process,),
@@ -3565,7 +3661,9 @@ class SenderGui:
                 self.stop_requested = False
                 self.sender_device_lost = False
                 if return_code == 0:
-                    self.notice = 'Sender stopped.'
+                    self.notice = ('WAV export finished.'
+                                   if self.settings.get('output_mode') == 'export'
+                                   else 'Sender stopped.')
                 else:
                     self.notice = f'Sender exited with status {return_code}.'
                 if self.change_source_after_stop:
@@ -3756,14 +3854,14 @@ class SenderGui:
             draw.text((right-24, top+7), '▾', font=small,
                       fill=(80, 100, 114) if locked else (134, 169, 188))
             edge = right-28
-        if dest == 'video_source':
+        if dest in ('video_source', 'wav_path'):
             browse = (right-78, top+4, right-6, bottom-4)
             draw.rounded_rectangle(
                 browse, radius=4, fill=(20, 36, 46) if locked else (30, 58, 76),
                 outline=(48, 68, 82) if locked else (75, 111, 132), width=1)
             draw.text((browse[0]+10, top+8), 'Browse', font=small,
                       fill=(110, 128, 142) if locked else (229, 239, 246))
-            self.hits['browse:video_source'] = browse
+            self.hits['browse:'+dest] = browse
             edge = browse[0]-8
             field_right = browse[0]-4
         if dest in self.MATCH_FIELDS:
@@ -4170,6 +4268,15 @@ class SenderGui:
             self._transport(hit.split(':', 1)[1])
         elif hit == 'transport:seek':
             self._seek_press(x)
+        elif hit == 'browse:wav_path':
+            if self.process is None:
+                try:
+                    from tools.v7_native_file_dialog import pick_file
+                    path = pick_file(self.settings.get('wav_path', ''), save=True)
+                    if path:
+                        self._assign('wav_path', path)
+                except (OSError, RuntimeError) as exc:
+                    self.notice = str(exc)
         elif hit == 'browse:video_source':
             if self.process is not None:
                 self.notice = 'Settings are locked while the sender is running.'

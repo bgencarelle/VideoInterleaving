@@ -10,6 +10,21 @@ This directory contains utility scripts for image processing, validation, conver
 - [Asset Preparation](#asset-preparation)
 - [Archived Scripts](#archived-scripts)
 
+### Compressed RGB ASCII-web baker
+
+From the repository root:
+
+```bash
+.venv/bin/python utilities/bake_ascii_rgb.py -i images_sbs -o tmp/images_sbs_ascii_rgb
+.venv/bin/python main.py --mode asciiweb --bake-dir tmp/images_sbs_ascii_rgb
+```
+
+This new, opt-in baker retains separate face/float RGBA samples, losslessly
+compresses and deduplicates them, and uses mmap-backed indexes with bounded
+on-demand decompression. It avoids full-image decoding/sampling during playback
+without pre-mixing layers or changing RGB/glyph output. It targets `/ascii`,
+not JPEG `--mode web`. See [format, validation and limitations](../docs/ASCII_RGB_BAKES.md).
+
 ---
 
 ## Validation
@@ -232,9 +247,27 @@ Options:
 
 ## Asset Preparation
 
+### `bake.py` — unified application baker
+
+Build independently selectable face/float layers for all six `main.py` modes:
+
+```bash
+.venv/bin/python utilities/bake.py -i images_sbs --modes all --estimate
+.venv/bin/python utilities/bake.py -i images_sbs -o images_bakes --modes all
+.venv/bin/python main.py --mode ascii --bake-dir images_bakes
+```
+
+No layers are pre-mixed. Display modes share lossless indexed pixels; scope and
+modem use their existing specialised per-layer formats. Decoded display storage
+can be much larger than JPEGs. See `docs/UNIFIED_BAKES.md` for the tradeoffs.
+
 ### `bake_assets.py`
 
 Packs image folders into single `.npy` memory-mapped files for instant seeking. Resizes images to the target resolution (from `settings.py`) and stores as RGBA arrays.
+
+This is the legacy generic slab writer, not the supported display bake format.
+For `main.py` playback use `bake.py` and `--bake-dir` instead. The modem baker
+continues to reuse its streaming `write_slab` helper.
 
 **Dependencies:**
 - `numpy`
@@ -331,6 +364,4 @@ The following scripts are being modernized with:
 - 🔄 `batch.py`
 - 🔄 `find_missing.py`
 - 🔄 `turntoblack.py`
-
-
 

@@ -176,20 +176,24 @@ class SenderGuiTests(unittest.TestCase):
                          [(0, 2)])
         self.assertIsInstance(devices[0], InputDevice)
 
-    def test_sender_uses_the_output_rate_the_os_is_set_to(self):
-        # A rate left in older saved settings must not reach the CLI.
+    def test_sender_can_request_a_rate_or_follow_the_os_setting(self):
         self.settings['rate'] = '96000'
         command = build_command(self.settings, self.devices, self.sd)
 
-        self.assertNotIn('--rate', command)
+        self.assertEqual(command[command.index('--rate')+1], '96000')
         kwargs = self.sd.check_output_settings.call_args.kwargs
         self.assertEqual(kwargs['device'], 3)
         self.assertEqual(kwargs['channels'], 2)
-        self.assertEqual(kwargs['samplerate'], self.device.default_rate)
+        self.assertEqual(kwargs['samplerate'], 96000)
+        self.settings['rate'] = None
+        command = build_command(self.settings, self.devices, self.sd)
+        self.assertNotIn('--rate', command)
+        self.assertEqual(self.sd.check_output_settings.call_args.kwargs['samplerate'],
+                         self.device.default_rate)
         self.assertEqual(device_rate_text(self.device),
                          f'{self.device.default_rate/1000:g} kHz · OS setting')
         self.assertEqual(device_rate_text(None), 'OS setting')
-        self.assertNotIn('rate', SenderGui(self.devices)._visible_fields())
+        self.assertIn('rate', SenderGui(self.devices)._visible_fields())
 
     def test_folded_default_builds_sender_cli_without_verbose_logging(self):
         command = build_command(self.settings, self.devices, self.sd)
@@ -1882,7 +1886,9 @@ class SenderGuiButtonLayoutTests(unittest.TestCase):
                     max_scroll = gui._max_scroll(
                         items, gui._setup_room(self.SIZE))
                     if gui.settings['dct_kernel'] == 'reference':
-                        self.assertEqual(max_scroll, 0)
+                        gui._scroll_to('dct_kernel', self.SIZE)
+                        gui._canvas(self.SIZE)
+                        self.assertIn('field:dct_kernel', gui.hits)
                     else:
                         self.assertGreaterEqual(max_scroll, 0)
                         target = gui._kernel_param_fields()[-1]
@@ -1896,6 +1902,8 @@ class SenderGuiButtonLayoutTests(unittest.TestCase):
         self.assertEqual(len(names), len(set(names)))
         # Everything the page offered before the sections still has a place.
         before = (
+            'output_mode', 'wav_path', 'channels', 'rate', 'frames', 'seconds',
+            'source_passes', 'rotation', 'mirror', 'luma_adjust_linear',
             'device', 'source', 'video_source', 'preview', 'video_live',
             'camera', 'screen_target', 'source_audio', 'source_audio_device',
             'source_audio_input_side', 'source_audio_gain',

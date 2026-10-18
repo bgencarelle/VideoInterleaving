@@ -309,7 +309,7 @@ get_packages_for_platform() {
             ;;
         rhel)
             # From README.md (Fedora/CentOS)
-            pkg_list="python3 python3-pip python3-devel gcc gcc-c++ make cmake pkgconfig \
+            pkg_list="python3 python3-pip python3-devel python3-tkinter gcc gcc-c++ make cmake pkgconfig \
 libwebp-devel libjpeg-turbo-devel SDL2-devel alsa-lib-devel portaudio python3-opencv \
 mesa-libGL-devel mesa-libGLU-devel mesa-libEGL-devel mesa-libGLES-devel \
 libglvnd-devel glfw-devel mesa-utils \
@@ -317,7 +317,7 @@ chrony ninja-build bind-utils certbot python3-certbot-nginx"
             ;;
         arch)
             # Arch Linux equivalents
-            pkg_list="python python-pip base-devel cmake pkg-config ninja \
+            pkg_list="python python-pip tk base-devel cmake pkg-config ninja \
 libwebp libjpeg-turbo sdl2 alsa-lib mesa glu glfw portaudio python-opencv ffmpeg \
 chrony bind-tools certbot certbot-nginx"
             ;;

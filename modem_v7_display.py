@@ -239,17 +239,14 @@ def wire_packet(encoder, value, aspect_code, absolute, source_index, *,
 
 
 class PicturesAhead:
-    """Loads and encodes pictures before their send time, so the send loop
-    only hands a finished one to the wire when its slot comes.
+    """One current/next picture handoff for timestamped audio packets.
 
-    The application's local mode does the same for its window: workers load
-    upcoming images into a buffer and the display takes the nearest one that
-    is ready, never waiting. Here each worker job loads, composites and
-    encodes one picture together. A packet carries the index of the picture
-    it really holds, so the receiver's loop readout stays true.
+    Each job loads, composites and prepares an exact source index. The live
+    application uses ``wait_exact`` and rejects expired audio reservations;
+    it never substitutes the legacy ``take`` helper's nearest-ready picture.
     """
 
-    def __init__(self, make, frames, workers=2, keep=8):
+    def __init__(self, make, frames, workers=1, keep=2):
         from collections import OrderedDict
         from concurrent.futures import ThreadPoolExecutor
         self._make = make
@@ -274,13 +271,22 @@ class PicturesAhead:
         d = abs(int(a)-int(b)) % self.frames
         return min(d, self.frames-d)
 
-    def take(self, index, folders):
+    def take(self, index, folders, wait_seconds=0.0):
         """(index sent, (values, aspect)): the picture for ``index`` if it is
-        finished, else the nearest finished one for these folders; waits only
-        when nothing at all is finished (the first packet, a folder change)."""
+        finished, else the nearest finished one for these folders. An optional
+        bounded exact-job wait precedes fallback; with no ready job, wait."""
         folders = tuple(int(v) for v in folders)
         key = (int(index), folders)
         exact = self._jobs.get(key)
+        if exact is not None and not exact.done() and wait_seconds > 0:
+            from concurrent.futures import TimeoutError
+            try:
+                result = exact.result(timeout=wait_seconds)
+            except TimeoutError:
+                pass
+            else:
+                self.exact += 1
+                return key[0], result
         if exact is not None and exact.done() and not exact.cancelled():
             self.exact += 1
             return key[0], exact.result()
@@ -296,8 +302,15 @@ class PicturesAhead:
         self.waited += 1
         return key[0], self._jobs[key].result()
 
+    def wait_exact(self, index, folders):
+        """Prime a specific job; nearest-ready fallback is only for playback."""
+        self.request(index, folders)
+        key = (int(index), tuple(int(v) for v in folders))
+        return key[0], self._jobs[key].result()
+
     def close(self):
-        self._pool.shutdown(wait=False, cancel_futures=True)
+        self._pool.shutdown(wait=True, cancel_futures=True)
+        self._jobs.clear()
 
 
 def encoder_packet(encoder, library, absolute, source_index, selection, *,
@@ -356,6 +369,12 @@ def _open_midi_input(index_calculator):
 
 
 def run_modem(args):
+    from tools.v7_runtime import blas_budget
+    with blas_budget():
+        return _run_modem(args)
+
+
+def _run_modem(args):
     import settings
     import index_calculator
 
@@ -368,7 +387,7 @@ def run_modem(args):
             # Always rebuild so lists from a previous source directory cannot
             # leak into this run.
             rebuild=True,
-            capacity=getattr(settings, 'FIFO_LENGTH', 5))
+            capacity=1)
         runtime_library = library
         root = str(library.root)
     else:
@@ -522,26 +541,14 @@ def run_modem(args):
     # lock over every 5 ms by default; hand it over sooner.
     switch_interval = sys.getswitchinterval()
     sys.setswitchinterval(min(switch_interval, .0005))
-    # Have the first packets' pictures finished before the sound starts: a
-    # first packet that waits for its picture is late, and the output skips.
+    # Resolve initial folders before opening audio. Exact priming below uses
+    # the opened device's cadence and its reserved presentation timestamp.
     now_ns = time.time_ns()
-    packet_seconds = _v7.PULSE_FRAME/_v7.RATE/speed
     first, _ = index_calculator.calculate_free_clock_index(
         library.frames, settings.PINGPONG, at_time_ns=now_ns,
         time_offset_ns=index_offset_ns, publish=False)
     first = max(0, min(int(first), library.frames - 1))
     first_folders, previous = _folders(args, library, first, selected, previous)
-    priming = []
-    for step in range(AHEAD_PACKETS+1):
-        later, _ = index_calculator.calculate_free_clock_index(
-            library.frames, settings.PINGPONG,
-            at_time_ns=now_ns + round(step*packet_seconds*1e9),
-            time_offset_ns=index_offset_ns, publish=False)
-        priming.append(max(0, min(int(later), library.frames - 1)))
-    for wanted in priming:
-        ahead.request(wanted, first_folders)
-    for wanted in priming:
-        ahead.take(wanted, first_folders)        # waits for each to finish
     try:
         midi_input = _open_midi_input(index_calculator)
         with PacketOutput(device(args.scope_device), channels, output_latency,
@@ -550,6 +557,25 @@ def run_modem(args):
                           block=getattr(args, 'modem_block_samples', None)) as output:
             print(f'[MODEM/V7] output {output.rate:g} Hz, {output.fps:.2f} fps')
             packet_ns = round(output.emit_frame/output.rate * 1_000_000_000)
+            # The opened device determines cadence and latency. Prime around
+            # the reserved receiver presentation time before the first packet.
+            startup_slot = None
+            if not index_calculator.midi_mode:
+                startup_slot = output.reserve(max(prepare_ms, 500), receive_margin_ms)
+                first_target = startup_slot.target_time_ns
+                priming = []
+                for step in range(2):
+                    wanted, _ = index_calculator.calculate_free_clock_index(
+                        library.frames, settings.PINGPONG,
+                        at_time_ns=first_target + step * packet_ns,
+                        time_offset_ns=index_offset_ns, publish=False)
+                    if step == 0:
+                        first_folders, previous = _folders(
+                            args, library, wanted, selected, previous)
+                    priming.append(wanted)
+                    ahead.request(wanted, first_folders)
+                for wanted in priming:
+                    ahead.wait_exact(wanted, first_folders)
             while not args.modem_frames or sent < args.modem_frames:
                 started = time.perf_counter()
                 output.wait_ready()
@@ -559,7 +585,10 @@ def run_modem(args):
                 target_time_ns = None
                 next_index = None
                 if not index_calculator.midi_mode:
-                    slot = output.reserve(prepare_ms, receive_margin_ms)
+                    if sent == 0 and startup_slot is not None:
+                        slot, startup_slot = startup_slot, None
+                    else:
+                        slot = output.reserve(prepare_ms, receive_margin_ms)
                     if slot is not None:
                         target_time_ns = slot.target_time_ns
                         index, _ = index_calculator.calculate_free_clock_index(
@@ -577,15 +606,13 @@ def run_modem(args):
                         next_index = max(0, min(int(next_index),
                                                 library.frames - 1))
                 folders, previous = _folders(args, library, index, selected, previous)
-                prefetch(index, folders, next_index)
                 # Ask for this packet's picture and the next few packets'
                 # (by the clock at their send times), then take the finished
                 # one for this slot.
                 upcoming = [index]
-                for step in range(1, AHEAD_PACKETS+1):
+                for step in range(1, 2):
                     if target_time_ns is None:
-                        upcoming.append((index+step) % library.frames)
-                        continue
+                        break  # A future MIDI event is not predictable.
                     later, _ = index_calculator.calculate_free_clock_index(
                         library.frames, settings.PINGPONG,
                         at_time_ns=target_time_ns + step*packet_ns,
@@ -594,7 +621,10 @@ def run_modem(args):
                 for wanted in upcoming:
                     ahead.request(wanted, folders)
                 handoff = time.perf_counter()
-                sent_index, (value, aspect_code) = ahead.take(index, folders)
+                # Never substitute a nearby picture for a timestamped index.
+                # If preparation is late, submit rejects the expired slot and
+                # the next iteration samples a fresh presentation timestamp.
+                sent_index, (value, aspect_code) = ahead.wait_exact(index, folders)
                 direction = (_v7.loop_direction(_v7.loop_ticks(target_time_ns), loop)
                              if loop.clocked and target_time_ns is not None else 1)
                 audio = wire_packet(encoder, value, aspect_code, sent + 1,
@@ -602,6 +632,7 @@ def run_modem(args):
                 report = _packet_report(encoder, audio, sent + 1, sent_index,
                                         *folders, aspect_code)
                 report.update(direction=direction, wanted_index=index,
+                              exact_picture=sent_index == index,
                               encode_ms=(time.perf_counter()-handoff)*1000)
                 if runtime_library is not None:
                     report['fifo_hits'] = runtime_library.fifo_hits

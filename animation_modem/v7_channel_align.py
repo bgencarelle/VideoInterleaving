@@ -86,14 +86,18 @@ class ChannelAligner:
         if block.ndim != 2 or block.shape[1] != 2 or not len(block):
             return block
         # Measure on what arrives, before alignment.
-        self.history = np.concatenate((self.history, block.astype(np.float32)))[-self.window:]
+        block32 = np.asarray(block, np.float32)
+        self.history = np.concatenate((self.history, block32))[-self.window:]
         self.since += len(block)
         locked = self.agreed >= LOCK_AFTER and self.candidate == self.offset
         if self.since >= (self.every_locked if locked else self.every):
             self.since = 0
             self._remeasure()
         # Delay line: the leading channel waits |offset| samples.
-        joined = np.concatenate((self.pending, block.astype(np.float32)))
+        if not self.offset:
+            self.pending = self.pending[:0]
+            return block32.astype(block.dtype, copy=False)
+        joined = np.concatenate((self.pending, block32))
         lead = 0 if self.offset > 0 else 1       # right lags: left leads
         delay = abs(self.offset)
         out = np.empty((len(block), 2), np.float32)

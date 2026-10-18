@@ -9,6 +9,7 @@ CHECKS = (
     ('numpy', 'numpy from requirements-modem.txt'),
     ('scipy.fft', 'scipy from requirements-modem.txt / python3-scipy'),
     ('scipy.signal', 'scipy from requirements-modem.txt / python3-scipy'),
+    ('threadpoolctl', 'threadpoolctl from requirements-modem.txt'),
     ('PIL.Image', 'Pillow from requirements-modem.txt'),
     ('sounddevice', 'sounddevice from requirements-modem.txt and PortAudio '
                     '(libportaudio2 on Debian; portaudio on Fedora/Arch/Homebrew/MacPorts)'),
@@ -27,7 +28,7 @@ def check(quiet=False):
     if failures:
         return 1
     if not quiet:
-        print('Modem dependencies available (NumPy, SciPy, Pillow and sounddevice/PortAudio).')
+        print('Modem dependencies available (NumPy, SciPy, threadpoolctl, Pillow and sounddevice/PortAudio).')
     return 0
 
 

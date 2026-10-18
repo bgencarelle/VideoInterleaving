@@ -255,7 +255,8 @@ class FFmpegSourceAudio:
     """
 
     def __init__(self, source, sample_rate, live=None, buffer_seconds=2.0,
-                 target_samples=None, start=0.0):
+                 target_samples=None, start=0.0, loop=True):
+        self._loop = loop
         from tools.v7_capture import _LIVE_SCHEMES, _is_stream_url
 
         source = os.path.expanduser(str(source))
@@ -291,7 +292,7 @@ class FFmpegSourceAudio:
         if not self._is_live:
             # A pass from a seek position plays to the end once; see
             # tools.v7_capture.FilePlayback.
-            if start <= 0:
+            if start <= 0 and self._loop:
                 command += ['-stream_loop', '-1']
         elif self._is_stream:
             command += ['-rw_timeout', '10000000']
@@ -437,7 +438,8 @@ class SharedVideoAudioSource:
 
     def __init__(self, source, sample_rate, width=320, scale_flags='bicubic',
                  live=None, target_samples=None, buffer_seconds=2.0,
-                 preserve_size=False, start=0.0):
+                 preserve_size=False, start=0.0, loop=True):
+        self._loop = loop
         from tools.v7_capture import _LIVE_SCHEMES, _is_stream_url
 
         if not hasattr(os, 'mkfifo'):
@@ -548,7 +550,7 @@ class SharedVideoAudioSource:
             # FFmpeg cannot combine an input seek with -stream_loop: a pass
             # from a seek position plays to the end once, and FilePlayback
             # then reopens the looping reader from the beginning.
-            if start <= 0:
+            if start <= 0 and self._loop:
                 command += ['-stream_loop', '-1']
         elif self._is_stream:
             command += ['-rw_timeout', '10000000']
@@ -583,7 +585,7 @@ class SharedVideoAudioSource:
         from tools.v7_capture import CaptureEndOfStream, _read_ppm
 
         start = max(0.0, float(start or 0.0))
-        tail = start > 0 and not self._is_live
+        tail = (start > 0 or not self._loop) and not self._is_live
         opened = []
         proc = None
         try:
@@ -684,6 +686,8 @@ class SharedVideoAudioSource:
                 pass
 
         reader.paced = True
+        if self.has_audio:
+            reader.fps = self.PICTURE_RATE
         reader.close = lambda: self._halt(launch_id)
         reader.release = release
         self._reader = reader

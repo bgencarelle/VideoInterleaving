@@ -405,9 +405,21 @@ def _file_playback(args, start, open_reader, reader=None, on_close=None):
             not is_file_video_source(args.video_source)):
         return None
     fps, frames = probe_frames(args.video_source)
-    return FilePlayback(open_reader, duration=probe_duration(args.video_source),
-                        start=start, reader=reader, on_close=on_close,
-                        fps=fps, loop_frames=frames)
+    duration = probe_duration(args.video_source)
+    reader_fps = getattr(reader, 'fps', None)
+    if isinstance(reader_fps, (int, float)) and reader_fps > 0:
+        # Shared A/V capture emits a constant-rate picture stream rather than
+        # the source file's frame cadence. Transport positions follow it.
+        fps = reader_fps
+        frames = round(duration*fps) if duration else None
+    playback = FilePlayback(open_reader, duration=duration,
+                         start=start, reader=reader, on_close=on_close,
+                         fps=fps, loop_frames=frames,
+                          passes=getattr(args, 'source_passes', 0))
+    playback.completed_passes = getattr(args, '_sender_completed_passes', 0)
+    playback.ended = bool(playback.passes and
+                          playback.completed_passes >= playback.passes)
+    return playback
 
 
 def _device_arg(value):
@@ -494,6 +506,7 @@ def _capture(args, start=0.0):
         return test_source()
     if args.source == 'video':
         return video_source(args.video_source, width=args.capture_width,
+                            **({'loop': False} if getattr(args, 'source_passes', 0) else {}),
                             scale_flags=capture_filter,
                             live=True if args.video_live else None,
                             preserve_size=bool(getattr(args, 'dct_encode', False)),
@@ -1390,6 +1403,29 @@ def _resolve_named_send_device(sd, args):
 
 
 def run_send(args):
+    from tools.v7_runtime import blas_budget
+    with blas_budget():
+        return _run_send(args)
+
+
+def _run_send(args):
+    from tools.v7_file import validate_run_options
+    validate_run_options(args)
+    if getattr(args, 'write', None):
+        from tools.v7_file import export_wav
+        try:
+            count = export_wav(args, live=sys.modules[__name__])
+        except KeyboardInterrupt:
+            if not args.no_log or getattr(args, 'gui_control', False):
+                print(json.dumps({'status': 'wav_export_stopped',
+                                  'path': str(args.write)}), flush=True)
+            return
+        if not args.no_log or getattr(args, 'gui_control', False):
+            print(json.dumps({'status': 'wav_exported', 'packets': count,
+                              'path': str(args.write)}), flush=True)
+        return count
+    if args.device is None:
+        raise ValueError('Live sending requires --device (or use --write)')
     import sounddevice as sd
     from tools.v7_device_recovery import device_identity
 
@@ -1409,6 +1445,8 @@ def run_send(args):
     args._sender_total = 0
     args._sender_transport = None
     args._sender_video_position = None
+    args._sender_completed_passes = 0
+    args._record_started = False
     stop = threading.Event()
     try:
         while not stop.is_set():
@@ -1700,6 +1738,9 @@ def build_send_encoder(args):
         """(values, aspect code[, preview]) for one source frame: exactly what
         the live sender encodes. ``kernel`` is the frame's DCT options (the
         live kernel controls' current choice); the launch choice if None."""
+        from tools.v7_file import transform_frame
+        frame = transform_frame(frame, getattr(args, 'rotation', 0),
+                                getattr(args, 'mirror', False))
         tones = tone_controls.snapshot()
         options = kernel_controls.options(dct_options) if kernel is None else kernel
         return _values(
@@ -1874,10 +1915,11 @@ def _run_send_session(args):
         if status is None:
             return
         args._sender_video_position = status['position']
+        args._sender_completed_passes = status['passes']
         if not getattr(args, 'gui_control', False):
             return
         now = time.monotonic()
-        if (status['paused'] == playback_reported[0] and
+        if (not status.get('ended') and status['paused'] == playback_reported[0] and
                 now-playback_reported[1] < .25):
             return
         playback_reported[:] = [status['paused'], now]
@@ -1886,6 +1928,7 @@ def _run_send_session(args):
             'position': round(status['position'], 3),
             'duration': status['duration'],
             'paused': status['paused'],
+            'passes': status['passes'], 'ended': status['ended'],
         }), flush=True)
     requested_rate = getattr(args, 'rate', None)
     output_rate = None
@@ -1920,7 +1963,6 @@ def _run_send_session(args):
     started = getattr(args, '_sender_started_at', None)
     if started is None:
         started = time.monotonic()
-        args._sender_started_at = started
 
     unset = object()
     applied_kernel = [unset]
@@ -2045,7 +2087,10 @@ def _run_send_session(args):
         return output, stats
 
     def produce():
-        nonlocal total, buffered_audio_seconds
+        nonlocal total, buffered_audio_seconds, started
+        if getattr(args, '_sender_started_at', None) is None:
+            started = time.monotonic()
+            args._sender_started_at = started
         frames = []
         aspects = []
         deferred_gains = []
@@ -2061,17 +2106,27 @@ def _run_send_session(args):
         keeper = (_SenderIndex() if os.environ.get('V7_SEND_INDEX', '1') != '0'
                   else None)
         stamps = []
+        from tools.v7_frame_cache import PreparedFrameCache, preparation_settings
+        prepared = PreparedFrameCache()
         try:
-            while not stop.is_set() and (args.seconds <= 0 or
+            while not stop.is_set() and (not getattr(args, 'frames', 0) or
+                                         total+len(frames) < args.frames) and (args.seconds <= 0 or
                                          time.monotonic()-started < args.seconds):
                 delay = next_capture-time.monotonic()
                 if delay > 0:
                     time.sleep(delay)
                 frame = first_audio_video_frame
                 first_audio_video_frame = None
+                capture_token = None
                 if frame is None:
-                    frame = grab()
+                    snapshot = getattr(grab, 'snapshot', None)
+                    if snapshot is None:
+                        frame = grab()
+                    else:
+                        frame, capture_token = snapshot()
+                        capture_token = ('capture', capture_token)
                 if frame is None and getattr(grab, 'ended', False):
+                    report_playback()
                     break
                 # A file soundtrack is the clock: take the picture for the
                 # sound this packet will carry, chosen now, not on arrival.
@@ -2079,15 +2134,30 @@ def _run_send_session(args):
                 timed = timed() if timed is not None else None
                 if timed is not None:
                     frame = timed
+                    # Shared A/V pictures are newly decoded arrays retained
+                    # in its picture queue; preparation also holds this object.
+                    capture_token = ('soundtrack', id(frame))
                 report_playback()
                 current_tones = tone_controls.snapshot()
                 source_preview = (getattr(frame, 'rgb', frame)
-                                  if image_preview_port is not None else None)
+                                   if image_preview_port is not None else None)
+                if source_preview is not None:
+                    from tools.v7_file import transform_frame
+                    source_preview = transform_frame(
+                        source_preview, getattr(args, 'rotation', 0),
+                        getattr(args, 'mirror', False))
                 frame_options = kernel_controls.options(dct_options)
-                processed = encoder.frame_values(
-                    frame, current_tones['brightness'], current_tones['gamma'],
-                    return_resized=image_preview_port is not None,
-                    deferred_gains_out=deferred_gains, kernel=frame_options)
+                settings_key = preparation_settings(
+                    current_tones['brightness'], current_tones['gamma'], frame_options,
+                    getattr(args, 'rotation', 0), getattr(args, 'mirror', False),
+                    image_preview_port is not None)
+                processed = prepared.prepare(
+                    frame, capture_token, settings_key,
+                    lambda gains: encoder.frame_values(
+                        frame, current_tones['brightness'], current_tones['gamma'],
+                        return_resized=image_preview_port is not None,
+                        deferred_gains_out=gains, kernel=frame_options),
+                    deferred_gains)
                 report_kernel(frame_options.get('kernel'))
                 if image_preview_port is not None:
                     value, aspect, resized_preview = processed
@@ -2127,8 +2197,6 @@ def _run_send_session(args):
                     prebuffer_ready.set()
                 total += len(frames)
                 counter += len(frames)
-                args._sender_counter = counter
-                args._sender_total = total
                 frames = []
                 aspects = []
                 deferred_gains = []
@@ -2152,8 +2220,6 @@ def _run_send_session(args):
                 if buffered_audio_seconds >= startup_buffer_seconds:
                     prebuffer_ready.set()
                 total += len(frames)
-                args._sender_counter = counter+len(frames)
-                args._sender_total = total
             except Exception as exc:
                 failure = exc
 
@@ -2171,9 +2237,11 @@ def _run_send_session(args):
 
     worker = threading.Thread(target=produce, daemon=True)
     worker_started = False
+    recording = None
     try:
         stream_args = {
-            'channels': 1 if args.mono_sum else 2,
+            'channels': (max(getattr(args, 'channels', (0, 1)))+1
+                         if not args.mono_sum else 1),
             'dtype': 'float32',
             'device': args.device,
             'blocksize': 0,
@@ -2185,6 +2253,12 @@ def _run_send_session(args):
             # The producer must wait until that clock is known so its packet
             # resampling preserves 1x playback speed on any supported device.
             output_rate = float(stream.samplerate)
+            if getattr(args, 'record', None):
+                from tools.v7_wav_io import WavWriter
+                recording = WavWriter(args.record, output_rate,
+                                      1 if args.mono_sum else 2,
+                                      append=getattr(args, '_record_started', False))
+                args._record_started = True
             if (not np.isfinite(args.speed) or
                     not P.MIN_PLAYBACK_SPEED <= args.speed <= P.MAX_PLAYBACK_SPEED):
                 raise ValueError(
@@ -2284,6 +2358,7 @@ def _run_send_session(args):
                     live=True if args.video_live else None,
                     target_samples=first_packet_samples,
                     preserve_size=getattr(args, 'dct_encode', False),
+                    loop=not bool(getattr(args, 'source_passes', 0)),
                     **({'start': video_start} if video_start else {}))
                 raw_grab = capture.video_grab
                 source_audio = capture if capture.has_audio else None
@@ -2322,6 +2397,7 @@ def _run_send_session(args):
                     args.video_source, output_rate,
                     live=True if args.video_live else None,
                     target_samples=first_packet_samples,
+                    loop=not bool(getattr(args, 'source_passes', 0)),
                     **({'start': video_start} if video_start else {}))
                 if playback is not None:
                     separate_audio[0] = source_audio
@@ -2440,10 +2516,15 @@ def _run_send_session(args):
                 if device_lost.is_set():
                     raise SenderDeviceLost(device_lost_reason[0])
                 try:
-                    stream.write(np.ascontiguousarray(audio, dtype=np.float32))
+                    from animation_modem.audio_common import route
+                    output = (audio if args.mono_sum else
+                              route(audio, getattr(args, 'channels', (0, 1))))
+                    stream.write(np.ascontiguousarray(output, dtype=np.float32))
                 except Exception as exc:
                     raise SenderDeviceLost(
                         f'output write failed: {exc}') from exc
+                if recording is not None:
+                    recording.write(audio)
 
             while True:
                 if device_lost.is_set():
@@ -2466,6 +2547,8 @@ def _run_send_session(args):
                         # One packet per blocking write lets paced soundtrack
                         # capture advance while the DAC plays this video frame.
                         write_output(packet)
+                        args._sender_counter = counter+index+1
+                        args._sender_total = getattr(args, '_sender_total', 0)+1
                         if preview_worker is not None:
                             handoff_ns = time.monotonic_ns()
                             frame_counter, aspect, values = preview_frames[index]
@@ -2478,6 +2561,9 @@ def _run_send_session(args):
                     # sounddevice requires a C-contiguous interleaved buffer;
                     # filtering/resampling can return a strided view here.
                     write_output(audio)
+                    args._sender_counter = counter+stats['frames_encoded']
+                    args._sender_total = (getattr(args, '_sender_total', 0)+
+                                          stats['frames_encoded'])
                     if preview_worker is not None:
                         handoff_ns = time.monotonic_ns()
                         for frame_counter, aspect, images in preview_frames:
@@ -2495,6 +2581,8 @@ def _run_send_session(args):
     except KeyboardInterrupt:
         raise
     finally:
+        if recording is not None:
+            recording.close()
         device_monitor_stop.set()
         if device_monitor_thread is not None:
             device_monitor_thread.join(timeout=1)
@@ -3458,7 +3546,10 @@ def _detect_mono_fold_side(args, timeout=2.0, wait_for_signal=False):
     from tone_code import ADAPTIVE_MONO, MONO_1000
 
     device_info = sd.query_devices(args.device, 'input')
-    channels = 1 if int(device_info.get('max_input_channels') or 0) < 2 else 2
+    from animation_modem.audio_common import input_pair
+    selected = input_pair(getattr(args, 'channels', None),
+                          int(device_info.get('max_input_channels') or 0))
+    channels = len(selected)
     rate = capture_rate_for(device_info)
     direction = getattr(args, 'direction', 'auto')
     inputs = [LiveInput(1, 1, rate=rate, direction=direction)
@@ -3478,7 +3569,7 @@ def _detect_mono_fold_side(args, timeout=2.0, wait_for_signal=False):
     def callback(indata, _frames, _timing, status):
         if status and not args.no_log:
             print(f'profile probe input: {status}', file=sys.stderr, flush=True)
-        values = np.asarray(indata)
+        values = np.asarray(indata)[:, selected]
         if not values.size or np.max(np.abs(values)) <= 1e-5:
             return
         try:
@@ -3494,7 +3585,7 @@ def _detect_mono_fold_side(args, timeout=2.0, wait_for_signal=False):
                 pass
 
     stream = sd.InputStream(
-        samplerate=rate, channels=channels, dtype='float32',
+        samplerate=rate, channels=max(selected)+1, dtype='float32',
         device=args.device, blocksize=1024, callback=callback)
     timeout = max(0.0, float(timeout))
     deadline = (None if wait_for_signal else time.monotonic()+timeout)
@@ -3584,6 +3675,12 @@ def _make_auto_profile_decoder(args, fold):
 
 
 def run_receive(args):
+    from tools.v7_runtime import blas_budget
+    with blas_budget():
+        return _run_receive_with_budget(args)
+
+
+def _run_receive_with_budget(args):
     if getattr(args, 'image_only', False) and getattr(args, 'headless', False):
         raise ValueError('--image-only cannot be combined with --headless')
     if not getattr(args, 'adaptive_nested_installed', False):
@@ -3605,7 +3702,7 @@ def run_receive(args):
         import nested_fold
         nested_fold.SMOOTH_PASSES = int(args.nested_smooth)
     runtime_options = getattr(args, 'runtime_options', None)
-    if runtime_options is not None:
+    if runtime_options is not None and not getattr(args, 'read', None):
         identity = runtime_options.snapshot().get('audio_input_identity')
         if identity is not None:
             import sounddevice as sd
@@ -3623,11 +3720,13 @@ def run_receive(args):
         profile_decoder = _make_auto_profile_decoder(args, fold)
         # Start on the profile confirmed last time: its first packet is then
         # shown at once (fixes list item 33).
-        sticky = _load_sticky_profile(profile_decoder)
+        sticky = (None if getattr(args, 'read', None) else
+                  _load_sticky_profile(profile_decoder))
         if sticky is not None and not args.no_log:
             print({'status': 'sticky_profile', 'profile': sticky,
                    'video_side': profile_decoder.active_side}, flush=True)
-        profile_decoder.on_switch = _save_sticky_profile
+        profile_decoder.on_switch = (None if getattr(args, 'read', None) else
+                                     _save_sticky_profile)
         _ensure_test_modem_path()
         from tone_code import coded_pilot_timing
         profile_decoder.install()
@@ -3682,6 +3781,14 @@ def run_receive(args):
 
 
 def _run_receive(args, fold, mono_wire=None, adaptive_profile=None):
+    if getattr(args, 'read', None):
+        if adaptive_profile is not None:
+            from tools.v7_file import prime_file_profile
+            prime_file_profile(args, adaptive_profile, sys.modules[__name__])
+        return _run_receive_session(args, fold, mono_wire, adaptive_profile,
+                                    user_stop=getattr(args, 'stop_event', None))
+    if args.device is None:
+        raise ValueError('Receiving requires --device or --read recording.wav')
     import sounddevice as sd
     from tools.v7_device_recovery import device_identity
 
@@ -3721,6 +3828,23 @@ def _run_receive_session(args, fold, mono_wire=None, adaptive_profile=None,
         DEVICE_RATE_FRAME_INTERVAL, DeviceRateDebouncer,
         query_device_snapshot)
 
+    from animation_modem.audio_common import input_pair
+    file_input = getattr(args, 'read', None)
+    if file_input:
+        if getattr(args, 'audio_output_device', None) is not None:
+            raise ValueError('WAV decoding does not open a soundtrack output device')
+        from tools.v7_wav_io import wav_info
+        file_rate, file_channels, _ = wav_info(file_input)
+        device_info = {'default_samplerate': file_rate,
+                       'max_input_channels': file_channels}
+    else:
+        device_info = sd.query_devices(args.device, 'input')
+    selected_channels = input_pair(getattr(args, 'channels', None),
+                                   device_info['max_input_channels'])
+    from animation_modem.v7_input_kernels import select_and_measure
+    # Compile for this stream's channel count before PortAudio can call us.
+    select_and_measure(np.zeros((1, max(selected_channels)+1), np.float32),
+                       selected_channels)
     RECEIVER_GUI_STATUS.clear()
     # The standalone configuration GUI can cancel setup before the capture
     # stream is opened. The CLI keeps the original self-owned lifecycle.
@@ -3755,8 +3879,7 @@ def _run_receive_session(args, fold, mono_wire=None, adaptive_profile=None,
         if carrier_index is not None:
             warmup_audio = warmup_wire[:, carrier_index]
         P.decode_pulse_stream(
-            model, warmup_audio, sample_rate=capture_rate_for(
-                sd.query_devices(args.device, 'input')),
+            model, warmup_audio, sample_rate=capture_rate_for(device_info),
             pilot_timing=args.pilot_timing)
     if adaptive_profile is not None:
         _ensure_test_modem_path()
@@ -3778,14 +3901,13 @@ def _run_receive_session(args, fold, mono_wire=None, adaptive_profile=None,
             models[encoding_type] = (mono_wire.model_for(candidate)
                                      if mono_wire is not None else candidate)
         return models[encoding_type]
-    device_info = sd.query_devices(args.device, 'input')
-    input_channels = 1 if device_info['max_input_channels'] < 2 else 2
+    input_channels = len(selected_channels)
     if adaptive_profile is not None:
         adaptive_profile.input_channels = input_channels
     video_input_index = getattr(mono_wire, 'carrier_index', None)
     if video_input_index is not None and input_channels < 2:
         video_input_index = 0
-    capture_rate = capture_rate_for(device_info)
+    capture_rate = float(file_rate) if file_input else capture_rate_for(device_info)
     if adaptive_profile is not None:
         adaptive_profile.capture_rate = capture_rate
     profile_probes = (
@@ -3961,27 +4083,24 @@ def _run_receive_session(args, fold, mono_wire=None, adaptive_profile=None,
     def callback(indata, frames, timing, status):
         if input_paused.is_set():
             return
-        values = np.asarray(indata, float)
+        block, peak, rms, has_data = select_and_measure(indata, selected_channels)
         if status and passthrough is not None:
             passthrough.note_input_status(status)
         capture_start = capture_sample_cursor[0]
-        capture_sample_cursor[0] += len(values)
+        capture_sample_cursor[0] += len(block)
         if passthrough is not None:
             # Queue the selected leg on every device callback, including
             # silence. Audio delivery must not depend on frame decoding.
-            passthrough.queue_capture(capture_start, indata)
-        meter['peak'] = np.maximum(meter['peak'],
-                                   np.max(np.abs(values), axis=0))
-        meter['rms'] = np.sqrt(np.mean(values*values, axis=0))
-        has_data = bool(np.max(np.abs(values)) > 1e-5)
+            passthrough.queue_capture(capture_start, block)
+        meter['peak'] = np.maximum(meter['peak'], peak)
+        meter['rms'] = rms
         if has_data:
             meter['blocks'] += 1
-            meter['input_samples'] += len(values)
+            meter['input_samples'] += len(block)
         if status:
             print(f'input: {status}', file=sys.stderr, flush=True)
         if not has_data:
             return
-        block = np.array(indata, copy=True)
         try:
             # With its capture position: silent blocks are not sent, so the
             # decoder's own sample count is not the capture count.
@@ -5034,8 +5153,31 @@ def _run_receive_session(args, fold, mono_wire=None, adaptive_profile=None,
         _h[..., 1, 1] = -2**-.5
         P._cancel(_warm, _z+1e-3, _h, None)
         P._CANCEL_STATE['votes'] = None
+    if file_input:
+        from tools.v7_wav_io import wav_blocks
+        try:
+            for block in wav_blocks(file_input):
+                if user_stop is not None and user_stop.is_set():
+                    break
+                callback(block, len(block), None, None)
+                decode_available()
+            # EOF is framing: allow the last packet to finish acquisition.
+            padding = np.zeros((1024, device_info['max_input_channels']), np.float32)
+            for _ in range(4):
+                callback(padding, len(padding), None, None)
+                decode_available()
+            if not args.no_log:
+                print(json.dumps({'status': 'wav_decoded', 'path': str(file_input),
+                                  'decoded': meter['decoded'],
+                                  'verified': meter['verified'],
+                                  'lost': meter['lost']}), flush=True)
+            return dict(meter)
+        finally:
+            if passthrough is not None:
+                passthrough.close()
+
     try:
-        stream = sd.InputStream(samplerate=capture_rate, channels=input_channels,
+        stream = sd.InputStream(samplerate=capture_rate, channels=max(selected_channels)+1,
                                 dtype='float32',
                                 device=args.device, blocksize=1024,
                                 callback=callback)
@@ -5147,8 +5289,24 @@ def parser():
     send.add_argument('--source', choices=('local', 'camera', 'screen', 'video',
                                            'test', 'mouse-follow'),
                       help='capture source; omitted interactively prompts for one')
-    send.add_argument('--device', type=_device_arg, required=True,
-                      help='explicit sounddevice output, e.g. BlackHole 2ch')
+    from animation_modem.audio_common import pair
+    send.add_argument('--device', type=_device_arg,
+                       help='explicit sounddevice output, e.g. BlackHole 2ch')
+    send.add_argument('--channels', type=pair, default=(0, 1),
+                      help='1-based output pair, e.g. 3,4 (default 1,2)')
+    send.add_argument('--write', type=Path,
+                      help='export a video/test source to WAV without an audio device')
+    send.add_argument('--record', type=Path,
+                      help='record logical modem samples while sending live')
+    send.add_argument('--frames', type=int, default=0,
+                      help='exact packet limit; 0 means unlimited')
+    send.add_argument('--source-passes', type=int, default=0,
+                      help='video passes before stopping; 0 loops indefinitely')
+    send.add_argument('--no-loop', dest='source_passes', action='store_const', const=1,
+                      help='play the video once and stop')
+    send.add_argument('--rotation', '--rotate', type=int, choices=(0, 90, 180, 270),
+                      default=0, help='clockwise source rotation')
+    send.add_argument('--mirror', action='store_true', help='mirror source horizontally')
     send.add_argument('--device-name', default=None,
                       help='expected name of a numeric --device; when the '
                            'index names another device, the device with this '
@@ -5333,8 +5491,12 @@ def parser():
                       default=False,
                       help='enable routine status output')
     recv = sub.add_parser('receive', help='receive V7 audio and display it')
-    recv.add_argument('--device', type=_device_arg, required=True,
-                      help='explicit sounddevice input, e.g. BlackHole 2ch')
+    recv.add_argument('--device', type=_device_arg,
+                       help='explicit sounddevice input, e.g. BlackHole 2ch')
+    recv.add_argument('--channels', type=pair, default=None,
+                      help='1-based input pair (default first pair, or mono input)')
+    recv.add_argument('--read', type=Path,
+                      help='decode a recorded WAV without opening an audio device')
     recv.add_argument('--audio-output-device', type=_device_arg,
                       help='explicit output device for the non-video input leg')
     recv.add_argument('--audio-muted', action='store_true',

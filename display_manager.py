@@ -831,6 +831,10 @@ def _log_backend_usage():
     try:
         # Read existing data if any
         if _BACKEND_USAGE_LOG.exists():
+            # Diagnostics must not make a renderer startup consume movie-sized
+            # RAM. Preserve oversized history untouched rather than parsing it.
+            if _BACKEND_USAGE_LOG.stat().st_size > 1024 * 1024:
+                return
             with open(_BACKEND_USAGE_LOG, 'r') as f:
                 existing = json.load(f)
                 # Merge with current session data
@@ -839,10 +843,14 @@ def _log_backend_usage():
                         existing[key] = _BACKEND_USAGE_DATA[key]
                     elif isinstance(existing[key], list) and isinstance(_BACKEND_USAGE_DATA[key], list):
                         existing[key].extend(_BACKEND_USAGE_DATA[key])
-                _BACKEND_USAGE_DATA = existing
+                # Keep the per-session state separate: assigning merged history
+                # back here doubles that history at the next context creation.
+                data = existing
+        else:
+            data = _BACKEND_USAGE_DATA
         # Write updated data
         with open(_BACKEND_USAGE_LOG, 'w') as f:
-            json.dump(_BACKEND_USAGE_DATA, f, indent=2)
+            json.dump(data, f, indent=2)
     except Exception as e:
         # Don't fail if logging fails
         pass
@@ -917,7 +925,7 @@ def _move_wlrctl_offscreen_once(window_obj):
         pass
 
 
-def display_init(state: DisplayState):
+def display_init(state: DisplayState, *, log_backend=True):
     global window, ctx
 
     is_wayland = _is_wayland_session()
@@ -960,6 +968,8 @@ def display_init(state: DisplayState):
         if is_ascii:
             w = getattr(settings, 'ASCII_WIDTH', 120)
             h = getattr(settings, 'ASCII_HEIGHT', 60)
+            if getattr(settings, 'ASCII_WEB_SOURCE_SIZE', None):
+                w, h = settings.ASCII_WEB_SOURCE_SIZE
             width = w if w % 2 == 0 else w + 1
             height = h if h % 2 == 0 else h + 1
         elif is_local_frame_output and not is_server:
@@ -996,7 +1006,8 @@ def display_init(state: DisplayState):
             )
             renderer.set_viewport_size(width, height)
             print(f"[DISPLAY] Headless legacy GL ready: {width}x{height}")
-            _log_backend_usage()
+            if log_backend:
+                _log_backend_usage()
             return legacy_window
 
         # --- BACKEND WATERFALL STRATEGY ---
@@ -1073,7 +1084,8 @@ def display_init(state: DisplayState):
                 )
                 renderer.set_viewport_size(width, height)
                 print(f"[DISPLAY] Headless legacy GL ready: {width}x{height}")
-                _log_backend_usage()
+                if log_backend:
+                    _log_backend_usage()
                 return legacy_window
 
         if is_ascii:
@@ -1103,7 +1115,8 @@ def display_init(state: DisplayState):
                 finally:
                     glfw.terminate()
             hw._cleanup = _cleanup_hidden
-        _log_backend_usage()
+        if log_backend:
+            _log_backend_usage()
         return hw
 
     # --- PATH B: LOCAL WINDOWED MODE ---
@@ -1346,7 +1359,8 @@ def display_init(state: DisplayState):
             renderer.initialize(ctx)
             print("[DISPLAY] Renderer backend: moderngl")
 
-        _log_backend_usage()
+        if log_backend:
+            _log_backend_usage()
 
         if GAMMA_CORRECTION_ENABLED or ENABLE_SRGB_FRAMEBUFFER:
             try:

@@ -290,7 +290,7 @@ class LocalModeSource:
 def mouse_follow_source(initial_width=400, aspect_ratio=4/3):
     """Capture a zoomable screen region centered on the mouse cursor."""
     try:
-        from mss import MSS as _MSS
+        from mss import mss as _MSS
         import pyautogui
         from pynput import keyboard
     except ImportError as exc:
@@ -309,9 +309,10 @@ def mouse_follow_source(initial_width=400, aspect_ratio=4/3):
 
     def on_press(key):
         char = getattr(key, 'char', None)
-        if char in ('+', '='):
+        vk = getattr(key, 'vk', None)
+        if char in ('+', '=') or vk in (107, 187):
             update_zoom(.9)
-        elif char == '-':
+        elif char == '-' or vk in (109, 189):
             update_zoom(1.1)
 
     try:
@@ -840,7 +841,12 @@ class FilePlayback:
 
     def __init__(self, open_reader, duration=None, start=0.0, reader=None,
                  clock=time.monotonic, idle=0.05, on_close=None, fps=None,
-                 loop_frames=None):
+                 loop_frames=None, passes=0):
+        self.passes = int(passes)
+        if self.passes < 0:
+            raise ValueError('Source passes must be non-negative')
+        self.completed_passes = 0
+        self.ended = False
         self._open_reader = open_reader
         self.fps = (float(fps) if fps and np.isfinite(fps) and fps > 0
                     else None)
@@ -861,6 +867,7 @@ class FilePlayback:
         self._paused = False
         self._still = False
         self._held = None
+        self._picture_generation = 0
         self._closed = False
         self._reading = False
         self._position = self._clamp(start)
@@ -883,7 +890,7 @@ class FilePlayback:
     def _position_locked(self):
         if self._first_frame_at is None:
             return self._position
-        looping = self._reader_start == 0
+        looping = self._reader_start == 0 and not self.passes
         if self.fps is not None:
             frames = self._frames
             if looping and self._loop_frames:
@@ -909,10 +916,17 @@ class FilePlayback:
         with self._cond:
             return self._paused
 
+    @property
+    def picture_generation(self):
+        """Changes on a newly read picture, not a repeated paused picture."""
+        with self._cond:
+            return self._picture_generation
+
     def status(self):
         with self._cond:
             return {'position': self._position_locked(),
-                    'duration': self.duration, 'paused': self._paused}
+                    'duration': self.duration, 'paused': self._paused,
+                    'passes': self.completed_passes, 'ended': self.ended}
 
     def _interrupt_locked(self, position):
         """Retire the current reader; the reading thread reopens at position."""
@@ -965,6 +979,9 @@ class FilePlayback:
         self._close_reader(reader)
 
     def restart(self):
+        with self._cond:
+            self.completed_passes = 0
+            self.ended = False
         self.seek(0.0)
 
     def __call__(self):
@@ -973,6 +990,8 @@ class FilePlayback:
             with self._cond:
                 if self._closed:
                     raise RuntimeError('video playback is closed')
+                if self.ended:
+                    raise CaptureEndOfStream
                 generation = self._generation
                 reader = self._reader
                 if (reader is not None and
@@ -1036,7 +1055,14 @@ class FilePlayback:
                 if ended:
                     if self._reader is reader:
                         self._reader = None
-                    if current and start > 0:
+                    if current and self.passes:
+                        self.completed_passes += 1
+                        self.ended = self.completed_passes >= self.passes
+                        self._position = self.duration or self._position_locked()
+                        self._first_frame_at = None
+                        if not self.ended:
+                            self._position = 0.0
+                    elif current and start > 0:
                         # The pass from a seek position reached the end of
                         # the file: repeat from the beginning.
                         self._position = 0.0
@@ -1045,6 +1071,7 @@ class FilePlayback:
                     if self._first_frame_at is None:
                         self._first_frame_at = self._clock()
                     self._frames += 1
+                    self._picture_generation += 1
                     self._held = frame
                     if still:
                         # One picture at the new position, then hold it.
@@ -1054,7 +1081,7 @@ class FilePlayback:
             if ended:
                 self._close_reader(reader)
                 self._release_reader(reader)
-                if current and start == 0:
+                if current and (self.ended or (start == 0 and not self.passes)):
                     # The looping reader does not end by itself.
                     raise CaptureEndOfStream
                 continue
@@ -1079,12 +1106,12 @@ class FilePlayback:
             self._on_close()
 
 
-def test_source():
-    """A moving target that needs no devices, for checking the chain."""
-    start = time.perf_counter()
+def test_source(clock=time.perf_counter):
+    """A moving target; an injected clock makes offline rendering deterministic."""
+    start = clock()
 
     def grab():
-        t = time.perf_counter()-start
+        t = clock()-start
         yy, xx = np.mgrid[0:240, 0:200]
         cx, cy = 100+70*np.sin(t*1.1), 120+80*np.cos(t*.7)
         blob = np.exp(-(((xx-cx)/38)**2 + ((yy-cy)/38)**2))
@@ -1116,6 +1143,7 @@ class Throttled:
         self._lock = threading.Lock()
         self._stop = threading.Event()
         self.grabs = 0
+        self._picture_generation = 0
         self._period = 1.0/max(hz, .1)
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
@@ -1139,6 +1167,9 @@ class Throttled:
                         self._first_frame = frame
                     self._updated = time.monotonic()
                     self.grabs += 1
+                    self._picture_generation = (
+                        self._grab.picture_generation if isinstance(self._grab, FilePlayback)
+                        else self.grabs)
                 self._ready.set()
                 rest = self._period-(time.perf_counter()-began)
                 if rest > 0 and not getattr(self._grab, 'paced', False):
@@ -1180,15 +1211,19 @@ class Throttled:
             return self._ended
 
     def __call__(self):
+        return self.snapshot()[0]
+
+    def snapshot(self):
+        """Read the picture and its capture identity under the same lock."""
         with self._lock:
             if self._error is not None:
                 raise RuntimeError(f'Capture failed: {self._error}') from self._error
             if self._ended:
-                return None
+                return None, self._picture_generation
             if self._updated is not None and time.monotonic()-self._updated > max(5, 3*self._period):
                 raise RuntimeError('Capture stalled: no new frame for over '
                                    f'{max(5, 3*self._period):g} seconds')
-            return self._latest
+            return self._latest, self._picture_generation
 
     def close(self):
         self._stop.set()

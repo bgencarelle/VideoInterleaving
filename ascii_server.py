@@ -2,6 +2,9 @@ import socketserver
 import socket
 import sys
 import threading
+import select
+import time
+from ascii_terminal import WindowSize, pictures, NEGOTIATE, ENTER, LEAVE
 import settings
 from shared_state import exchange_ascii, ascii_client_count
 from server_config import get_config
@@ -59,26 +62,62 @@ class AsciiHandler(socketserver.BaseRequestHandler):
                 self.request.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPCNT, 5)
 
             # 3. Setup Terminal
-            self.request.sendall(ANSI_CLEAR)
+            self.request.settimeout(2.0)
+            self.request.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 16384)
+            self.request.sendall(NEGOTIATE + ENTER)
+            window = WindowSize()
+            identity = None
+            applied_size = window.size
+            last_resize = 0.0
+            input_started = time.monotonic()
+            input_bytes = 0
+            reported_size = None
+            fallback_logged = False
+            # Explicit experimental opt-in; ASCII-web never uses this encoder.
+            delta = None
+            if getattr(settings, 'ASCII_DELTA_UPDATES', False):
+                from ascii_delta import TerminalDelta
+                delta = TerminalDelta()
 
             while True:
                 # The producer publishes on the ASCII_FPS ticker. Wait for
                 # each new frame instead of adding a second, drifting rate cap.
-                frame_data = exchange_ascii.get_frame()
-
-                if not frame_data:
-                    break
+                readable, _, _ = select.select([self.request], [], [], 0.02)
+                if readable:
+                    incoming = self.request.recv(4096)
+                    if not incoming:
+                        break
+                    now = time.monotonic()
+                    if now - input_started >= 1.0:
+                        input_started, input_bytes = now, 0
+                    input_bytes += len(incoming)
+                    if input_bytes > 8192:
+                        break
+                    reply = window.feed(incoming)
+                    if window.reported != reported_size:
+                        reported_size = window.reported
+                        print(f'[ASCII] Window {self.client_address}: reported={reported_size}, output={window.size}')
+                    if reply:
+                        self.request.sendall(reply)
+                now = time.monotonic()
+                if not fallback_logged and now - input_started >= 1.0:
+                    fallback_logged = True
+                    if reported_size is None:
+                        print(f'[ASCII] Window {self.client_address}: no NAWS size received; fallback={window.size}')
+                if window.size != applied_size and now - last_resize >= 0.5:
+                    applied_size = window.size
+                    last_resize = now
+                    self.request.sendall(b'\x1b[2J')
+                    if delta is not None:
+                        delta.reset()
+                identity, payload = pictures.picture(applied_size, identity)
+                if payload is None:
+                    continue
 
                 # Payload Construction
                 try:
-                    if isinstance(frame_data, bytes):
-                        # Optimization: If it's already bytes, don't decode/encode
-                        payload = ANSI_HOME + frame_data
-                    else:
-                        # Standard String Path
-                        # Combine Home + Text and encode once
-                        payload = (f"\033[H{frame_data}").encode('utf-8', errors='ignore')
-
+                    if delta is not None:
+                        payload = delta.encode(payload, applied_size)
                     self.request.sendall(payload)
 
                 except (BrokenPipeError, ConnectionResetError):
@@ -96,7 +135,7 @@ class AsciiHandler(socketserver.BaseRequestHandler):
         finally:
             # 7. Cleanup
             try:
-                self.request.sendall(ANSI_SHOW_CURSOR)
+                self.request.sendall(LEAVE)
             except (BrokenPipeError, ConnectionResetError, OSError):
                 # Connection already closed, cursor restore not needed
                 pass

@@ -885,6 +885,14 @@ def run_scope(clock_source=None):
         from scope_image_source import RuntimeScopeImageSource
         live_images = RuntimeScopeImageSource(
             main_paths, float_paths, width=live_size)
+        def source_index_at(deadline):
+            return _index_calculator.calculate_free_clock_index(
+                live_images.frames, PINGPONG,
+                at_time_ns=time.time_ns()+round((deadline-time.monotonic())*1e9),
+                publish=False)[0]
+        live_images.configure_deadlines(
+            None if _index_calculator.midi_mode else source_index_at,
+            lambda: 1.0/max(fps, 1))
         png_paths_len = live_images.frames
         main_libs, float_libs = live_images.main_libs, live_images.float_libs
         main_folder_count, float_folder_count = len(main_libs), len(float_libs)
@@ -2300,9 +2308,7 @@ def run_scope(clock_source=None):
                 render_generation, "MIX" if mix_hz else render_mode,
                 int(index), int(mf), int(ff), int(fields))
 
-            if (live_images is not None
-                    and (key != prefetched_key
-                         or source_direction != prefetched_direction)):
+            if live_images is not None:
                 live_images.prefetch(index, mf, ff,
                                      direction=source_direction,
                                      pingpong=PINGPONG)

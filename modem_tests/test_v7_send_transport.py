@@ -105,7 +105,8 @@ class FilePlaybackTests(unittest.TestCase):
         self.assertEqual(self.playback(), (0.0, 2))
         self.assertAlmostEqual(self.playback.position, .2)
         self.assertEqual(self.playback.status(), {
-            'position': .2, 'duration': 60.0, 'paused': False})
+            'position': .2, 'duration': 60.0, 'paused': False,
+            'passes': 0, 'ended': False})
         self.read(23)
         self.assertAlmostEqual(self.playback.position, 2.5)
         # The looping reader wraps at the end of the file.
@@ -582,6 +583,7 @@ class SenderPauseTests(unittest.TestCase):
     def test_pause_keeps_packets_flowing_with_the_held_picture(self):
         written = []
         frames_seen = []
+        preparations_seen = []
         source_indices = []
         opened = []
 
@@ -620,8 +622,15 @@ class SenderPauseTests(unittest.TestCase):
         real_encode = v7_live._encode_pulse_frame_coeffs
 
         def recording_values(model, frame, *args, **kwargs):
-            frames_seen.append(int(np.asarray(frame)[0, 0, 0]))
+            preparations_seen.append(int(np.asarray(frame)[0, 0, 0]))
             return real_values(model, frame, *args, **kwargs)
+
+        from tools.v7_frame_cache import PreparedFrameCache
+        real_prepare = PreparedFrameCache.prepare
+
+        def recording_prepare(cache, frame, *args, **kwargs):
+            frames_seen.append(int(np.asarray(frame)[0, 0, 0]))
+            return real_prepare(cache, frame, *args, **kwargs)
 
         def recording_encode(*args, **kwargs):
             source_indices.append(kwargs['source_index'])
@@ -637,7 +646,7 @@ class SenderPauseTests(unittest.TestCase):
         marks = {}
 
         def operator():
-            # frames_seen[0] is the sender's warm-up frame (level 0).
+            # Observe every packet, including ones reusing a prepared picture.
             if not wait_for(5):
                 return
             pipe.send(transport='pause')
@@ -665,6 +674,7 @@ class SenderPauseTests(unittest.TestCase):
         with mock.patch.dict(sys.modules, {'sounddevice': fake_sounddevice}), \
                 mock.patch.object(v7_live, '_capture', fake_capture), \
                 mock.patch.object(v7_live, '_values', recording_values), \
+                mock.patch.object(PreparedFrameCache, 'prepare', recording_prepare), \
                 mock.patch.object(v7_live, '_encode_pulse_frame_coeffs',
                                   recording_encode), \
                 mock.patch.object(v7_live.sys, 'stdin', pipe), \
@@ -687,6 +697,7 @@ class SenderPauseTests(unittest.TestCase):
         paused = frames_seen[marks['pause_sent']+3:marks['paused_until']]
         self.assertGreaterEqual(len(paused), 5)
         self.assertEqual(len(set(paused)), 1, frames_seen)   # ...of one frame
+        self.assertLess(len(preparations_seen), len(frames_seen))
         self.assertGreater(marks['packets_at_pause_end'],
                            marks['pause_sent']-1)
         # ...then played on from where it was, with a reader at a position.

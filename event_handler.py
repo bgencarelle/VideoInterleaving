@@ -46,7 +46,7 @@ def jiggle_mouse_for_focus(window):
         pass
 
 def register_callbacks(window, state):
-    """Register GLFW callbacks for key presses and window resize to update state."""
+    """Register input, resize and exposure callbacks without continuous drawing."""
     if glfw is None:
         # GLFW not available - skip event handling (e.g., headless mode or Pi 2 without GLFW)
         return
@@ -110,3 +110,5 @@ def register_callbacks(window, state):
 
     glfw.set_key_callback(window, on_key)
     glfw.set_window_size_callback(window, on_window_size)
+    glfw.set_window_refresh_callback(
+        window, lambda win: setattr(state, 'needs_redraw', True))

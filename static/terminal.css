@@ -3,7 +3,7 @@
 /* --- CUSTOM FONT --- */
 @font-face {
   font-family: 'Unscii';
-  src: url('/static/unscii-16.ttf') format('truetype');
+  src: url('unscii-16.ttf') format('truetype');
   font-weight: normal;
   font-style: normal;
 }
@@ -66,5 +66,4 @@ body.hide-cursor {
 
 body.hide-cursor * {
   cursor: none !important;
-  pointer-events: none;
 }

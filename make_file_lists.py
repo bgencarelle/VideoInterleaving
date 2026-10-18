@@ -720,21 +720,27 @@ def initialize_image_lists(clock_mode):
     Returns tuple of (csv_main, main_image_paths, float_image_paths).
     Also sets index_calculator module-level variables for MIDI modes.
     """
-    from constantStorage.midi_constants import FREE_CLOCK
-    import index_calculator
-    
     csv_main, csv_float = select_image_list_files()
     main_image_paths, png_paths_len = load_image_paths_from_csv(csv_main)
     float_image_paths, _ = load_image_paths_from_csv(csv_float)
     
     if png_paths_len == 0:
         raise ValueError("No image paths found in CSV file. Cannot initialize image lists.")
-    
+
+    initialize_frame_clock(clock_mode, png_paths_len)
+    return csv_main, main_image_paths, float_image_paths
+
+
+def initialize_frame_clock(clock_mode, png_paths_len):
+    """Same clock scaling for source lists and manifest-backed layer bakes."""
+    from constantStorage.midi_constants import FREE_CLOCK
+    import index_calculator
+
     video_length = None
     frame_duration = None
     
     if clock_mode == FREE_CLOCK or clock_mode == 255:
-        video_length = len(main_image_paths)
+        video_length = png_paths_len
         frame_duration = video_length / png_paths_len if png_paths_len > 0 else 1.0
         print("FREE_CLOCK mode: video_length preset set from main folder length =", video_length)
         print("Computed frame_duration =", frame_duration)
@@ -748,7 +754,6 @@ def initialize_image_lists(clock_mode):
     index_calculator.png_paths_len = png_paths_len
     index_calculator.frame_duration = frame_duration
     
-    return csv_main, main_image_paths, float_image_paths
 
 
 if __name__ == "__main__":

@@ -81,12 +81,16 @@ SERVER_CAPTURE_RATE = 15
 # --- ASCII MODE SETTINGS ---
 ASCII_MODE = False
 ASCII_COLOR = True
-ASCII_COLOR_BLUR = 7  # 0 = off, odd integer = blur strength (3, 5, 7)
+ASCII_TRUECOLOR = True  # Full RGB tints; False selects the 256-colour fallback.
+ASCII_COLOR_BRIGHTNESS = 1.0  # Truecolour tint exposure, separate from glyph brightness.
+ASCII_COLOR_BLUR = 0  # Optional tint smoothing; 0 preserves source colours.
 # Independent of SERVER_CAPTURE_RATE: ascii frames are a few KB of text, so
 # the telnet/websocket rate is not the bandwidth problem the JPEG stream is.
 ASCII_FPS = 15
 ASCII_WIDTH = 60 # keep aspect ratio 3:2
 ASCII_HEIGHT = 40
+ASCII_WEB_MAX_SIZE = (120, 80)  # Live web master; terminal scales remain separate.
+ASCII_WEB_SOURCE_SIZE = None  # Enabled only in asciiweb; baked packages keep their own grid.
 ASCII_SOURCE_IMAGE_ASPECT_RATIO = 1.333333333
 JPEG_QUALITY = 60# Image quality (lower = fewer bytes per frame on slow links)
 HEADLESS_RES = (320, 400)   # Resolution for the virtual screen (web frame size)

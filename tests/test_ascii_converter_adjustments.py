@@ -139,6 +139,9 @@ class AsciiContrastCommandLineTest(unittest.TestCase):
         self.ns = {"__file__": str(Path(self.temp.name) / "main.py")}
         exec(compile(tree, str(path), "exec"), self.ns)
         self.ns["LOGS_DIR"] = str(Path(self.temp.name) / "logs")
+        # CLI grading checks do not open servers; allow a live ASCII service
+        # to occupy its normal ports while these isolated checks run.
+        self.ns["require_ports"] = lambda ports: None
 
     def restore(self):
         for key in set(vars(settings)) - set(self.saved):
@@ -267,6 +270,9 @@ class ToAsciiColorParityTest(unittest.TestCase):
     """The single grading stage: brightness applies once, colour agrees."""
 
     def setUp(self):
+        patcher = patch.object(settings, 'ASCII_TRUECOLOR', False)
+        patcher.start()
+        self.addCleanup(patcher.stop)
         self.original_settings = {
             'ASCII_WIDTH': settings.ASCII_WIDTH,
             'ASCII_HEIGHT': settings.ASCII_HEIGHT,
@@ -331,7 +337,8 @@ class ToAsciiColorParityTest(unittest.TestCase):
         char = chars[index]
         if not settings.ASCII_COLOR:
             return char + ascii_converter.RESET_CODE
-        step = gray * 5 // 255
+        levels = (0, 95, 135, 175, 215, 255)
+        step = min(range(6), key=lambda i: abs(levels[i] - gray))
         ansi = 16 + 36 * step + 6 * step + step
         return f"\033[38;5;{ansi}m{char}{ascii_converter.RESET_CODE}"
 

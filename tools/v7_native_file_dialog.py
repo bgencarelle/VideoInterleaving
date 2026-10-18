@@ -66,9 +66,62 @@ def _tk_directory(title, initial):
         root.destroy()
 
 
+def pick_file(current='', save=False, title=None):
+    """Select a WAV in a separate native-dialog process."""
+    title = title or ('Save modem WAV' if save else 'Open modem recording')
+    current = str(Path(current).expanduser().resolve()) if current else ''
+    if sys.platform == 'darwin':
+        choice = ('choose file name with prompt dialogTitle default name "modem.wav"'
+                  if save else 'choose file with prompt dialogTitle')
+        script = ('on run argv\nset dialogTitle to item 1 of argv\n'
+                  f'set selectedFile to {choice}\n'
+                  'return POSIX path of selectedFile\nend run')
+        command = ['/usr/bin/osascript', '-e', script, title]
+    else:
+        command = [sys.executable, str(Path(__file__).resolve()), title, current,
+                   'save' if save else 'open']
+    try:
+        result = subprocess.run(command, capture_output=True, text=True)
+    except OSError as exc:
+        raise RuntimeError(f'Could not open the file picker: {exc}') from exc
+    if result.returncode:
+        if sys.platform == 'darwin' and '(-128)' in result.stderr:
+            return None
+        raise RuntimeError(result.stderr.strip() or 'File picker failed')
+    if sys.platform == 'darwin':
+        return result.stdout.rstrip('\r\n') or None
+    try:
+        path = json.loads(result.stdout)
+    except ValueError as exc:
+        raise RuntimeError('Could not read file picker result') from exc
+    if path is not None and not isinstance(path, str):
+        raise RuntimeError('Could not read file picker result')
+    return path or None
+
+
+def _tk_file(title, current, save):
+    import tkinter as tk
+    from tkinter import filedialog
+    root = tk.Tk()
+    try:
+        root.withdraw()
+        options = {'parent': root, 'title': title,
+                   'filetypes': [('WAV audio', '*.wav'), ('All files', '*')]}
+        if current:
+            options.update(initialdir=str(Path(current).parent),
+                           initialfile=Path(current).name)
+        if save:
+            return filedialog.asksaveasfilename(defaultextension='.wav', **options) or None
+        return filedialog.askopenfilename(**options) or None
+    finally:
+        root.destroy()
+
+
 if __name__ == '__main__':
     try:
-        print(json.dumps(_tk_directory(sys.argv[1], sys.argv[2])))
+        selected = (_tk_file(sys.argv[1], sys.argv[2], sys.argv[3] == 'save')
+                    if len(sys.argv) > 3 else _tk_directory(sys.argv[1], sys.argv[2]))
+        print(json.dumps(selected))
     except Exception as exc:
         print(str(exc), file=sys.stderr)
         sys.exit(1)

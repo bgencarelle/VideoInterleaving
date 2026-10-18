@@ -14,6 +14,31 @@ from numba import njit
 from PIL import Image
 
 
+@njit(cache=True, nogil=True)
+def _composite_rgb(main, front, main_sbs, front_sbs, background):
+    """Opaque Pillow alpha-over rounding, fused without full RGBA layers."""
+    height = main.shape[0]
+    width = main.shape[1] // 2 if main_sbs else main.shape[1]
+    front_width = front.shape[1] // 2 if front_sbs else front.shape[1]
+    out = np.empty((height, width, 3), np.uint8)
+    for y in range(height):
+        for x in range(width):
+            ma = (int(main[y, x + width, 0]) if main_sbs else
+                  int(main[y, x, 3]) if main.shape[2] == 4 else 255)
+            fa = 0
+            if y < front.shape[0] and x < front_width:
+                fa = (int(front[y, x + front_width, 0]) if front_sbs else
+                      int(front[y, x, 3]) if front.shape[2] == 4 else 255)
+            for c in range(3):
+                mixed = int(main[y, x, c])*ma + int(background[c])*(255-ma) + 128
+                value = (mixed + (mixed >> 8)) >> 8
+                if fa:
+                    mixed = int(front[y, x, c])*fa + value*(255-fa) + 128
+                    value = (mixed + (mixed >> 8)) >> 8
+                out[y, x, c] = value
+    return out
+
+
 @njit(cache=True, fastmath=False)
 def _sample_pair_uint8(main, front, rows, cols, main_sbs, front_sbs):
     """Gather both SBS/RGBA layers in one compiled pass over output pixels."""
@@ -60,12 +85,18 @@ def warmup_compositor():
     row.setflags(write=False)
     col.setflags(write=False)
     _sample_pair_uint8(image, image, row, col, True, True)
+    _composite_rgb(image, image, True, True, (4, 4, 4))
+    frozen = image.view()
+    frozen.setflags(write=False)
+    for main, front in ((frozen, frozen), (image, frozen), (frozen, image)):
+        _sample_pair_uint8(main, front, row, col, True, True)
+        _composite_rgb(main, front, True, True, (4, 4, 4))
 
 
 class RuntimeImageLibrary:
     """Load normal face/float images ahead of the modem's target index."""
 
-    def __init__(self, *, rebuild=False, capacity=5):
+    def __init__(self, *, rebuild=False, capacity=1):
         import settings
         from image_loader import FIFOImageBuffer, ImageLoader
         import make_file_lists
@@ -99,7 +130,7 @@ class RuntimeImageLibrary:
         self._buffers = {}
         self._pending = {}
         self._lock = threading.Lock()
-        self._pool = ThreadPoolExecutor(max_workers=2,
+        self._pool = ThreadPoolExecutor(max_workers=1,
                                         thread_name_prefix='modem-images')
         self.prefetches = 0
         self.fifo_hits = 0
@@ -121,8 +152,10 @@ class RuntimeImageLibrary:
         from image_loader import FIFOImageBuffer
         key = tuple(int(v) for v in folders)
         with self._lock:
-            return self._buffers.setdefault(
-                key, FIFOImageBuffer(max_size=self.capacity))
+            if key not in self._buffers:
+                self._buffers.clear()
+                self._buffers[key] = FIFOImageBuffer(max_size=self.capacity)
+            return self._buffers[key]
 
     def _path(self, index, folder, layer):
         paths = self.main_paths if layer == 'main' else self.float_paths
@@ -222,6 +255,20 @@ class RuntimeImageLibrary:
         layers = self._layers_for(int(index) % self.frames,
                                   (int(main_folder), int(float_folder)))
         main, front, main_sbs, front_sbs = layers
+        if (isinstance(main, np.ndarray) and isinstance(front, np.ndarray) and
+                main.dtype == np.uint8 and front.dtype == np.uint8 and
+                main.flags.c_contiguous and front.flags.c_contiguous and
+                main.ndim == 3 and front.ndim == 3 and
+                main.shape[2] in (3, 4) and front.shape[2] in (3, 4)):
+            self._layer_width(main, main_sbs)
+            self._layer_width(front, front_sbs)
+            image = Image.fromarray(_composite_rgb(
+                main, front, main_sbs, front_sbs, tuple(background)), 'RGB')
+            if rotation % 360:
+                image = image.rotate(rotation % 360, expand=True)
+            if mirror:
+                image = image.transpose(Image.Transpose.FLIP_LEFT_RIGHT)
+            return image
         main = self._rgba(main, main_sbs)
         front = self._rgba(front, front_sbs)
 

@@ -212,7 +212,7 @@ LIVE_CONTROLS = (
     'Colour detail', 'Display grain', 'Output dither')
 CONFIG_SECTIONS = (
     ('Live controls', LIVE_CONTROLS),
-    ('Input', ('device', 'temporal_fusion')),
+    ('Input', ('device', 'channels', 'read', 'temporal_fusion')),
     ('Wire', ('aspect_layout',)),
     ('Startup view', ('fullscreen', 'image_only', 'show_diagnostics')),
     ('Output and logging', ('save_dir', 'no_log', 'log', 'diagnostics',
@@ -220,7 +220,7 @@ CONFIG_SECTIONS = (
 )
 # Cell widths in grid columns: long values take the whole line, a few take
 # two cells, everything else (numbers, short pickers, on/off) one.
-FULL_WIDTH_SETTINGS = ('device', 'audio_output_device', 'save_dir')
+FULL_WIDTH_SETTINGS = ('device', 'audio_output_device', 'save_dir', 'read')
 DOUBLE_WIDTH_SETTINGS = ('Display upscaler', 'Edge reconstruction',
                          'aspect_layout')
 # Not signalled on the wire: the sender must be set the same.
@@ -445,6 +445,8 @@ def _field_label(action):
         'no_log': 'Quiet receiver logs',
         'log': 'Log each decoded frame',
         'save_dir': 'Save decoded images to',
+        'read': 'Decode WAV file · blank = live input',
+        'channels': 'Input channel pair · blank = automatic',
         'diagnostics': 'Detailed decoder diagnostics',
         'decode_batch': 'Decode batch',
         'decode_history': 'Decode history',
@@ -486,7 +488,7 @@ def _make_fields(receive_parser, device_choices, audio_output_choices=()):
                                       tuple(audio_output_choices)))
             continue
 
-        if action.dest == 'save_dir':
+        if action.dest in ('save_dir', 'read'):
             fields.append(OptionField(action, None, _field_label(action),
                                       'folder'))
             continue
@@ -800,6 +802,7 @@ class ReceiverGui:
                          if value == field.value), 'Reselect output device…')
         if field.kind == 'folder':
             return (str(field.value) if field.value else
+                    'Choose a WAV file…' if field.dest == 'read' else
                     'Choose a folder…')
         if field.locked and field.label in SMOOTH_DISPLAY_LABELS:
             return 'Off while Pixel display is on'
@@ -867,6 +870,9 @@ class ReceiverGui:
         save_dir = by_dest.get('save_dir')
         if save_dir is not None:
             save_dir.value = self.preferences.get('save_dir')
+        for dest in ('channels', 'read'):
+            if dest in by_dest and isinstance(self.preferences.get(dest), str):
+                by_dest[dest].value = self.preferences[dest]
         if self.unavailable_input_identity is not None:
             name = self.unavailable_input_identity.get('name', 'Saved input')
             self.notice = f'{name} is unavailable; reselect the input device.'
@@ -900,7 +906,7 @@ class ReceiverGui:
             'output_device': self.audio_output_identity,
         }
         for dest in ('audio_muted', 'audio_volume', 'freewheel_seconds',
-                     'show_sync_warning', 'save_dir'):
+                     'show_sync_warning', 'save_dir', 'channels', 'read'):
             if dest in by_dest:
                 values[dest] = by_dest[dest].value
         self.preferences = values
@@ -1184,6 +1190,7 @@ class ReceiverGui:
     def _build_arguments(self):
         words = ['receive', '--headless']
         self._apply_display_fields()
+        reading = any(field.dest == 'read' and field.value for field in self.fields)
         for field in self.fields:
             action = field.action
             if action is None:
@@ -1192,8 +1199,10 @@ class ReceiverGui:
             if dest in ('help', 'mode', 'headless', 'fullscreen',
                         'image_only'):
                 continue
-            if dest == 'device' and field.value is None:
+            if dest == 'device' and field.value is None and not reading:
                 raise ValueError('Select an input audio device before starting.')
+            if reading and dest in ('device', 'audio_output_device'):
+                continue
             option = action.option_strings[0] if action.option_strings else None
             if not option:
                 continue
@@ -1203,7 +1212,7 @@ class ReceiverGui:
             elif isinstance(action, argparse._StoreFalseAction):
                 if not field.value:
                     words.append(option)
-            elif field.value is not None:
+            elif field.value is not None and str(field.value).strip():
                 words.extend((option, str(field.value)))
 
         parsed = self.root_parser.parse_args(words)
@@ -1231,7 +1240,8 @@ class ReceiverGui:
             self.notice = 'Waiting for the previous receiver to stop…'
             self.dirty = True
             return
-        if not self._prepare_input_device():
+        reading = any(field.dest == 'read' and field.value for field in self.fields)
+        if not reading and not self._prepare_input_device():
             self.dirty = True
             return
         try:
@@ -1249,7 +1259,7 @@ class ReceiverGui:
         self.runtime_options = ReceiverRuntimeOptions(
             audio_output_device=args.audio_output_device,
             audio_output_identity=self.audio_output_identity,
-            audio_input_identity=self.input_device_identity,
+            audio_input_identity=None if reading else self.input_device_identity,
             audio_muted=args.audio_muted,
             freewheel_seconds=args.freewheel_seconds,
             show_sync_warning=args.show_sync_warning,
@@ -2500,7 +2510,12 @@ class ReceiverGui:
                     if len(field.options) <= 1 and self.audio_output_error:
                         self.notice = self.audio_output_error
                 elif field.kind == 'folder':
-                    self._choose_save_directory(field)
+                    if field.dest == 'read' and x < self.hits[hit][2]-84:
+                        self.editing = True
+                        self.edit_buffer = '' if field.value is None else str(field.value)
+                        self.notice = 'Type a WAV path, or clear it for live input. Enter to apply.'
+                    else:
+                        self._choose_save_directory(field)
                 else:
                     self.editing = True
                     self.edit_buffer = '' if field.value is None else str(field.value)
@@ -2725,20 +2740,24 @@ class ReceiverGui:
         self.editing = False
         self.notice = f'{field.label} updated.'
         self._update_runtime_option(field)
-        if field.dest in ('freewheel_seconds', 'audio_volume', 'save_dir'):
+        if field.dest in ('freewheel_seconds', 'audio_volume', 'save_dir', 'channels', 'read'):
             self._persist_preferences()
         self.dirty = True
         return True
 
     def _choose_save_directory(self, field):
         try:
-            selected = pick_save_directory(field.value or '')
+            if field.dest == 'read':
+                from tools.v7_native_file_dialog import pick_file
+                selected = pick_file(field.value or '')
+            else:
+                selected = pick_save_directory(field.value or '')
         except (OSError, RuntimeError) as exc:
             self.notice = str(exc)
         else:
             if selected:
                 field.value = selected
-                self.notice = f'Save folder: {selected}'
+                self.notice = f'{field.label}: {selected}'
                 self._persist_preferences()
         self.dirty = True
 

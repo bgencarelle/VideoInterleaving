@@ -5887,3 +5887,262 @@ clipboard contents for 100 long lines. No audio stream was opened.
 
 **Handoff:** open the process-output page and click Copy output, or use Ctrl+C
 (Cmd+C on macOS), then paste into a text editor or message.
+
+---
+
+## Appendix A074 — User-requested scope web CPU/RAM check — 2026-10-15
+
+**Request:** quantify the resource implications of application image-scheduling
+changes and check ASCII, ASCII-web and scope web. Scope defaults, renderers and
+scheduling code were not changed. S7/S8 remain closed; this is a bounded
+follow-up measurement on the existing software path.
+
+**Evidence:** `main.py --mode scope --scope-source images --dir images_sbs
+--scope-mode raster --device null --no-scope-gui` served its dashboard, still
+JPEG, trace MJPEG and source-luminance MJPEG to HTTP clients. The saved trace
+still was visually inspected. Six-second phases measured process CPU and RSS:
+no viewer 113.8% / 413.7 MiB; one 512-pixel trace viewer 127.1% / 415.1 MiB;
+one luma-stream viewer 116.6% / 415.3 MiB; after viewers 117.4% / 415.5 MiB.
+CPU 100% means one logical core. The changing source and sequential phases
+make small differences noisy. The trace/luma clients received approximately
+83/182 JPEGs during their measured phases.
+
+Sampled monitor endpoints reported zero DAC dropouts and zero pre-adoption
+presentation drops. One-second monitor snapshots showed absolute source-index
+differences of 0–2 steps; this is not per-frame screen/browser timing. Output
+was NullStream, not PortAudio or physical hardware. The application scheduling
+changes do not feed this scope source/scheduler path.
+
+The desktop browser tool explicitly returned `browser.disconnected`; browser
+CPU/RAM and browser arrival/scanout latency remain unmeasured. The existing
+Node/Python browser-renderer parity check passed (extent, aspect, trigger shapes
+and lit-pixel comparison). Focused ASCII/display/scope tests passed 26 tests.
+
+Artifacts: `tmp/scope_web_resources.{py,json,jpg}`, its server/runner logs,
+`tmp/scope_web_resource_parity.{log,png}`, and
+`tmp/ascii_scope_resource_checks.log`. Cross-mode resource results and the
+independently discovered ASCII-web broadcaster fix are in
+`docs/IMAGE_SCHEDULING.md`.
+
+**Handoff:** the requested resource check is complete. No default or stage
+change follows from it; browser-side performance needs a connected browser
+session if requested later.
+
+---
+
+## Appendix A075 — Low-working-set runtime source follow-up — 2026-10-15
+
+**Request:** lower CPU and RAM below the original application baseline across
+main.py modes, preserving clock-index accuracy and image quality. Current scope
+defaults remain D0; charter/stages and S7/S8 closeout remain frozen.
+
+**Scope change:** runtime JPEG thumbnails avoid a redundant full-size RGB copy
+and reuse at most two immutable thumbnails keyed by identical compressed file
+bytes. Different contents at the same path replace the asset. The existing
+atomic pair cache, scheduler, field latches, geometry and output timing remain.
+No thumbnail dimension, output rate, quality or source-index rule is reduced.
+
+**Matched software evidence:** HEAD/current runtime decoders were compared in
+the current application with fixed face/float pair `(0, 0)`, launch-relative
+clock, `images_sbs`, raster mode and `--device null --no-scope-gui`. CPU/RSS
+before -> after: no viewer 105.3% / 411.7 MiB -> 60.9% / 398.4 MiB;
+512-pixel trace viewer 122.8% / 413.2 MiB -> 76.4% / 400.8 MiB;
+luma stream 106.5% / 413.3 MiB -> 60.0% / 401.0 MiB. CPU 100% is one core.
+The trace clients received 83/84 JPEGs and luma clients 181/181 in their
+six-second measured phases. Both versions' sampled endpoints reported zero
+DAC/pre-adoption drops. Absolute requested/adopted index differences remained
+0–2 steps; no claim of zero browser/display latency follows.
+
+**Checks:** 102 focused application/source/scheduler/DCT tests passed. New
+coverage includes same-content JPEG reuse across paths, file-content changes,
+immutable buffers and a bounded cache. Scope web still uses the separate
+renderer path verified in A074; browser tooling remains disconnected. Measurements
+are NullStream/HTTP evidence, not PortAudio or physical-device validation.
+
+Artifacts: `tmp/run_scope_bounded_resources.py`,
+`tmp/scope_bounded_{before,bounded}.json`, their logs, and
+`tmp/bounded_main_regression.log`. Cross-mode measurements and full-resolution
+modem pixel/audio parity are recorded in `docs/IMAGE_SCHEDULING.md`.
+
+**Handoff:** this requested runtime working-set optimization is complete in the
+measured software scope. Baked sources do not use this decoder; do not infer a
+new baked-source gain or reopen closed validation stages from these results.
+
+---
+
+## Appendix A076 — User-directed scheduling overload simulation — 2026-10-15
+
+**Request:** simulate slow storage/embedded-like CPU conditions across main.py
+modes and assess missed images versus drift. D0 settings, charter and closed
+S7/S8 stages remain frozen. No application changes in this check.
+
+Actual scope mode ran runtime `images_sbs`, fixed pair `(0, 0)`, raster and
+NullStream. After three baseline seconds, six seconds injected either 40 ms per
+thumbnail-decode entry plus 250 ms every tenth entry, or one-CPU affinity with
+three busy competitors and 8 ms per entry. Seven recovery seconds followed;
+single-core affinity remained in the latter case. Injection precedes the
+content-cache lookup, modeling source-access latency even for reused assets.
+
+New output adoption stopped for approximately 6.02/6.07 seconds respectively.
+The first sampled on-clock adoption after removing the fault arrived after
+126/183 ms (approximately 50 ms observation granularity). Final three-second
+p95 clock/adopted error returned to two source steps. No persistent drift or
+play-through-backlog behavior was observed, but the held picture became about
+5.6 seconds stale during the fault. Producer deadline counters reached 475/466;
+DAC dropouts remained zero. Therefore zero DAC dropouts must not be interpreted
+as fresh picture delivery. Under permanent overload, freezes can persist.
+
+This is synthetic software/NullStream evidence, not physical DAC/scanout or
+browser presentation validation. The CPU test approximates scheduling scarcity,
+not a specific embedded CPU. Baked sources were not exercised. An initial
+instrumentation-signature failure was fixed in the temporary harness and both
+cases rerun; it was not an application revision mismatch.
+
+Artifacts: `tmp/scheduling_stress_worker.py`, `tmp/stress_scope_{disk,embedded}`
+JSON/logs and `tmp/stress_summary.json`. Cross-mode details and remaining
+producer-to-presentation timing limits are in `docs/IMAGE_SCHEDULING.md`.
+
+---
+
+## Appendix A077 — Trace and actual-main scheduling comparison — 2026-10-15
+
+**Request:** trace the overload failure and compare to `main`. Production code,
+D0 defaults and the closed scope stages remain unchanged.
+
+The actual main branch (9591126d5) was archived to a temporary snapshot; it has
+baked-only scope and no runtime scope-image adapter. Thus runtime-image scope
+cannot be compared like-for-like against main. On current runtime scope,
+pair-job tracing explains the freeze: fault-window median pair duration was
+97.8 ms for slow storage / 99.2 ms for one-CPU contention; completed pairs were
+typically four indices behind the clock. Only 2/178 and 2/171 exact-pair lookups
+succeeded. The scheduler continued calling the producer, which immediately
+returned on missing source pairs. Callback-completion counts are therefore not
+fresh-trace delivery counts. Recovery returned p95 adoption age to two steps;
+first observed recovery was 226/174 ms in these repeats.
+
+The genuinely common path was also tested: same 2221-frame `images_xy` bake,
+raster/NullStream, one-CPU affinity and three competitors for six seconds.
+Main/current completed 178/177 producer trace calls, with p95 completion age
+one source step on both. P95 call duration was 4.34/0.78 ms. Neither froze.
+This supports a runtime source-preparation bottleneck, not a general failure of
+the consumption-driven scope scheduler. Main lacks current adoption-identity
+telemetry; this comparison measures producer completion, not DAC/browser output.
+
+The cross-mode comparison also found a slow-storage continuity regression in
+current display preparation (one worker/current-next exact selection versus
+main's concurrent/tolerant preparation). Detailed results and queued-current
+job cancellation traces are in `docs/IMAGE_SCHEDULING.md`. Fixes should address
+useful preparation deadlines and priority within the existing architecture.
+
+Artifacts: `tmp/trace_current_scope_{disk,embedded}.{json,log}`,
+`tmp/baked_scope_trace_{main,current}.json`,
+`tmp/baked_scope_trace_summary.json`, `tmp/trace_revision_provenance.json`.
+Evidence is synthetic software/NullStream; no physical validation was reopened.
+
+---
+
+## Appendix A078 — Deadline-fed runtime preparation implementation — 2026-10-15
+
+**Request:** implement the approved future-deadline preparation fix, preserving
+exact index identity and efficient local output. Charter/stages and D0 defaults
+remain frozen; this is the requested runtime preparation follow-up.
+
+Runtime scope now configures `image_preparation.DeadlinePreparer` to load exact
+future clock-selected thumbnail pairs. Two outstanding decode jobs are allowed,
+separately from storage for up to twelve ready/in-flight identities. Lead learns
+submission-to-completion cost including expired work, and useful future results
+are kept until their deadlines. Real folder changes invalidate old preparation;
+unpredictable MIDI prepares the observed held identity. The original lazy cache
+API remains for standalone/calibration users; baked sources bypass this helper.
+
+The consumption-driven trace scheduler, render arithmetic and accepted-output
+field latches remain. One exact last-used thumbnail pair is pinned separately
+until the worker requests a new pair, so remaining fields can finish even after
+UI preparation advances. No nearby-index fallback is added. Decode timestamps,
+source failure reporting and bounded retry remain; activity counters reflect the
+new preparation path.
+
+**Checks:** the final focused application/source/scheduler/GL suite passed
+116 tests. New scope coverage verifies exact-pair access, request/start/ready
+timestamps and old-pair retention until remaining fields finish. The synthetic
+overload run changed slow-read sampled adoptions from 3 to 60 and longest hold
+from roughly 6.02 seconds to 451 ms. CPU-contention sampled adoptions were 53,
+with a 401 ms longest gap. Two-field storage and four-field CPU cases also
+continued/recovered (longest gaps 351/302 ms). Observations are sampled at about
+50 ms and do not count every possible adoption. No persistent post-fault backlog
+was observed. Trace/adoption age and temporary missed presentations remain.
+
+**Matched resources:** HEAD-before/current-after runtime source/engine,
+`images_sbs`, fixed pair `(0, 0)`, raster/NullStream, six-second phases. CPU/RSS
+before -> fixed: no viewer 107.8% / 411.8 MiB -> 63.3% / 398.3 MiB;
+512-pixel trace viewer 121.8% / 413.1 MiB -> 77.7% / 399.7 MiB;
+luminance viewer 106.4% / 413.3 MiB -> 63.8% / 399.8 MiB. CPU 100% is one
+logical core. Clients received 83 trace / 180 luma JPEGs in both versions;
+sampled requested/adopted index differences remained 0–2, with zero sampled
+DAC/pre-adoption drops. These include the preceding lossless source-cache gains.
+
+Artifacts: `tmp/deadline_verified_scope*.{json,log}`,
+`tmp/deadline_scope_resources_{before,after}.json`,
+`tmp/deadline_final_regression.log`, and `docs/IMAGE_SCHEDULING.md` for complete
+cross-mode evidence and limitations. This is NullStream/HTTP software evidence;
+physical DAC/browser timing and closed hardware stages were not reopened.
+
+**Handoff:** requested implementation and targeted software checks are complete.
+
+---
+
+## Appendix A079 — Unified independent-layer baker — 2026-10-16
+
+**Request:** consolidate baking across all `main.py` modes and add efficient
+baked playback. User constraints: **never pre-mix layers**, and report outputs
+that cost more CPU, RAM or storage than direct `images_sbs` playback.
+
+`utilities/bake.py --modes ...` builds one atomic package, reusing the existing
+scope and modem bake algorithms. `main.py --bake-dir PACKAGE --mode scope`
+resolves the scope subdirectory into the existing baked-source entry point.
+Numeric folder/frame ordering and largest-common-count selection are retained;
+face/float libraries stay independent. No trace arithmetic, scheduler, field
+rules, D0 defaults, stage charter or hardware stage has changed. Standalone XY
+baking also accepts explicit `--jpeg-layout rgb`; default SBS interpretation is
+unchanged. The unified builder defaults to the existing 128-pixel thumbnail
+width and supports full geometry or explicit `--thumbs-only`.
+
+**Scope matched check:** actual `main.py`, unchanged raster defaults, NullStream,
+fixed pair `(0,0)`, 96 source positions spread across the 2,221-frame images_sbs
+sequence, two face and two float folders. Compare the preceding accepted runtime
+image adapter with the existing baked adapter on the same pictures at 128px.
+This checks the new explicit packaging/entry path, not a replacement renderer.
+
+Six-second CPU/RSS phases, source images -> baked:
+
+- No viewer: **60.7% / 376.8 MiB -> 9.5% / 353.7 MiB**.
+- 512px trace viewer: **80.7% / 378.2 MiB -> 27.2% / 358.5 MiB**.
+- Luminance viewer: **63.2% / 378.3 MiB -> 9.7% / 353.9 MiB**.
+- After viewers: **61.4% / 378.3 MiB -> 8.0% / 354.0 MiB**.
+
+CPU 100% is one core. Source images totalled 29.90 MiB; the sample scope bake
+was **18.67 MiB**, with `--thumbs-only`. A normal vector-capable bake adds contour
+geometry, so this is not its storage estimate. Synthetic full-geometry packages
+were also exercised through XYLibrary by the unified-baker tests. Operational
+defaults remain D0; this is software/NullStream evidence, not physical scanout.
+
+New display bakes retain original independent decoder pixels in bounded mmap
+views. They reduced warmed CPU/RSS in the matched sample, but used substantially
+**more storage** than source JPEGs (38.23x full-resolution, 9.56x web's existing
+half-decode level). They do not pre-mix scope or display layers. Cross-mode
+commands and full cost evidence are in `docs/UNIFIED_BAKES.md`; this appendix
+remains the scope operational handoff.
+
+Artifacts: `tmp/unified_scope_{images,baked}.json`,
+`tmp/unified_measure_summary.json`, `tmp/unified_sample/bakes/bake.json`,
+`tests/test_unified_bake.py` and `tmp/unified_final_regression.log`.
+
+**Handoff:** unified scope packaging uses the existing baked engine. Runtime
+image and standalone bake entry paths remain supported. No physical work or
+closed validation stage was reopened.
+
+Final cross-mode focused checks: 153 passed, one utility-script skip, 12
+subtests; 384 decoder-frame and 24 GL/ASCII/JPEG parity comparisons passed.
+The broader modem suite has unrelated experimental analog/slice failures,
+reproduced with the baker-task modules blocked from import; full details are in
+`docs/UNIFIED_BAKES.md`. Scope packaging/playback checks passed.

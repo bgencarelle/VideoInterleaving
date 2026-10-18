@@ -1,5 +1,5 @@
 import threading
-from collections import deque
+from collections import deque, OrderedDict
 import ctypes
 import numpy as np
 import os
@@ -19,6 +19,11 @@ class ImageLoader:
         self.main_folder_path = main_folder_path
         self.float_folder_path = float_folder_path
         self.png_paths_len = png_paths_len
+        # Repeated assets (e.g. transparent layers) often have different file
+        # names at every source index. Two content entries avoid decoding the
+        # same bytes again without caching an image sequence.
+        self._jpeg_cache = OrderedDict()
+        self._jpeg_lock = threading.Lock()
 
     def set_paths(self, main_folder_path, float_folder_path):
         self.main_folder_path = main_folder_path
@@ -94,9 +99,21 @@ class ImageLoader:
                     width, height, _, _ = jpeg.decode_header(data)
                     if width < jpeg_min_size[0] or height < jpeg_min_size[1]:
                         decode_scale = None
-                return jpeg.decode(
+                key = (data, decode_scale)
+                with self._jpeg_lock:
+                    cached = self._jpeg_cache.get(key)
+                    if cached is not None:
+                        self._jpeg_cache.move_to_end(key)
+                        return cached, True
+                image = jpeg.decode(
                     data, pixel_format=TJPF_RGB,
-                    scaling_factor=decode_scale), True
+                    scaling_factor=decode_scale)
+                image.setflags(write=False)
+                with self._jpeg_lock:
+                    self._jpeg_cache[key] = image
+                    while len(self._jpeg_cache) > 2:
+                        self._jpeg_cache.popitem(last=False)
+                return image, True
             except Exception as e:
                 print(f"[JPEG ERROR] Failed to decode: {image_path}")
                 print(f"  Error: {e}")
@@ -135,7 +152,7 @@ class FIFOImageBuffer:
         with self.lock:
             return len(self.queue)
 
-    def update(self, index, data_tuple):
+    def update(self, index, data_tuple, folders=None):
         """
         Update buffer with new frame data.
         Implements backpressure: drops oldest frame if buffer is full.
@@ -148,18 +165,33 @@ class FIFOImageBuffer:
                 self.queue.popleft()
                 self.dropped_count += 1
                 dropped = True
-            self.queue.append((index, data_tuple))
+            self.queue.append((index, data_tuple, folders))
             return not dropped
 
-    def get(self, current_index):
+    def get(self, current_index, folders=None, total_images=None, *, exact=False):
         with self.lock:
-            while self.queue and abs(self.queue[0][0] - current_index) > TOLERANCE:
-                self.queue.popleft()
-            if not self.queue: return None
-            best_idx, best_data = min(self.queue, key=lambda item: abs(item[0] - current_index))
-            if abs(best_idx - current_index) <= TOLERANCE:
+            def distance(index):
+                delta = abs(index - current_index)
+                if total_images:
+                    delta %= total_images
+                    delta = min(delta, total_images - delta)
+                return delta
+            # Completion order is not source order. An old first entry must
+            # never discard an exact entry that finished behind it.
+            candidates = [item for item in self.queue
+                          if item[2] == folders and
+                          distance(item[0]) <= (0 if exact else TOLERANCE)]
+            if not candidates: return None
+            best_idx, best_data, _ = min(candidates, key=lambda item: distance(item[0]))
+            if distance(best_idx) <= TOLERANCE:
                 return best_idx, best_data[0], best_data[1], best_data[2], best_data[3]
             return None
+
+    def retain(self, keys):
+        """Release obsolete decoded layers; keys are (index, folder-pair)."""
+        with self.lock:
+            self.queue = deque(item for item in self.queue
+                               if (item[0], item[2]) in keys)
 
     def get_stats(self):
         """Get buffer statistics (thread-safe)."""

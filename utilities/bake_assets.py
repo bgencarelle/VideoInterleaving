@@ -90,7 +90,9 @@ def process_folder_to_slab(args: Tuple[Path, Path, Tuple[int, int]]) -> Optional
 
     # 1. Gather Files
     valid = {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
-    files = sorted([p for p in src_path.iterdir() if p.is_file() and p.suffix.lower() in valid])
+    from make_file_lists import natural_sort_key
+    files = sorted([p for p in src_path.iterdir() if p.is_file() and p.suffix.lower() in valid],
+                   key=lambda p: natural_sort_key(p.name))
 
     if not files:
         return f"Skipped (No images): {src_folder}"
@@ -183,7 +185,7 @@ def main() -> None:
     logging.info("Scanning folders...")
     for root, dirs, files in os.walk(input_root):
         # Check if this folder contains images
-        has_images = any(f.lower().endswith(('.png', '.jpg', '.webp')) for f in files)
+        has_images = any(f.lower().endswith(('.png', '.jpg', '.jpeg', '.webp', '.bmp')) for f in files)
 
         if has_images:
             rel_path = Path(root).relative_to(input_root)

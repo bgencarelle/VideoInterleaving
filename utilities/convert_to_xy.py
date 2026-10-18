@@ -88,14 +88,14 @@ TEMP_PREFIXES = (".thumbs-", ".stipple-xy-", ".stipple-lae-",
                  ".stipple-mass-")
 
 
-def load_rgba(path):
+def load_rgba(path, jpeg_layout='sbs'):
     """RGBA sources give the real matte; SBS JPEGs are split as fallback."""
     with Image.open(path) as im:
         if im.mode in ("RGBA", "LA") or "transparency" in im.info:
             a = np.asarray(im.convert("RGBA"))
             return a[..., :3], a[..., 3]
         rgb = np.asarray(im.convert("RGB"))
-    if path.suffix.lower() in (".jpg", ".jpeg"):        # SBS: colour | matte
+    if jpeg_layout == 'sbs' and path.suffix.lower() in (".jpg", ".jpeg"):
         w = rgb.shape[1] // 2
         alpha = matte_mean(rgb[:,w:w*2])
         return rgb[:, :w], alpha
@@ -161,7 +161,7 @@ def estimate_fixed_storage(tasks):
         files = _image_files(src_folder)
         if not files:
             continue
-        _rgb, alpha = load_rgba(files[0])
+        _rgb, alpha = load_rgba(files[0], prof.get('jpeg_layout', 'sbs'))
         h, w = alpha.shape
         tw = int(prof.get("thumb_width", THUMB_W))
         th = max(1, int(round(h * tw / float(w))))
@@ -256,7 +256,7 @@ def simplify_to(c, target, closed=True):
 def vectorize(path, budget, min_feature, max_seg, sil_boost=3.0, bands=3,
               min_v=7, max_v=26, min_area=0.001, thumb_width=THUMB_W,
               precondition=PRECONDITION, stipple_candidates=0,
-              stipple_width=STIPPLE_SOURCE_W):
+              stipple_width=STIPPLE_SOURCE_W, jpeg_layout='sbs'):
     """One frame -> (polylines, flags, thumbnail).
 
     Silhouette from the alpha matte, interior from posterized luminance BANDS
@@ -266,7 +266,7 @@ def vectorize(path, budget, min_feature, max_seg, sil_boost=3.0, bands=3,
     """
     import cv2
 
-    rgb, alpha = load_rgba(path)
+    rgb, alpha = load_rgba(path, jpeg_layout)
     thumb = make_thumb(rgb, alpha, thumb_width, precondition)
     stipple = (make_stipple_candidates(
         rgb, alpha, stipple_candidates, stipple_width)
@@ -395,7 +395,7 @@ def process_folder(args):
         stipple_width = int(prof.get("stipple_width", STIPPLE_SOURCE_W))
         for frame_i, fp in enumerate(files):
             if thumbs_only:
-                rgb_i, alpha_i = load_rgba(fp)
+                rgb_i, alpha_i = load_rgba(fp, prof.get('jpeg_layout', 'sbs'))
                 polys, fl, thumb = [], [], make_thumb(
                     rgb_i, alpha_i, prof.get("thumb_width", THUMB_W),
                     prof.get("precondition", PRECONDITION))
@@ -409,7 +409,8 @@ def process_folder(args):
                     thumb_width=prof.get("thumb_width", THUMB_W),
                     precondition=prof.get("precondition", PRECONDITION),
                     stipple_candidates=candidate_count,
-                    stipple_width=stipple_width)
+                    stipple_width=stipple_width,
+                    jpeg_layout=prof.get('jpeg_layout', 'sbs'))
                 if len(baked) == 6:
                     polys, fl, thumb, sxy, slae, smass = baked
                 else:  # compatibility for third-party vectorize wrappers
@@ -509,6 +510,7 @@ def main():
     ap.add_argument("-o", "--output-dir", default=None,
                     help="default: {input_dir}_xy")
     ap.add_argument("--profile", choices=sorted(PROFILES), default="tiny")
+    ap.add_argument('--jpeg-layout', choices=('sbs', 'rgb'), default='sbs')
     ap.add_argument("--budget", type=int, help="override main-layer budget")
     ap.add_argument("--bands", type=int, help="luminance bands for interior detail")
     ap.add_argument("--all-folders", action="store_true",
@@ -565,6 +567,7 @@ def main():
                         format="%(asctime)s [%(levelname)s] %(message)s")
 
     prof = dict(PROFILES[args.profile])
+    prof['jpeg_layout'] = args.jpeg_layout
     prof["thumb_width"] = args.thumb_width
     prof["precondition"] = args.precondition
     prof["stipple_candidates"] = args.stipple_candidates

@@ -9,6 +9,7 @@ from collections import OrderedDict
 from concurrent.futures import CancelledError, ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
+from io import BytesIO
 import threading
 import time
 
@@ -111,6 +112,7 @@ class RuntimeScopeImageSource:
             int(max_pending_pairs if max_pending_pairs is not None
                 else max(1, int(workers)) * 2))
         self._cache = OrderedDict()
+        self._decoded_assets = OrderedDict()
         self._pending_pairs = OrderedDict()
         self._failed_pairs = OrderedDict()
         self._lock = threading.RLock()
@@ -125,6 +127,31 @@ class RuntimeScopeImageSource:
             "queue_full": 0,
         }
         self._retry_failed_after_ns = 1_000_000_000
+        self._deadline_preparation = None
+        self._last_deadline_pair = None
+        self._deadline_index = None
+        self._deadline_period = None
+
+    def configure_deadlines(self, index_at, period):
+        """Application playback prepares clock-selected future thumbnail pairs.
+
+        Standalone library/calibration callers retain the ordinary lazy cache.
+        The owner's lock serializes UI planning and render-worker lookups.
+        """
+        from image_preparation import DeadlinePreparer
+        self._deadline_index = index_at
+        self._deadline_period = period
+        def failed(key, exc):
+            self._stats['decode_failures'] += 1
+            self._failed_pairs[(key[0], *key[1])] = (
+                f'{type(exc).__name__}: {exc}', time.monotonic_ns())
+            while len(self._failed_pairs) > self.cache_pair_limit:
+                self._failed_pairs.popitem(last=False)
+        self._deadline_preparation = DeadlinePreparer(
+            lambda index, folders, submitted: self._load_pair(
+                (index, *folders), round(submitted*1e9)),
+            workers=2, capacity=12, period=period(), on_error=failed,
+            with_submission_time=True)
 
     @staticmethod
     def _normalize_paths(paths, layer):
@@ -181,14 +208,25 @@ class RuntimeScopeImageSource:
         from PIL import Image
 
         size = (self.width, self.height)
-        with self._open_image(path) as image:
+        encoded = None
+        if Path(path).suffix.lower() in ('.jpg', '.jpeg'):
+            encoded = Path(path).read_bytes()
+            with self._lock:
+                cached = self._decoded_assets.get(encoded)
+                if cached is not None:
+                    self._decoded_assets.move_to_end(encoded)
+                    return cached
+        opened = Image.open(BytesIO(encoded)) if encoded is not None else self._open_image(path)
+        with opened as image:
             has_alpha = image.mode in ("RGBA", "LA") or "transparency" in image.info
             if has_alpha:
                 rgba = image.convert("RGBA")
                 rgb = rgba.convert("RGB")
                 alpha = rgba.getchannel("A")
             elif Path(path).suffix.lower() in (".jpg", ".jpeg"):
-                rgb = image.convert("RGB")
+                # JPEG decoding already produces RGB. Converting RGB to RGB
+                # makes a full-size copy that is immediately cropped away.
+                rgb = image if image.mode == "RGB" else image.convert("RGB")
                 half = rgb.width // 2
                 if half < 1:
                     raise ValueError(f"invalid side-by-side JPEG: {path}")
@@ -217,6 +255,11 @@ class RuntimeScopeImageSource:
         coverage[y:y + resized[1], x:x + resized[0]] = alpha_pixels
         thumb = np.stack((luminance, coverage), axis=-1)
         thumb.setflags(write=False)
+        if encoded is not None:
+            with self._lock:
+                self._decoded_assets[encoded] = thumb
+                while len(self._decoded_assets) > 2:
+                    self._decoded_assets.popitem(last=False)
         return thumb
 
     def _pair_key(self, index, main_folder, float_folder):
@@ -326,6 +369,20 @@ class RuntimeScopeImageSource:
         """
         key = self._pair_key(index, main_folder, float_folder)
         with self._lock:
+            if self._deadline_preparation is not None:
+                pair = self._deadline_preparation.get(key[0], key[1:])
+                if pair is None and self._last_deadline_pair is not None:
+                    pinned_key, pinned_pair = self._last_deadline_pair
+                    if pinned_key == key:
+                        pair = pinned_pair
+                self._stats['pair_ready' if pair is not None else 'pair_misses'] += 1
+                if pair is not None:
+                    # A field group may still need this exact pair after the
+                    # UI clock advances. Keep one until a new pair is actually
+                    # requested by the trace worker, never a nearby substitute.
+                    self._last_deadline_pair = (key, pair)
+                    self._failed_pairs.pop(key, None)
+                return pair
             pair = self._cache.get(key)
             if pair is not None:
                 self._cache.move_to_end(key)
@@ -365,6 +422,12 @@ class RuntimeScopeImageSource:
         index = int(index) % self.frames
         main_folder = int(main_folder) % len(self.main_paths[0])
         float_folder = int(float_folder) % len(self.float_paths[0])
+        if self._deadline_preparation is not None:
+            with self._lock:
+                self._deadline_preparation.period = self._deadline_period()
+                self._deadline_preparation.plan(
+                    (main_folder, float_folder), index, self._deadline_index)
+            return
         self._request_pair((index, main_folder, float_folder), priority=True)
         for frame in self._lookahead(index, direction, self.frames, lookahead,
                                      pingpong=pingpong):
@@ -373,16 +436,32 @@ class RuntimeScopeImageSource:
     def snapshot(self):
         """Return bounded decode/cache activity and queue state."""
         with self._lock:
+            preparation = (self._deadline_preparation.snapshot()
+                           if self._deadline_preparation else None)
             return {
                 **self._stats,
-                "cache_pairs": len(self._cache),
-                "cache_pair_limit": self.cache_pair_limit,
-                "pending_pairs": len(self._pending_pairs),
-                "pending_pair_limit": self.max_pending_pairs,
+                "pair_requests": (preparation['requested'] if preparation else
+                                  self._stats['pair_requests']),
+                "prefetch_evictions": (preparation['cancelled'] if preparation else
+                                       self._stats['prefetch_evictions']),
+                "queue_full": (preparation['capacity_skips'] if preparation else
+                               self._stats['queue_full']),
+                "cache_pairs": preparation['ready'] if preparation else len(self._cache),
+                "cache_pair_limit": (self._deadline_preparation.capacity if preparation
+                                     else self.cache_pair_limit),
+                "pending_pairs": (preparation['pending'] if preparation else
+                                  len(self._pending_pairs)),
+                "pending_pair_limit": (self._deadline_preparation.workers if preparation
+                                       else self.max_pending_pairs),
                 "failed_pairs": len(self._failed_pairs),
+                "pinned_pair": self._last_deadline_pair is not None,
+                "deadline_preparation": preparation,
             }
 
     def close(self):
+        if self._deadline_preparation is not None:
+            self._deadline_preparation.close()
+        self._last_deadline_pair = None
         self._pool.shutdown(wait=True, cancel_futures=True)
 
     def __del__(self):

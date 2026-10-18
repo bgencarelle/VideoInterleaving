@@ -1542,10 +1542,17 @@ class ReceiverGuiButtonLayoutTests(unittest.TestCase):
             if key.startswith('row:'):
                 self.assertLessEqual(rect[3], size[1]-gui._footer_height(size[0]))
 
-    def test_the_default_window_shows_the_whole_setup_page(self):
+    def test_default_window_can_scroll_through_file_and_input_controls(self):
         gui = self._gui()
         items = gui._config_items(self.SIZE[0])
-        self.assertEqual(gui._max_scroll(items, gui._config_room(self.SIZE)), 0)
+        self.assertIn('read', {field.dest for field in gui.fields})
+        self.assertIn('channels', {field.dest for field in gui.fields})
+        gui.scroll = gui._max_scroll(items, gui._config_room(self.SIZE))
+        gui._canvas(self.SIZE)
+        self.assertTrue(any(key.startswith('row:') for key in gui.hits))
+        for key, rect in gui.hits.items():
+            if key.startswith('row:'):
+                self.assertLessEqual(rect[3], self.SIZE[1]-gui._footer_height(self.SIZE[0]))
 
     def test_every_setting_is_in_exactly_one_section(self):
         gui = self._gui()

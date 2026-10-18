@@ -1,0 +1,2601 @@
+{
+  "family": "Interleave Schoolbook Mono",
+  "version": 1,
+  "upstream": "https://github.com/ArtifexSoftware/urw-base35-fonts",
+  "upstream_commit": "3c0ba3b5687632dfc66526544a4e811fe0ec0cd9",
+  "upstream_sha256": {
+    "C059-Roman.otf": "e00cc7b88f0cf25ae43f0e48de39d0043fe042b55719a3ac32669ab3369542ec",
+    "C059-Bold.otf": "75dea10068264324522e7b96612083582eee0158eb728fa9c219279890f33e26",
+    "LICENSE": "772b1b47eead8722156abaed483154e1dd1137e7035290550cea6444192a2e3f",
+    "COPYING": "57c8ff33c9c0cfc3ef00e650a1cc910d7ee479a8bc509f6c9209a7c2a11399d6"
+  },
+  "units_per_em": 1000,
+  "advance": 981,
+  "characters": "U+0020-U+007E",
+  "outline_scaling": false,
+  "faces": {
+    "Regular": {
+      "file": "InterleaveSchoolbookMono-Regular.woff2",
+      "sha256": "ee77ce988253f534c027e5b372af6e6526a2eb6f427e3ec808a6c6a6f28922fd",
+      "embolden_units": 0,
+      "glyphs": {
+        ".notdef": {
+          "translation": 0,
+          "original_bounds": null
+        },
+        "space": {
+          "translation": 0,
+          "original_bounds": null
+        },
+        "exclam": {
+          "translation": 341,
+          "original_bounds": [
+            87,
+            -14,
+            212,
+            736
+          ]
+        },
+        "quotedbl": {
+          "translation": 296,
+          "original_bounds": [
+            61,
+            498,
+            328,
+            736
+          ]
+        },
+        "numbersign": {
+          "translation": 212,
+          "original_bounds": [
+            33,
+            0,
+            524,
+            686
+          ]
+        },
+        "dollar": {
+          "translation": 213,
+          "original_bounds": [
+            45,
+            -130,
+            510,
+            801
+          ]
+        },
+        "percent": {
+          "translation": 72,
+          "original_bounds": [
+            45,
+            0,
+            792,
+            722
+          ]
+        },
+        "ampersand": {
+          "translation": 78,
+          "original_bounds": [
+            51,
+            -15,
+            775,
+            737
+          ]
+        },
+        "parenleft": {
+          "translation": 333,
+          "original_bounds": [
+            36,
+            -123,
+            279,
+            736
+          ]
+        },
+        "parenright": {
+          "translation": 315,
+          "original_bounds": [
+            54,
+            -123,
+            297,
+            736
+          ]
+        },
+        "asterisk": {
+          "translation": 241,
+          "original_bounds": [
+            56,
+            300,
+            443,
+            736
+          ]
+        },
+        "plus": {
+          "translation": 188,
+          "original_bounds": [
+            51,
+            0,
+            555,
+            505
+          ]
+        },
+        "comma": {
+          "translation": 350,
+          "original_bounds": [
+            64,
+            -184,
+            218,
+            108
+          ]
+        },
+        "hyphen": {
+          "translation": 324,
+          "original_bounds": [
+            42,
+            195,
+            291,
+            278
+          ]
+        },
+        "period": {
+          "translation": 354,
+          "original_bounds": [
+            74,
+            -14,
+            199,
+            111
+          ]
+        },
+        "slash": {
+          "translation": 351,
+          "original_bounds": [
+            -23,
+            -14,
+            302,
+            736
+          ]
+        },
+        "zero": {
+          "translation": 212,
+          "original_bounds": [
+            42,
+            -15,
+            514,
+            704
+          ]
+        },
+        "one": {
+          "translation": 192,
+          "original_bounds": [
+            100,
+            0,
+            496,
+            704
+          ]
+        },
+        "two": {
+          "translation": 220,
+          "original_bounds": [
+            35,
+            0,
+            505,
+            704
+          ]
+        },
+        "three": {
+          "translation": 220,
+          "original_bounds": [
+            42,
+            -15,
+            498,
+            704
+          ]
+        },
+        "four": {
+          "translation": 213,
+          "original_bounds": [
+            28,
+            0,
+            527,
+            704
+          ]
+        },
+        "five": {
+          "translation": 217,
+          "original_bounds": [
+            45,
+            -15,
+            502,
+            704
+          ]
+        },
+        "six": {
+          "translation": 212,
+          "original_bounds": [
+            42,
+            -15,
+            516,
+            704
+          ]
+        },
+        "seven": {
+          "translation": 207,
+          "original_bounds": [
+            59,
+            -14,
+            508,
+            704
+          ]
+        },
+        "eight": {
+          "translation": 214,
+          "original_bounds": [
+            41,
+            -15,
+            513,
+            704
+          ]
+        },
+        "nine": {
+          "translation": 214,
+          "original_bounds": [
+            39,
+            -15,
+            513,
+            704
+          ]
+        },
+        "colon": {
+          "translation": 342,
+          "original_bounds": [
+            86,
+            -14,
+            211,
+            473
+          ]
+        },
+        "semicolon": {
+          "translation": 342,
+          "original_bounds": [
+            72,
+            -184,
+            226,
+            472
+          ]
+        },
+        "less": {
+          "translation": 187,
+          "original_bounds": [
+            49,
+            57,
+            558,
+            596
+          ]
+        },
+        "equal": {
+          "translation": 188,
+          "original_bounds": [
+            51,
+            112,
+            555,
+            394
+          ]
+        },
+        "greater": {
+          "translation": 188,
+          "original_bounds": [
+            48,
+            57,
+            557,
+            596
+          ]
+        },
+        "question": {
+          "translation": 272,
+          "original_bounds": [
+            25,
+            -15,
+            411,
+            736
+          ]
+        },
+        "at": {
+          "translation": 116,
+          "original_bounds": [
+            43,
+            -14,
+            705,
+            736
+          ]
+        },
+        "A": {
+          "translation": 129,
+          "original_bounds": [
+            -8,
+            0,
+            731,
+            736
+          ]
+        },
+        "B": {
+          "translation": 140,
+          "original_bounds": [
+            30,
+            0,
+            670,
+            722
+          ]
+        },
+        "C": {
+          "translation": 134,
+          "original_bounds": [
+            45,
+            -15,
+            668,
+            737
+          ]
+        },
+        "D": {
+          "translation": 110,
+          "original_bounds": [
+            29,
+            0,
+            732,
+            722
+          ]
+        },
+        "E": {
+          "translation": 144,
+          "original_bounds": [
+            29,
+            0,
+            663,
+            722
+          ]
+        },
+        "F": {
+          "translation": 157,
+          "original_bounds": [
+            29,
+            0,
+            638,
+            722
+          ]
+        },
+        "G": {
+          "translation": 84,
+          "original_bounds": [
+            42,
+            -15,
+            772,
+            737
+          ]
+        },
+        "H": {
+          "translation": 74,
+          "original_bounds": [
+            29,
+            0,
+            804,
+            722
+          ]
+        },
+        "I": {
+          "translation": 287,
+          "original_bounds": [
+            38,
+            0,
+            369,
+            722
+          ]
+        },
+        "J": {
+          "translation": 220,
+          "original_bounds": [
+            5,
+            -15,
+            537,
+            722
+          ]
+        },
+        "K": {
+          "translation": 74,
+          "original_bounds": [
+            30,
+            0,
+            803,
+            722
+          ]
+        },
+        "L": {
+          "translation": 150,
+          "original_bounds": [
+            35,
+            0,
+            646,
+            722
+          ]
+        },
+        "M": {
+          "translation": 23,
+          "original_bounds": [
+            22,
+            0,
+            913,
+            722
+          ]
+        },
+        "N": {
+          "translation": 84,
+          "original_bounds": [
+            19,
+            -14,
+            794,
+            722
+          ]
+        },
+        "O": {
+          "translation": 102,
+          "original_bounds": [
+            45,
+            -15,
+            733,
+            737
+          ]
+        },
+        "P": {
+          "translation": 152,
+          "original_bounds": [
+            28,
+            0,
+            649,
+            722
+          ]
+        },
+        "Q": {
+          "translation": 94,
+          "original_bounds": [
+            45,
+            -189,
+            748.0150190543567,
+            737
+          ]
+        },
+        "R": {
+          "translation": 121,
+          "original_bounds": [
+            26,
+            -15,
+            713,
+            722
+          ]
+        },
+        "S": {
+          "translation": 170,
+          "original_bounds": [
+            51,
+            -15,
+            590,
+            737
+          ]
+        },
+        "T": {
+          "translation": 157,
+          "original_bounds": [
+            19,
+            0,
+            648,
+            722
+          ]
+        },
+        "U": {
+          "translation": 82,
+          "original_bounds": [
+            17,
+            -15,
+            799,
+            722
+          ]
+        },
+        "V": {
+          "translation": 129,
+          "original_bounds": [
+            -8,
+            -15,
+            731,
+            722
+          ]
+        },
+        "W": {
+          "translation": 0,
+          "original_bounds": [
+            6,
+            -15,
+            976,
+            722
+          ]
+        },
+        "X": {
+          "translation": 136,
+          "original_bounds": [
+            -6,
+            0,
+            716,
+            722
+          ]
+        },
+        "Y": {
+          "translation": 140,
+          "original_bounds": [
+            -13,
+            0,
+            713,
+            722
+          ]
+        },
+        "Z": {
+          "translation": 191,
+          "original_bounds": [
+            24,
+            0,
+            575,
+            722
+          ]
+        },
+        "bracketleft": {
+          "translation": 309,
+          "original_bounds": [
+            66,
+            -108,
+            297,
+            722
+          ]
+        },
+        "backslash": {
+          "translation": 188,
+          "original_bounds": [
+            74,
+            0,
+            532,
+            737
+          ]
+        },
+        "bracketright": {
+          "translation": 340,
+          "original_bounds": [
+            36,
+            -108,
+            266,
+            722
+          ]
+        },
+        "asciicircum": {
+          "translation": 188,
+          "original_bounds": [
+            52,
+            318,
+            554,
+            722
+          ]
+        },
+        "underscore": {
+          "translation": 240,
+          "original_bounds": [
+            0,
+            -134,
+            500,
+            -73
+          ]
+        },
+        "a": {
+          "translation": 197,
+          "original_bounds": [
+            44,
+            -15,
+            543,
+            481
+          ]
+        },
+        "b": {
+          "translation": 226,
+          "original_bounds": [
+            8,
+            -15,
+            520,
+            737
+          ]
+        },
+        "c": {
+          "translation": 260,
+          "original_bounds": [
+            34,
+            -15,
+            426,
+            481
+          ]
+        },
+        "d": {
+          "translation": 192,
+          "original_bounds": [
+            43,
+            -15,
+            554,
+            737
+          ]
+        },
+        "e": {
+          "translation": 240,
+          "original_bounds": [
+            35,
+            -15,
+            465.00873058389175,
+            481
+          ]
+        },
+        "f": {
+          "translation": 264,
+          "original_bounds": [
+            19,
+            0,
+            433,
+            737
+          ]
+        },
+        "g": {
+          "translation": 208,
+          "original_bounds": [
+            23,
+            -203,
+            542,
+            495
+          ]
+        },
+        "h": {
+          "translation": 186,
+          "original_bounds": [
+            15,
+            0,
+            593,
+            737
+          ]
+        },
+        "i": {
+          "translation": 337,
+          "original_bounds": [
+            18,
+            0,
+            289,
+            715
+          ]
+        },
+        "j": {
+          "translation": 422,
+          "original_bounds": [
+            -82,
+            -202,
+            218,
+            715
+          ]
+        },
+        "k": {
+          "translation": 190,
+          "original_bounds": [
+            14,
+            0,
+            587,
+            737
+          ]
+        },
+        "l": {
+          "translation": 338,
+          "original_bounds": [
+            19,
+            0,
+            287,
+            737
+          ]
+        },
+        "m": {
+          "translation": 45,
+          "original_bounds": [
+            23,
+            0,
+            868,
+            481
+          ]
+        },
+        "n": {
+          "translation": 180,
+          "original_bounds": [
+            27,
+            0,
+            593,
+            481
+          ]
+        },
+        "o": {
+          "translation": 240,
+          "original_bounds": [
+            34,
+            -15,
+            466,
+            481
+          ]
+        },
+        "p": {
+          "translation": 209,
+          "original_bounds": [
+            28,
+            -202,
+            535,
+            481
+          ]
+        },
+        "q": {
+          "translation": 198,
+          "original_bounds": [
+            36,
+            -202,
+            548,
+            481
+          ]
+        },
+        "r": {
+          "translation": 262,
+          "original_bounds": [
+            21,
+            0,
+            435,
+            481
+          ]
+        },
+        "s": {
+          "translation": 254,
+          "original_bounds": [
+            51,
+            -15,
+            421,
+            481
+          ]
+        },
+        "t": {
+          "translation": 294,
+          "original_bounds": [
+            18,
+            -15,
+            374,
+            664
+          ]
+        },
+        "u": {
+          "translation": 183,
+          "original_bounds": [
+            21,
+            -15,
+            594,
+            466
+          ]
+        },
+        "v": {
+          "translation": 222,
+          "original_bounds": [
+            8,
+            -15,
+            528,
+            466
+          ]
+        },
+        "w": {
+          "translation": 102,
+          "original_bounds": [
+            15,
+            -15,
+            763,
+            466
+          ]
+        },
+        "x": {
+          "translation": 222,
+          "original_bounds": [
+            9,
+            0,
+            529,
+            466
+          ]
+        },
+        "y": {
+          "translation": 224,
+          "original_bounds": [
+            3,
+            -206,
+            531,
+            466
+          ]
+        },
+        "z": {
+          "translation": 254,
+          "original_bounds": [
+            39,
+            0,
+            435,
+            466
+          ]
+        },
+        "braceleft": {
+          "translation": 309,
+          "original_bounds": [
+            66,
+            -108,
+            297,
+            722
+          ]
+        },
+        "bar": {
+          "translation": 188,
+          "original_bounds": [
+            264,
+            -244,
+            342,
+            722
+          ]
+        },
+        "braceright": {
+          "translation": 339,
+          "original_bounds": [
+            36,
+            -108,
+            267,
+            722
+          ]
+        },
+        "asciitilde": {
+          "translation": 188,
+          "original_bounds": [
+            51,
+            165,
+            555,
+            327
+          ]
+        },
+        "quotesingle": {
+          "translation": 388,
+          "original_bounds": [
+            59,
+            498,
+            145,
+            736
+          ]
+        },
+        "grave": {
+          "translation": 361,
+          "original_bounds": [
+            17,
+            535,
+            242,
+            706
+          ]
+        }
+      }
+    },
+    "Bold": {
+      "file": "InterleaveSchoolbookMono-Bold.woff2",
+      "sha256": "2345dd7e73e222a56fe259ea5e5f4b9f83ebf088f960dfa36dc92c8133654420",
+      "embolden_units": 0,
+      "glyphs": {
+        ".notdef": {
+          "translation": 0,
+          "original_bounds": null
+        },
+        "space": {
+          "translation": 0,
+          "original_bounds": null
+        },
+        "exclam": {
+          "translation": 340,
+          "original_bounds": [
+            57,
+            -15,
+            244,
+            737
+          ]
+        },
+        "quotedbl": {
+          "translation": 324,
+          "original_bounds": [
+            -12,
+            416,
+            346,
+            737
+          ]
+        },
+        "numbersign": {
+          "translation": 204,
+          "original_bounds": [
+            41,
+            0,
+            533,
+            700
+          ]
+        },
+        "dollar": {
+          "translation": 204,
+          "original_bounds": [
+            25,
+            -137,
+            549,
+            801
+          ]
+        },
+        "percent": {
+          "translation": 72,
+          "original_bounds": [
+            17,
+            0,
+            821,
+            722
+          ]
+        },
+        "ampersand": {
+          "translation": 60,
+          "original_bounds": [
+            39,
+            -16,
+            822,
+            737
+          ]
+        },
+        "parenleft": {
+          "translation": 286,
+          "original_bounds": [
+            72,
+            -118,
+            338,
+            737
+          ]
+        },
+        "parenright": {
+          "translation": 308,
+          "original_bounds": [
+            50,
+            -118,
+            316,
+            737
+          ]
+        },
+        "asterisk": {
+          "translation": 239,
+          "original_bounds": [
+            56,
+            297,
+            447,
+            737
+          ]
+        },
+        "plus": {
+          "translation": 188,
+          "original_bounds": [
+            51,
+            0,
+            555,
+            505
+          ]
+        },
+        "comma": {
+          "translation": 353,
+          "original_bounds": [
+            39,
+            -186,
+            236,
+            173
+          ]
+        },
+        "hyphen": {
+          "translation": 324,
+          "original_bounds": [
+            42,
+            180,
+            291,
+            310
+          ]
+        },
+        "period": {
+          "translation": 352,
+          "original_bounds": [
+            45,
+            -15,
+            233,
+            173
+          ]
+        },
+        "slash": {
+          "translation": 351,
+          "original_bounds": [
+            -23,
+            -15,
+            302,
+            737
+          ]
+        },
+        "zero": {
+          "translation": 204,
+          "original_bounds": [
+            27,
+            -14,
+            546,
+            708
+          ]
+        },
+        "one": {
+          "translation": 204,
+          "original_bounds": [
+            83,
+            0,
+            491,
+            708
+          ]
+        },
+        "two": {
+          "translation": 216,
+          "original_bounds": [
+            19,
+            -4,
+            531,
+            708
+          ]
+        },
+        "three": {
+          "translation": 214,
+          "original_bounds": [
+            24,
+            -14,
+            530,
+            708
+          ]
+        },
+        "four": {
+          "translation": 208,
+          "original_bounds": [
+            19,
+            0,
+            546,
+            708
+          ]
+        },
+        "five": {
+          "translation": 208,
+          "original_bounds": [
+            31,
+            -14,
+            535,
+            708
+          ]
+        },
+        "six": {
+          "translation": 202,
+          "original_bounds": [
+            29,
+            -14,
+            549,
+            708
+          ]
+        },
+        "seven": {
+          "translation": 195,
+          "original_bounds": [
+            45,
+            -14,
+            546,
+            708
+          ]
+        },
+        "eight": {
+          "translation": 204,
+          "original_bounds": [
+            27,
+            -14,
+            546,
+            708
+          ]
+        },
+        "nine": {
+          "translation": 206,
+          "original_bounds": [
+            25,
+            -14,
+            545,
+            708
+          ]
+        },
+        "colon": {
+          "translation": 340,
+          "original_bounds": [
+            57,
+            -15,
+            244,
+            481
+          ]
+        },
+        "semicolon": {
+          "translation": 345,
+          "original_bounds": [
+            47,
+            -186,
+            244,
+            481
+          ]
+        },
+        "less": {
+          "translation": 187,
+          "original_bounds": [
+            49,
+            76,
+            558,
+            630
+          ]
+        },
+        "equal": {
+          "translation": 188,
+          "original_bounds": [
+            51,
+            92,
+            555,
+            413
+          ]
+        },
+        "greater": {
+          "translation": 188,
+          "original_bounds": [
+            48,
+            76,
+            557,
+            630
+          ]
+        },
+        "question": {
+          "translation": 241,
+          "original_bounds": [
+            23,
+            -15,
+            476,
+            737
+          ]
+        },
+        "at": {
+          "translation": 118,
+          "original_bounds": [
+            24,
+            -15,
+            722,
+            737
+          ]
+        },
+        "A": {
+          "translation": 110,
+          "original_bounds": [
+            -18,
+            0,
+            778,
+            737
+          ]
+        },
+        "B": {
+          "translation": 114,
+          "original_bounds": [
+            17,
+            0,
+            736,
+            722
+          ]
+        },
+        "C": {
+          "translation": 109,
+          "original_bounds": [
+            40,
+            -15,
+            723,
+            737
+          ]
+        },
+        "D": {
+          "translation": 84,
+          "original_bounds": [
+            19,
+            0,
+            793,
+            722
+          ]
+        },
+        "E": {
+          "translation": 129,
+          "original_bounds": [
+            16,
+            0,
+            707,
+            722
+          ]
+        },
+        "F": {
+          "translation": 134,
+          "original_bounds": [
+            22,
+            0,
+            690,
+            722
+          ]
+        },
+        "G": {
+          "translation": 62,
+          "original_bounds": [
+            39,
+            -15,
+            817,
+            737
+          ]
+        },
+        "H": {
+          "translation": 56,
+          "original_bounds": [
+            20,
+            0,
+            850,
+            722
+          ]
+        },
+        "I": {
+          "translation": 268,
+          "original_bounds": [
+            28,
+            0,
+            417,
+            722
+          ]
+        },
+        "J": {
+          "translation": 169,
+          "original_bounds": [
+            4,
+            -15,
+            639,
+            722
+          ]
+        },
+        "K": {
+          "translation": 74,
+          "original_bounds": [
+            15,
+            0,
+            818,
+            722
+          ]
+        },
+        "L": {
+          "translation": 130,
+          "original_bounds": [
+            19,
+            0,
+            701,
+            722
+          ]
+        },
+        "M": {
+          "translation": 4,
+          "original_bounds": [
+            9,
+            0,
+            965,
+            722
+          ]
+        },
+        "N": {
+          "translation": 66,
+          "original_bounds": [
+            16,
+            -7,
+            833,
+            722
+          ]
+        },
+        "O": {
+          "translation": 74,
+          "original_bounds": [
+            39,
+            -15,
+            794,
+            737
+          ]
+        },
+        "P": {
+          "translation": 111,
+          "original_bounds": [
+            24,
+            0,
+            735,
+            722
+          ]
+        },
+        "Q": {
+          "translation": 68,
+          "original_bounds": [
+            38,
+            -188,
+            808,
+            737
+          ]
+        },
+        "R": {
+          "translation": 72,
+          "original_bounds": [
+            20,
+            -15,
+            817,
+            722
+          ]
+        },
+        "S": {
+          "translation": 148,
+          "original_bounds": [
+            51,
+            -15,
+            633,
+            737
+          ]
+        },
+        "T": {
+          "translation": 130,
+          "original_bounds": [
+            15,
+            0,
+            707,
+            722
+          ]
+        },
+        "U": {
+          "translation": 71,
+          "original_bounds": [
+            15,
+            -15,
+            824,
+            722
+          ]
+        },
+        "V": {
+          "translation": 110,
+          "original_bounds": [
+            -18,
+            -15,
+            778,
+            722
+          ]
+        },
+        "W": {
+          "translation": 1,
+          "original_bounds": [
+            6,
+            -15,
+            973,
+            722
+          ]
+        },
+        "X": {
+          "translation": 129,
+          "original_bounds": [
+            -12,
+            0,
+            735,
+            722
+          ]
+        },
+        "Y": {
+          "translation": 129,
+          "original_bounds": [
+            -12,
+            0,
+            735,
+            722
+          ]
+        },
+        "Z": {
+          "translation": 162,
+          "original_bounds": [
+            24,
+            0,
+            634,
+            722
+          ]
+        },
+        "bracketleft": {
+          "translation": 279,
+          "original_bounds": [
+            84,
+            -108,
+            339,
+            722
+          ]
+        },
+        "backslash": {
+          "translation": 188,
+          "original_bounds": [
+            50,
+            0,
+            555,
+            737
+          ]
+        },
+        "bracketright": {
+          "translation": 332,
+          "original_bounds": [
+            31,
+            -108,
+            286,
+            722
+          ]
+        },
+        "asciicircum": {
+          "translation": 188,
+          "original_bounds": [
+            52,
+            318,
+            554,
+            722
+          ]
+        },
+        "underscore": {
+          "translation": 240,
+          "original_bounds": [
+            0,
+            -155,
+            500,
+            -65
+          ]
+        },
+        "a": {
+          "translation": 174,
+          "original_bounds": [
+            36,
+            -15,
+            597,
+            488
+          ]
+        },
+        "b": {
+          "translation": 184,
+          "original_bounds": [
+            0,
+            -15,
+            612,
+            737
+          ]
+        },
+        "c": {
+          "translation": 212,
+          "original_bounds": [
+            31,
+            -15,
+            527,
+            488
+          ]
+        },
+        "d": {
+          "translation": 145,
+          "original_bounds": [
+            37,
+            -15,
+            654,
+            737
+          ]
+        },
+        "e": {
+          "translation": 204,
+          "original_bounds": [
+            32,
+            -15,
+            540,
+            488
+          ]
+        },
+        "f": {
+          "translation": 252,
+          "original_bounds": [
+            14,
+            0,
+            464,
+            733
+          ]
+        },
+        "g": {
+          "translation": 164,
+          "original_bounds": [
+            30,
+            -202,
+            623,
+            538
+          ]
+        },
+        "h": {
+          "translation": 150,
+          "original_bounds": [
+            16,
+            0,
+            666,
+            737
+          ]
+        },
+        "i": {
+          "translation": 306,
+          "original_bounds": [
+            28,
+            0,
+            341,
+            737
+          ]
+        },
+        "j": {
+          "translation": 396,
+          "original_bounds": [
+            -82,
+            -202,
+            272,
+            737
+          ]
+        },
+        "k": {
+          "translation": 154,
+          "original_bounds": [
+            12,
+            0,
+            660,
+            737
+          ]
+        },
+        "l": {
+          "translation": 317,
+          "original_bounds": [
+            16,
+            0,
+            331,
+            737
+          ]
+        },
+        "m": {
+          "translation": 10,
+          "original_bounds": [
+            20,
+            0,
+            942,
+            488
+          ]
+        },
+        "n": {
+          "translation": 146,
+          "original_bounds": [
+            20,
+            0,
+            668,
+            488
+          ]
+        },
+        "o": {
+          "translation": 186,
+          "original_bounds": [
+            31,
+            -15,
+            579,
+            488
+          ]
+        },
+        "p": {
+          "translation": 166,
+          "original_bounds": [
+            18,
+            -202,
+            632,
+            488
+          ]
+        },
+        "q": {
+          "translation": 154,
+          "original_bounds": [
+            34,
+            -202,
+            640,
+            488
+          ]
+        },
+        "r": {
+          "translation": 223,
+          "original_bounds": [
+            18,
+            0,
+            517,
+            488
+          ]
+        },
+        "s": {
+          "translation": 238,
+          "original_bounds": [
+            38,
+            -15,
+            466,
+            488
+          ]
+        },
+        "t": {
+          "translation": 276,
+          "original_bounds": [
+            23,
+            -15,
+            405,
+            671
+          ]
+        },
+        "u": {
+          "translation": 150,
+          "original_bounds": [
+            13,
+            -15,
+            667,
+            473
+          ]
+        },
+        "v": {
+          "translation": 186,
+          "original_bounds": [
+            12,
+            -14,
+            598,
+            473
+          ]
+        },
+        "w": {
+          "translation": 43,
+          "original_bounds": [
+            19,
+            -14,
+            876,
+            473
+          ]
+        },
+        "x": {
+          "translation": 185,
+          "original_bounds": [
+            13,
+            0,
+            598,
+            473
+          ]
+        },
+        "y": {
+          "translation": 186,
+          "original_bounds": [
+            10,
+            -206,
+            598,
+            473
+          ]
+        },
+        "z": {
+          "translation": 226,
+          "original_bounds": [
+            35,
+            0,
+            495,
+            473
+          ]
+        },
+        "braceleft": {
+          "translation": 277,
+          "original_bounds": [
+            84,
+            -108,
+            343,
+            722
+          ]
+        },
+        "bar": {
+          "translation": 188,
+          "original_bounds": [
+            243,
+            -244,
+            362,
+            722
+          ]
+        },
+        "braceright": {
+          "translation": 330,
+          "original_bounds": [
+            31,
+            -108,
+            290,
+            722
+          ]
+        },
+        "asciitilde": {
+          "translation": 188,
+          "original_bounds": [
+            51,
+            160,
+            555,
+            335
+          ]
+        },
+        "quotesingle": {
+          "translation": 370,
+          "original_bounds": [
+            52,
+            416,
+            188,
+            737
+          ]
+        },
+        "grave": {
+          "translation": 365,
+          "original_bounds": [
+            2,
+            545,
+            249,
+            734
+          ]
+        }
+      }
+    },
+    "Black": {
+      "file": "InterleaveSchoolbookMono-Black.woff2",
+      "sha256": "c7587d3071f640139cd0c506ea83c14363ac5df53b28d7ffad8f32f36ecb237a",
+      "embolden_units": 25,
+      "glyphs": {
+        ".notdef": {
+          "translation": 0,
+          "original_bounds": null
+        },
+        "space": {
+          "translation": 0,
+          "original_bounds": null
+        },
+        "exclam": {
+          "translation": 340,
+          "original_bounds": [
+            32.0,
+            -40.0,
+            269.0,
+            762.0
+          ]
+        },
+        "quotedbl": {
+          "translation": 324,
+          "original_bounds": [
+            -37.0,
+            391.0,
+            371.0,
+            762.0
+          ]
+        },
+        "numbersign": {
+          "translation": 204,
+          "original_bounds": [
+            15.999999999998089,
+            -25.0,
+            558.0,
+            725.0
+          ]
+        },
+        "dollar": {
+          "translation": 204,
+          "original_bounds": [
+            0.0,
+            -162.0,
+            574.0,
+            826.0
+          ]
+        },
+        "percent": {
+          "translation": 72,
+          "original_bounds": [
+            -8.0,
+            -25.0,
+            846.0,
+            747.0
+          ]
+        },
+        "ampersand": {
+          "translation": 60,
+          "original_bounds": [
+            14.0,
+            -41.0,
+            847.0024022394476,
+            762.0
+          ]
+        },
+        "parenleft": {
+          "translation": 286,
+          "original_bounds": [
+            47.0,
+            -143.0022489414513,
+            363.0,
+            762.0
+          ]
+        },
+        "parenright": {
+          "translation": 308,
+          "original_bounds": [
+            24.999998092651367,
+            -143.0,
+            341.0,
+            762.0021486012854
+          ]
+        },
+        "asterisk": {
+          "translation": 239,
+          "original_bounds": [
+            31.0,
+            272.0,
+            472.0,
+            762.0
+          ]
+        },
+        "plus": {
+          "translation": 188,
+          "original_bounds": [
+            25.99999999999809,
+            -25.0,
+            580.0,
+            530.0
+          ]
+        },
+        "comma": {
+          "translation": 353,
+          "original_bounds": [
+            14.0,
+            -211.00402642296024,
+            261.0,
+            198.0
+          ]
+        },
+        "hyphen": {
+          "translation": 324,
+          "original_bounds": [
+            17.0,
+            155.0,
+            316.0,
+            335.0
+          ]
+        },
+        "period": {
+          "translation": 352,
+          "original_bounds": [
+            20.0,
+            -40.0,
+            258.0,
+            198.0
+          ]
+        },
+        "slash": {
+          "translation": 351,
+          "original_bounds": [
+            -48.001639529996766,
+            -40.0,
+            327.00161456987684,
+            762.0
+          ]
+        },
+        "zero": {
+          "translation": 204,
+          "original_bounds": [
+            2.0,
+            -39.0,
+            571.0,
+            733.0
+          ]
+        },
+        "one": {
+          "translation": 204,
+          "original_bounds": [
+            57.999999999992355,
+            -25.0,
+            516.0,
+            733.0
+          ]
+        },
+        "two": {
+          "translation": 215,
+          "original_bounds": [
+            -6.0,
+            -29.002706616437038,
+            556.0021705660647,
+            733.0
+          ]
+        },
+        "three": {
+          "translation": 214,
+          "original_bounds": [
+            -1.0,
+            -39.0,
+            555.0,
+            733.0
+          ]
+        },
+        "four": {
+          "translation": 208,
+          "original_bounds": [
+            -6.0,
+            -25.0,
+            571.0,
+            733.0
+          ]
+        },
+        "five": {
+          "translation": 208,
+          "original_bounds": [
+            6.0,
+            -39.0,
+            560.0,
+            733.0045750731846
+          ]
+        },
+        "six": {
+          "translation": 202,
+          "original_bounds": [
+            4.0,
+            -39.0,
+            574.0,
+            733.0
+          ]
+        },
+        "seven": {
+          "translation": 195,
+          "original_bounds": [
+            19.99682100524621,
+            -39.0,
+            571.0,
+            733.0030831777856
+          ]
+        },
+        "eight": {
+          "translation": 204,
+          "original_bounds": [
+            2.0,
+            -39.0,
+            571.0,
+            733.0
+          ]
+        },
+        "nine": {
+          "translation": 206,
+          "original_bounds": [
+            0.0,
+            -39.0,
+            570.0,
+            733.0
+          ]
+        },
+        "colon": {
+          "translation": 340,
+          "original_bounds": [
+            32.0,
+            -40.0,
+            269.0,
+            506.0
+          ]
+        },
+        "semicolon": {
+          "translation": 345,
+          "original_bounds": [
+            22.0,
+            -211.0041293024147,
+            269.0,
+            506.0
+          ]
+        },
+        "less": {
+          "translation": 187,
+          "original_bounds": [
+            24.0,
+            50.999496880582775,
+            583.0,
+            655.0
+          ]
+        },
+        "equal": {
+          "translation": 188,
+          "original_bounds": [
+            25.99999999999809,
+            67.0,
+            580.0,
+            438.0
+          ]
+        },
+        "greater": {
+          "translation": 188,
+          "original_bounds": [
+            23.0,
+            51.0,
+            582.0,
+            655.0003975221905
+          ]
+        },
+        "question": {
+          "translation": 241,
+          "original_bounds": [
+            -2.0,
+            -40.0,
+            501.0,
+            762.0
+          ]
+        },
+        "at": {
+          "translation": 118,
+          "original_bounds": [
+            -1.0000000000001172,
+            -40.0,
+            747.0,
+            762.0
+          ]
+        },
+        "A": {
+          "translation": 110,
+          "original_bounds": [
+            -43.0,
+            -25.0,
+            803.0,
+            762.0
+          ]
+        },
+        "B": {
+          "translation": 114,
+          "original_bounds": [
+            -8.0,
+            -25.0,
+            761.0,
+            747.0
+          ]
+        },
+        "C": {
+          "translation": 109,
+          "original_bounds": [
+            15.0,
+            -40.0,
+            748.0043034915659,
+            762.0
+          ]
+        },
+        "D": {
+          "translation": 84,
+          "original_bounds": [
+            -6.0,
+            -25.0,
+            818.0,
+            747.0
+          ]
+        },
+        "E": {
+          "translation": 129,
+          "original_bounds": [
+            -9.0,
+            -25.0,
+            732.0007656071314,
+            747.0
+          ]
+        },
+        "F": {
+          "translation": 134,
+          "original_bounds": [
+            -3.0,
+            -25.0,
+            715.0,
+            747.0
+          ]
+        },
+        "G": {
+          "translation": 62,
+          "original_bounds": [
+            14.0,
+            -40.0,
+            842.0,
+            762.0
+          ]
+        },
+        "H": {
+          "translation": 56,
+          "original_bounds": [
+            -5.0,
+            -25.0,
+            875.0,
+            747.0
+          ]
+        },
+        "I": {
+          "translation": 268,
+          "original_bounds": [
+            2.9999999999999702,
+            -25.0,
+            442.0,
+            747.0
+          ]
+        },
+        "J": {
+          "translation": 169,
+          "original_bounds": [
+            -21.0,
+            -40.0,
+            664.0,
+            747.0
+          ]
+        },
+        "K": {
+          "translation": 74,
+          "original_bounds": [
+            -10.0,
+            -25.0,
+            843.0,
+            747.0
+          ]
+        },
+        "L": {
+          "translation": 130,
+          "original_bounds": [
+            -6.0,
+            -25.0,
+            726.0007527261379,
+            747.0
+          ]
+        },
+        "M": {
+          "translation": 4,
+          "original_bounds": [
+            -16.0,
+            -25.0,
+            990.0,
+            747.0
+          ]
+        },
+        "N": {
+          "translation": 66,
+          "original_bounds": [
+            -9.0,
+            -32.0,
+            858.0,
+            747.0
+          ]
+        },
+        "O": {
+          "translation": 74,
+          "original_bounds": [
+            14.0,
+            -40.0,
+            819.0,
+            762.0
+          ]
+        },
+        "P": {
+          "translation": 111,
+          "original_bounds": [
+            -1.0,
+            -25.0,
+            760.0,
+            747.0
+          ]
+        },
+        "Q": {
+          "translation": 68,
+          "original_bounds": [
+            13.0,
+            -213.0,
+            833.0,
+            762.0
+          ]
+        },
+        "R": {
+          "translation": 72,
+          "original_bounds": [
+            -5.0,
+            -40.0,
+            842.0,
+            747.0
+          ]
+        },
+        "S": {
+          "translation": 149,
+          "original_bounds": [
+            25.99999999999809,
+            -40.0,
+            658.0,
+            762.0
+          ]
+        },
+        "T": {
+          "translation": 130,
+          "original_bounds": [
+            -10.001109272299951,
+            -25.0,
+            732.0,
+            747.0
+          ]
+        },
+        "U": {
+          "translation": 71,
+          "original_bounds": [
+            -10.0,
+            -40.0,
+            849.0,
+            747.0
+          ]
+        },
+        "V": {
+          "translation": 110,
+          "original_bounds": [
+            -43.0,
+            -40.0,
+            803.0000000022234,
+            747.0
+          ]
+        },
+        "W": {
+          "translation": 1,
+          "original_bounds": [
+            -19.0,
+            -40.0,
+            998.0,
+            747.0
+          ]
+        },
+        "X": {
+          "translation": 129,
+          "original_bounds": [
+            -37.0,
+            -25.0,
+            760.0000000020538,
+            747.0
+          ]
+        },
+        "Y": {
+          "translation": 129,
+          "original_bounds": [
+            -37.0,
+            -25.0,
+            760.0,
+            747.0
+          ]
+        },
+        "Z": {
+          "translation": 161,
+          "original_bounds": [
+            -1.0000038146972656,
+            -25.0,
+            659.0012756248834,
+            747.0
+          ]
+        },
+        "bracketleft": {
+          "translation": 279,
+          "original_bounds": [
+            58.99999999996941,
+            -133.0,
+            364.0,
+            747.0
+          ]
+        },
+        "backslash": {
+          "translation": 188,
+          "original_bounds": [
+            24.999999999992355,
+            -25.0,
+            580.0,
+            762.0
+          ]
+        },
+        "bracketright": {
+          "translation": 332,
+          "original_bounds": [
+            5.99999999999988,
+            -133.0,
+            311.0,
+            747.0
+          ]
+        },
+        "asciicircum": {
+          "translation": 188,
+          "original_bounds": [
+            26.99783380624692,
+            293.0,
+            579.0,
+            747.0
+          ]
+        },
+        "underscore": {
+          "translation": 240,
+          "original_bounds": [
+            -25.0,
+            -180.0,
+            525.0,
+            -40.0
+          ]
+        },
+        "a": {
+          "translation": 174,
+          "original_bounds": [
+            11.0,
+            -40.0,
+            622.0,
+            513.0
+          ]
+        },
+        "b": {
+          "translation": 185,
+          "original_bounds": [
+            -25.000001907348633,
+            -40.0,
+            637.0,
+            762.0
+          ]
+        },
+        "c": {
+          "translation": 211,
+          "original_bounds": [
+            6.0,
+            -40.0,
+            552.0019882976532,
+            513.0
+          ]
+        },
+        "d": {
+          "translation": 145,
+          "original_bounds": [
+            12.0,
+            -40.0,
+            679.0,
+            762.0
+          ]
+        },
+        "e": {
+          "translation": 204,
+          "original_bounds": [
+            7.0,
+            -40.0,
+            565.0,
+            513.0
+          ]
+        },
+        "f": {
+          "translation": 252,
+          "original_bounds": [
+            -11.0,
+            -25.0,
+            489.0,
+            758.0
+          ]
+        },
+        "g": {
+          "translation": 164,
+          "original_bounds": [
+            5.0,
+            -227.0,
+            648.0,
+            563.0
+          ]
+        },
+        "h": {
+          "translation": 150,
+          "original_bounds": [
+            -9.000001907348633,
+            -25.0,
+            691.0,
+            762.0
+          ]
+        },
+        "i": {
+          "translation": 306,
+          "original_bounds": [
+            2.9999999999999702,
+            -25.0,
+            366.0,
+            762.0
+          ]
+        },
+        "j": {
+          "translation": 396,
+          "original_bounds": [
+            -107.0,
+            -227.0,
+            297.0,
+            762.0
+          ]
+        },
+        "k": {
+          "translation": 155,
+          "original_bounds": [
+            -13.000001907348633,
+            -25.0,
+            685.0,
+            762.0
+          ]
+        },
+        "l": {
+          "translation": 317,
+          "original_bounds": [
+            -9.000001907348633,
+            -25.0,
+            356.0,
+            762.0
+          ]
+        },
+        "m": {
+          "translation": 10,
+          "original_bounds": [
+            -5.000000000000124,
+            -25.0,
+            967.0,
+            513.0
+          ]
+        },
+        "n": {
+          "translation": 146,
+          "original_bounds": [
+            -5.0,
+            -25.0,
+            693.0,
+            513.0
+          ]
+        },
+        "o": {
+          "translation": 186,
+          "original_bounds": [
+            6.0,
+            -40.0,
+            604.0,
+            513.0
+          ]
+        },
+        "p": {
+          "translation": 166,
+          "original_bounds": [
+            -7.0,
+            -227.0,
+            657.0,
+            513.0
+          ]
+        },
+        "q": {
+          "translation": 154,
+          "original_bounds": [
+            9.0,
+            -227.0,
+            665.0,
+            513.0
+          ]
+        },
+        "r": {
+          "translation": 223,
+          "original_bounds": [
+            -7.0,
+            -25.0,
+            542.0,
+            513.0
+          ]
+        },
+        "s": {
+          "translation": 239,
+          "original_bounds": [
+            12.999999998606503,
+            -40.0,
+            491.0,
+            513.0
+          ]
+        },
+        "t": {
+          "translation": 277,
+          "original_bounds": [
+            -2.000001907348633,
+            -40.0,
+            430.0,
+            696.0
+          ]
+        },
+        "u": {
+          "translation": 150,
+          "original_bounds": [
+            -12.0,
+            -40.0,
+            692.0,
+            498.0
+          ]
+        },
+        "v": {
+          "translation": 186,
+          "original_bounds": [
+            -13.0,
+            -39.0,
+            623.0,
+            498.0
+          ]
+        },
+        "w": {
+          "translation": 43,
+          "original_bounds": [
+            -6.0,
+            -39.0,
+            901.0,
+            498.0
+          ]
+        },
+        "x": {
+          "translation": 185,
+          "original_bounds": [
+            -12.0,
+            -25.0,
+            623.0,
+            498.0
+          ]
+        },
+        "y": {
+          "translation": 186,
+          "original_bounds": [
+            -15.0,
+            -231.0,
+            623.0,
+            498.0
+          ]
+        },
+        "z": {
+          "translation": 225,
+          "original_bounds": [
+            10.0,
+            -25.0,
+            520.0010094464624,
+            498.0
+          ]
+        },
+        "braceleft": {
+          "translation": 277,
+          "original_bounds": [
+            58.99999999998964,
+            -133.0,
+            368.0,
+            747.0
+          ]
+        },
+        "bar": {
+          "translation": 188,
+          "original_bounds": [
+            217.99999999987764,
+            -269.0,
+            387.0,
+            747.0
+          ]
+        },
+        "braceright": {
+          "translation": 330,
+          "original_bounds": [
+            5.99999999999988,
+            -133.0,
+            315.0,
+            747.0
+          ]
+        },
+        "asciitilde": {
+          "translation": 188,
+          "original_bounds": [
+            25.99704405632606,
+            135.0,
+            580.0027998891672,
+            360.0
+          ]
+        },
+        "quotesingle": {
+          "translation": 371,
+          "original_bounds": [
+            26.999999999999865,
+            391.0,
+            213.0,
+            762.0
+          ]
+        },
+        "grave": {
+          "translation": 365,
+          "original_bounds": [
+            -23.0,
+            520.0,
+            274.0,
+            759.0
+          ]
+        }
+      }
+    }
+  }
+}

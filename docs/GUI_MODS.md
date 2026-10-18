@@ -2,6 +2,10 @@
 
 ## Purpose
 
+Playback endings, finite-run limits, channel selection, WAV workflows and the
+restored source/luma controls are described in
+[V7_PLAYBACK_FILE_IO.md](V7_PLAYBACK_FILE_IO.md).
+
 Track the standalone V7 sender/receiver preview, sender-GUI usability, saved
 preferences, and live audio-device recovery work. This is separate from the baked
 `main.py --mode modem` pipeline.
