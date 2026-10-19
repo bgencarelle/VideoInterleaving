@@ -139,6 +139,8 @@ def _serve_dynamic_template(handler):
         decoded_path = unquote(raw_path)
         # Remove leading slash and normalize
         clean_path = os.path.normpath(decoded_path.lstrip('/')).replace('\\', '/')
+        if clean_path in ('scope2', 'scope2.html', 'scope.html'):
+            clean_path = 'scope'
 
         # 2. Security: Prevent Directory Traversal
         if "/../" in f"/{clean_path}/" or clean_path.startswith(".."):
@@ -402,6 +404,7 @@ class MonitorHandler(RobustHandlerMixin, http.server.BaseHTTPRequestHandler):
         except (OSError, AttributeError):
             return
         last, idle = -1, 0.0
+        writer = _MjpegWriter(self.wfile)
         # q88: below about q80 the compression pushes cells across `trim`,
         # which flips them from drawn to undrawn and reroutes the serpentine.
         # Visually harmless but it is a cliff, not a slope, so stay above it.
@@ -424,11 +427,7 @@ class MonitorHandler(RobustHandlerMixin, http.server.BaseHTTPRequestHandler):
                 if not ok:
                     continue
                 try:
-                    self.wfile.write(HEADER_BOUNDARY)
-                    self.wfile.write(HEADER_CTYPE_JPEG)
-                    self.wfile.write(buf.tobytes())
-                    self.wfile.write(HEADER_NEWLINE)
-                    self.wfile.flush()
+                    writer.write(buf.tobytes())
                 except (BrokenPipeError, ConnectionResetError,
                         ConnectionAbortedError, OSError):
                     return
@@ -460,6 +459,7 @@ class MonitorHandler(RobustHandlerMixin, http.server.BaseHTTPRequestHandler):
             return
 
         last_seq = -1
+        writer = _MjpegWriter(self.wfile)
         idle = 0.0
         try:
             from scope_out import Scope
@@ -491,11 +491,7 @@ class MonitorHandler(RobustHandlerMixin, http.server.BaseHTTPRequestHandler):
                 if blob is None:
                     continue
                 try:
-                    self.wfile.write(HEADER_BOUNDARY)
-                    self.wfile.write(HEADER_CTYPE_JPEG)
-                    self.wfile.write(blob)
-                    self.wfile.write(HEADER_NEWLINE)
-                    self.wfile.flush()
+                    writer.write(blob)
                 except (BrokenPipeError, ConnectionResetError,
                         ConnectionAbortedError, OSError):
                     return
@@ -623,8 +619,8 @@ class StreamHandler(RobustHandlerMixin, http.server.BaseHTTPRequestHandler):
             _current_viewer_count += 1
         _set_heartbeat(cid)
 
-        # One picture of kernel buffer at most: a larger buffer is an old
-        # picture the viewer would still see before the newest one.
+        # Limit transport backlog. This is a byte budget, not a guaranteed
+        # one-picture bound: encoded sizes and OS socket accounting vary.
         _tight_stream_socket(self.connection, sndbuf=8192)
 
         self.send_response(200)

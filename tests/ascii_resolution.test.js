@@ -145,8 +145,10 @@ class MockSocket {
     constructor(url) { this.url = url; this.readyState = 1; this.sent = []; sockets.push(this); }
     send(value) {
         const data = JSON.parse(value);
-        assert.deepEqual(data, {type:'encoding', encoding:'gzip'});
-        this.sent.push(value); // No resize messages are permitted.
+        // Connection negotiation and per-picture acknowledgements only.
+        assert(['encoding','flow','ack'].includes(data.type), value);
+        if (data.type === 'encoding') assert.deepEqual(data, {type:'encoding', encoding:'gzip'});
+        this.sent.push(value); // No resize or picture requests are permitted.
     }
     close() { this.readyState = 3; this.onclose(); }
 }
@@ -251,14 +253,16 @@ function key(value) { window.listeners.keydown({key:value, target:ids.terminal, 
     assert.equal(sockets.length, 2);
     assert.equal(ids.resolution.textContent, '50×32');
     assert.equal(typeof document.listeners.visibilitychange, 'function');
-    assert.equal(sockets[0].sent.length, 0); // All zoom interactions were local.
+    // Zoom sends nothing: the only messages are acknowledgements of pictures.
+    assert.equal(sockets[0].sent.filter(m=>JSON.parse(m).type!=='ack').length, 0);
     while (callbacks.length) { callbacks.shift()(); flush(); }
     sockets[1].onopen();
-    assert.equal(sockets[1].sent.length, 1); // One encoding negotiation on reconnect.
+    assert.equal(sockets[1].sent.filter(m=>JSON.parse(m).type!=='ack').length, 2); // Encoding and flow negotiation on reconnect.
     const {gzipSync} = require('node:zlib');
     const firstInflate = new Promise(resolve => inflateCompletions.push(resolve));
     const lastInflate = new Promise(resolve => inflateCompletions.push(resolve));
-    for (const glyph of ['F','G','H']) {
+    for (const [id,glyph] of ['F','G','H'].entries()) {
+        sockets[1].onmessage({data:JSON.stringify({type:'frame',id:id+1})});
         const packed = Buffer.concat([Buffer.from('g'), gzipSync(source(90,60,glyph))]);
         sockets[1].onmessage({data:packed.buffer.slice(packed.byteOffset,packed.byteOffset+packed.byteLength)});
     }
@@ -267,6 +271,8 @@ function key(value) { window.listeners.keydown({key:value, target:ids.terminal, 
     assert.equal(inflations, 2); // G was replaced while F inflated; H is next.
     assert(writes.at(-1).includes('H'));
     assert(!writes.some(value => value.includes('G')));
+    assert.deepEqual(sockets[1].sent.map(m=>JSON.parse(m)).filter(m=>m.type==='ack')
+        .map(m=>m.id).sort(), [1,2,3]);
     ids['brightness-range'].value = '1.25'; ids['brightness-range'].listeners.input();
     assert.equal(ids['brightness-number'].value, '1.25');
     ids['contrast-number'].value = '1.40'; ids['contrast-number'].listeners.input();
@@ -327,7 +333,8 @@ function key(value) { window.listeners.keydown({key:value, target:ids.terminal, 
     assert.equal(ids.terminal.style.height,resetLayout.height+'px');
     assert.equal(ids.terminal.rowElements.at(-1).style.transform,`translateY(${resetLayout.offsets.at(-1)}px)`);
     assert.equal(window.ASCII_VIEWER_CONFIG.appearance,undefined);
-    assert.equal(sockets[1].sent.length,1); // No server requests from any picture control.
+    // No server requests from any picture control: only acknowledgements since reconnect.
+    assert.equal(sockets[1].sent.filter(m=>JSON.parse(m).type!=='ack').length,2);
     document.hidden=true;document.listeners.visibilitychange();
     assert.equal(sockets[1].readyState,3);
     const previousWrites=writes.length;flush();assert.equal(writes.length,previousWrites);
@@ -406,12 +413,14 @@ function key(value) { window.listeners.keydown({key:value, target:ids.terminal, 
         return packed.buffer.slice(packed.byteOffset, packed.byteOffset+packed.byteLength);
     };
     holdNextInflate = true;
+    canvas.socket.onmessage({data:JSON.stringify({type:'frame',id:100})});
     canvas.socket.onmessage({data:compressed('U')});
     assert.equal(typeof releaseHeldInflate,'function');
     canvas.localDocument.hidden=true;canvas.localDocument.listeners.visibilitychange();
     canvas.localDocument.hidden=false;canvas.localDocument.listeners.visibilitychange();
     const resumedSocket=sockets.at(-1);
     const freshInflate=new Promise(resolve=>inflateCompletions.push(resolve));
+    resumedSocket.onmessage({data:JSON.stringify({type:'frame',id:101})});
     resumedSocket.onmessage({data:compressed('V')});
     await Promise.race([freshInflate,new Promise((_,reject)=>setTimeout(()=>reject(
         new Error('Old background decode blocked the resumed connection')),500))]);
@@ -419,6 +428,8 @@ function key(value) { window.listeners.keydown({key:value, target:ids.terminal, 
     assert(recovered.draws.at(-1).frame.glyphs.every(glyph=>glyph==='V'));
     releaseHeldInflate();await new Promise(resolve=>setImmediate(resolve));flush();
     assert(recovered.draws.at(-1).frame.glyphs.every(glyph=>glyph==='V'));
+    assert(!canvas.socket.sent.some(m=>JSON.parse(m).id===100),'old decode acknowledged a dead connection');
+    assert(resumedSocket.sent.some(m=>JSON.parse(m).type==='ack'&&JSON.parse(m).id===101));
     const unavailable=await atlasCase(true);
     assert.equal(unavailable.elements.terminal.dataset.renderer,'grid');
     unavailable.socket.onmessage({data:source(90,60,'Z')});flush();

@@ -9,6 +9,7 @@
     // budget -- rendering server-side would mean resampling, and resampling a
     // trace is a filter applied to a picture.
     const lumImg = document.getElementById("luma-src");
+    const lumaStream = new LiveImageStream(lumImg, {onError: () => reconnectLuma("feed error")});
     let actx = null, worklet = null, lumCanvas = null, lumCtx = null;
     let localRunning = false, tracesBuilt = 0;
     const localOutputSel = document.getElementById("local-output-mode");
@@ -401,7 +402,7 @@
       lastHash = -1;
       lastChange = Date.now();
       backoff = 1000;
-      lumImg.src = "scope/luma.mjpg?t=" + Date.now();
+      lumaStream.start("/scope/luma.mjpg?t=" + Date.now());
     }
 
     function frameHash(px, w, h) {
@@ -418,11 +419,11 @@
       reconnects++;
       document.getElementById("local-status").textContent =
         `Reconnecting (${why})\u2026 attempt ${reconnects}`;
-      lumImg.removeAttribute("src");
+      lumaStream.stop(false);
       lumaReconnectTimer = setTimeout(() => {
         lumaReconnectTimer = null;
         if (!localRunning || document.hidden) return;
-        lumImg.src = "scope/luma.mjpg?t=" + Date.now();
+        lumaStream.start("/scope/luma.mjpg?t=" + Date.now());
         lastChange = Date.now();
         // back off so a server that is down is not hammered, but cap it:
         // this is an installation, it should recover on its own eventually

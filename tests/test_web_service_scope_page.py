@@ -31,6 +31,20 @@ class ScopeDashboardRouteTests(unittest.TestCase):
         _handler, body = self.request_root("web")
         self.assertEqual(body, HTML_TEMPLATE)
 
+    def test_scope_and_scope2_aliases_serve_the_same_promoted_page(self):
+        _handler, expected = self.request_root(MODE_SCOPE)
+        self.assertIn('Scope Monitor — Stream & Audio', expected)
+        for path in ('/scope', '/scope2', '/scope.html', '/scope2.html'):
+            with self.subTest(path=path):
+                handler = web_service.MonitorHandler.__new__(web_service.MonitorHandler)
+                handler.path = path
+                handler.wfile = io.BytesIO()
+                handler.send_response = Mock()
+                handler.send_header = Mock()
+                handler.end_headers = Mock()
+                handler.do_GET()
+                self.assertEqual(handler.wfile.getvalue().decode(), expected)
+
 
 if __name__ == "__main__":
     unittest.main()

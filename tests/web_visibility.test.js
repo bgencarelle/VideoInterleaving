@@ -59,7 +59,7 @@ test('web MJPEG drops hidden stream and rejects old status replies',async()=>{
     assert.equal(img.writes.length,writes,'old polling response restarted a healthy stream');
 });
 
-for(const page of ['scope.html','scope2.html']) {
+for(const page of ['scope.html']) {
     test(`${page}: fresh preview/luma on return, no stale retry`,()=>{
         const b=browser();
         b.run(fs.readFileSync(path.join(root,'static/scope_renderer.js'),'utf8'));

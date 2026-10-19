@@ -6170,3 +6170,53 @@ limitations are in `docs/WEB_VISIBILITY.md`.
 **Handoff:** browser lifecycle fixes tested locally; actual Safari/macOS tab
 switching and browser-local audio playback remain unverified. Frozen scope
 defaults and closed software/hardware stages remain unchanged.
+
+---
+
+## Appendix A081 — Scope browser stream framing and page promotion — 2026-10-19
+
+**Request:** finish the web buffering repair and make the former scope2 page
+the main scope page, preserving the owner's intervening playback-regression
+fix. The baseline is `86989a6b7`; FIFO loading, visible-loop pacing and Wayland
+fullscreen are not changed or replaced by this work.
+
+Both scope HTTP image handlers now use the existing `_MjpegWriter`, supplying
+explicit per-picture lengths and a flushed terminating boundary. This matches
+the latest-only JavaScript reader: the earlier local reader integration could
+not consume scope's lengthless multipart parts. Browser preview and luminance
+use bounded decode/pending state and connection-scoped cancellation. A hidden
+browser-audio session aborts its luminance connection without changing its
+AudioContext/output destination; resume requests a fresh feed. Temporary luma
+reconnects retain the last usable image/trace.
+
+`templates/scope.html` now contains the former scope2 layout and its browser
+audio controls. Scope mode root, `/scope`, `/scope2`, `/scope.html` and
+`/scope2.html` share that one template. The separate scope2 template is removed.
+No scope source adapter, trajectory arithmetic, producer/output scheduler,
+rate/default, charter or closed validation stage changes.
+
+**Supporting checks:** 63 focused Python tests and 11 Node test entries pass.
+The reader regression suite now consumes bytes emitted by both real scope HTTP
+handler methods, closing the earlier mocked-reader coverage gap. It also checks
+that reconnect retains the last usable picture until replacement. These tests
+do not establish hardware presentation or physical scope behavior. Cross-web
+delivery details and browser evidence are recorded in `docs/WEB_VISIBILITY.md`.
+
+**Actual-process browser evidence:** scope root and `/scope2` each pass a
+six-second HTTP-throttling phase followed by normal bandwidth and three
+hide/freeze/resume cycles, with advancing preview pixels and no page errors.
+Screenshots were inspected. On the root page a real browser AudioContext and
+worklet build 472 traces at the advertised 96-kHz rate, retain ownership through
+resume, stop, restart as X-only and stop again. Scope server output is
+NullStream. Browser output is muted on the existing verified PulseAudio
+`auto_null` / `auto_null.monitor` null route; no devices or defaults change.
+This is software browser integration evidence, not physical audio/scanout.
+
+Artifacts: `tmp/web_scope_repair_20261019_v2/`, runner
+`tmp/check_web_scope_repair.cjs`, and
+`tmp/web_scope_repair_final_python.log`. Exact presentation synchronization,
+Safari/macOS and hardware WebGL are not validated by these checks.
+
+**Handoff:** the requested browser delivery repair and scope2 promotion are
+software-checked. Preserve the owner's restored display playback path. Do not
+restart closed scope software/hardware stages from this browser-only change.

@@ -1,5 +1,9 @@
 import io
 import unittest
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
+
+import web_service
 
 from web_service import (_MjpegWriter, HEADER_BOUNDARY, HEADER_CTYPE_JPEG,
                          HEADER_CTYPE_WEBP)
@@ -38,3 +42,41 @@ class MultipartFrameTests(unittest.TestCase):
         self.assertEqual(parts[2],
             b'Content-Type: image/webp\r\nContent-Length: 9\r\n\r\nwebp\x00data\r\n')
         self.assertEqual(stream.flushes, 2)
+
+
+def scope_stream_bytes(kind):
+    """Exercise each real HTTP handler, ending after its first picture."""
+    import numpy as np
+    handler = web_service.MonitorHandler.__new__(web_service.MonitorHandler)
+    handler.path = '/scope/stream.mjpg?size=256' if kind == 'preview' else '/scope/luma.mjpg'
+    handler.connection = Mock()
+    handler.wfile = FlushedBytes()
+    handler.send_response = Mock()
+    handler.send_header = Mock()
+    handler.end_headers = Mock()
+    scope = SimpleNamespace(want_tap=Mock(),
+                            read_tap=Mock(return_value=(1, object())),
+                            read_luma=Mock(return_value=(1, np.full((8, 8), 128, np.uint8))))
+    with patch.dict('sys.modules', {
+            'scope_out': SimpleNamespace(Scope=scope),
+            'scope_bake': SimpleNamespace(PreviewWorkspace=lambda size: None,
+                                          _warm_preview_kernels=lambda: None)}), \
+            patch.object(web_service, '_scope_jpeg', return_value=b'preview'), \
+            patch.object(web_service.time, 'sleep', side_effect=OSError('test complete')):
+        if kind == 'preview':
+            handler._scope_mjpeg()
+        else:
+            handler._scope_luma_stream()
+    return handler.wfile.getvalue()
+
+
+class ScopeMultipartTests(unittest.TestCase):
+    def test_both_actual_scope_handlers_emit_complete_length_framed_parts(self):
+        for kind in ('preview', 'luma'):
+            with self.subTest(kind=kind):
+                wire = scope_stream_bytes(kind)
+                headers, rest = wire.split(b'\r\n\r\n', 1)
+                length = int(headers.split(b'Content-Length: ')[1])
+                self.assertTrue(wire.startswith(HEADER_BOUNDARY))
+                self.assertEqual(rest[length:], b'\r\n' + HEADER_BOUNDARY)
+                self.assertGreater(length, 0)

@@ -1,6 +1,7 @@
 const assert=require('node:assert/strict');
 const fs=require('node:fs'),path=require('node:path'),vm=require('node:vm');
 const {test}=require('node:test');
+const {execFileSync}=require('node:child_process');
 
 const turn=()=>new Promise(resolve=>setImmediate(resolve));
 function harness(){
@@ -62,8 +63,37 @@ test('old decode cannot block or overwrite a reconnected stream',async()=>{
     assert.equal(await h.value(),'current');assert.deepEqual(h.errors,[]);h.stream.stop();
 });
 
+test('reconnecting holds the last usable picture until a new one is available',async()=>{
+    const h=harness();h.stream.start('/first');await turn();
+    h.context.push(part('usable',true));await turn();
+    const displayed=h.image.src;
+    h.stream.start('/current');await turn();
+    assert.equal(h.image.src,displayed);
+    assert.equal(await h.value(),'usable');
+    h.context.push(part('current',true));await turn();
+    assert.equal(await h.value(),'current');
+    assert(h.revoked.includes(displayed));
+    h.stream.stop(false);assert.equal(await h.value(),'current');
+    h.stream.stop();assert.equal(h.image.src,'');
+});
+
 test('oversized frame is rejected before buffering its payload',async()=>{
     const h=harness();h.stream.start('/stream');await turn();
     h.context.push(new TextEncoder().encode('--frame\r\nContent-Type: image/jpeg\r\nContent-Length: 999999999\r\n\r\n'));
     await turn();assert.equal(h.errors.length,1);assert.equal(h.sources.length,0);h.stream.stop();
+});
+
+test('reader accepts bytes from both real scope HTTP handlers',async()=>{
+    for(const kind of ['preview','luma']) {
+        const bytes=execFileSync(path.join(__dirname,'../.venv/bin/python'),['-c',
+            'import sys; from tests.test_web_stream_framing import scope_stream_bytes; '+
+            `sys.stdout.buffer.write(scope_stream_bytes('${kind}'))`],{cwd:path.join(__dirname,'..')});
+        const h=harness();h.stream.start('/scope/'+kind);await turn();
+        // Fragmentation must not make headers or payload wait for another image.
+        for(let i=0;i<bytes.length;i+=7)h.context.push(new Uint8Array(bytes.subarray(i,i+7)));
+        await turn();await turn();
+        assert.equal(h.sources.length,1,kind);
+        assert.deepEqual(h.errors,[],kind);
+        h.stream.stop();
+    }
 });
