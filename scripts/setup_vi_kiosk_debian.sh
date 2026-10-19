@@ -8,9 +8,13 @@ set -euo pipefail
 # automatically, start labwc from that login, and let labwc's autostart run the
 # app. Nothing else is started, which is as light as it gets.
 #
+# Power: performance profile, never sleeps (also on battery), and on battery
+# warns at 10% and shuts down cleanly at 5%.
+#
 #   sudo scripts/setup_vi_kiosk_debian.sh              # set up (no SDDM)
 #   sudo scripts/setup_vi_kiosk_debian.sh --use-sddm   # keep SDDM, autologin into labwc
 #   sudo scripts/setup_vi_kiosk_debian.sh --with-deps  # also run setup_app.sh first
+#   sudo scripts/setup_vi_kiosk_debian.sh --keep-power # leave power settings alone
 #   sudo scripts/setup_vi_kiosk_debian.sh --revert     # undo, back to the login screen
 #
 # The app itself is launched exactly as on the Pi: setup_vi_kiosk_wayland.sh
@@ -26,7 +30,7 @@ info() { echo "==> $*"; }
 warn() { echo "WARNING: $*" >&2; }
 
 usage() {
-  sed -n '4,15p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '4,19p' "$0" | sed 's/^# \{0,1\}//'
   exit "${1:-0}"
 }
 
@@ -34,12 +38,14 @@ USE_SDDM=false
 WITH_DEPS=false
 REVERT=false
 FORCE=false
+KEEP_POWER=false
 for arg in "$@"; do
   case "$arg" in
     --use-sddm) USE_SDDM=true ;;
     --with-deps) WITH_DEPS=true ;;
     --revert) REVERT=true ;;
     --force) FORCE=true ;;
+    --keep-power) KEEP_POWER=true ;;
     -h|--help) usage 0 ;;
     *) echo "Unknown option: $arg" >&2; usage 1 ;;
   esac
@@ -74,15 +80,33 @@ WRAPPER_PATH="/opt/kiosk/run_videointerleaving.sh"
 LABWC_DIR="$TARGET_HOME/.config/labwc"
 LABWC_ENV_FILE="$LABWC_DIR/environment"
 LABWC_AUTOSTART="$LABWC_DIR/autostart"
+LABWC_RC="$LABWC_DIR/rc.xml"
 GETTY_OVERRIDE="/etc/systemd/system/getty@tty1.service.d/zz-videointerleaving-autologin.conf"
 SDDM_AUTOLOGIN_CONF="/etc/sddm.conf.d/zz-videointerleaving-autologin.conf"
 # Remembers which display manager we switched off so --revert can restore it.
 STATE_FILE="/etc/videointerleaving-kiosk.state"
 
+# Power settings (step 7). Battery thresholds are read by the guard script and
+# can be changed in it after install.
+LOGIND_CONF="/etc/systemd/logind.conf.d/zz-videointerleaving-kiosk.conf"
+SLEEP_TARGETS=(sleep.target suspend.target hibernate.target hybrid-sleep.target suspend-then-hibernate.target)
+GUARD_SCRIPT="/usr/local/sbin/vi-battery-guard"
+GUARD_UNIT="vi-battery-guard"
+PERF_UNIT="vi-cpu-performance"
+BATTERY_WARN_PERCENT=10
+BATTERY_SHUTDOWN_PERCENT=5
+
 BLOCK_BEGIN="# >>> VideoInterleaving kiosk >>>"
 BLOCK_END="# <<< VideoInterleaving kiosk <<<"
 
 as_user() { sudo -u "$TARGET_USER" -H "$@"; }
+
+# key=value memory of what was there before, for --revert. A key is only
+# written once, so a rerun never overwrites the original value with ours.
+state_get() { [[ -f "$STATE_FILE" ]] && sed -n "s/^$1=//p" "$STATE_FILE" | head -n1; return 0; }
+state_set_once() {
+  grep -q "^$1=" "$STATE_FILE" 2>/dev/null || echo "$1=$2" >>"$STATE_FILE"
+}
 
 # The display manager behind display-manager.service (sddm, lightdm, gdm3...),
 # or nothing when the machine already boots to a console.
@@ -114,6 +138,48 @@ remove_block() {
   sed -i "/^$BLOCK_BEGIN\$/,/^$BLOCK_END\$/d" "$f"
 }
 
+# On Wayland the app opens a borderless, screen-sized window titled
+# "Fullscreen" rather than asking for fullscreen (display_manager.py), and
+# labwc defaults to server-side decorations, so it would draw a title bar
+# saying "Fullscreen". This rule removes the decoration and makes the window
+# truly fullscreen. The block is fenced with comments so reruns replace it and
+# --revert removes it; an existing rc.xml is merged into, never replaced.
+# Usage: labwc_rule add|remove
+labwc_rule() {
+  python3 - "$1" "$LABWC_RC" <<'PY'
+import os, re, sys
+mode, path = sys.argv[1], sys.argv[2]
+BEGIN, END = "<!-- >>> VideoInterleaving kiosk >>> -->", "<!-- <<< VideoInterleaving kiosk <<< -->"
+RULE = ('    <windowRule title="Fullscreen" serverDecoration="no">\n'
+        '      <action name="ToggleFullscreen"/>\n'
+        '    </windowRule>\n')
+fence = re.compile(r"[ \t]*" + re.escape(BEGIN) + r".*?" + re.escape(END) + r"[ \t]*\n?", re.S)
+text = open(path).read() if os.path.exists(path) else None
+if mode == "remove":
+    if text is not None and BEGIN in text:
+        open(path, "w").write(fence.sub("", text))
+    sys.exit(0)
+if text is None:
+    open(path, "w").write('<?xml version="1.0"?>\n<labwc_config>\n  <windowRules>\n'
+                          f"  {BEGIN}\n{RULE}  {END}\n  </windowRules>\n</labwc_config>\n")
+    print("created"); sys.exit(0)
+text = fence.sub("", text)
+# A hand-added copy of the rule must not be doubled: two ToggleFullscreen
+# actions would switch fullscreen on and straight back off.
+if re.search(r'<windowRule\b[^>]*title="Fullscreen"', text, re.I):
+    print("present"); sys.exit(0)
+if re.search(r"<windowRules\s*>", text):
+    text = re.sub(r"(<windowRules\s*>[ \t]*\n?)", lambda m: m.group(1) + f"  {BEGIN}\n{RULE}  {END}\n", text, count=1)
+elif re.search(r"</(labwc|openbox)_config\s*>", text):
+    block = f"  {BEGIN}\n  <windowRules>\n{RULE}  </windowRules>\n  {END}\n"
+    text = re.sub(r"(</(?:labwc|openbox)_config\s*>)", lambda m: block + m.group(1), text, count=1)
+else:
+    print("unknown"); sys.exit(0)
+open(path, "w").write(text)
+print("merged")
+PY
+}
+
 # Every path into the user's systemd instance; works whether or not they are
 # logged in right now (falls back to removing the enablement links by hand).
 disable_user_unit() {
@@ -137,13 +203,29 @@ if $REVERT; then
     remove_block "$f"
   done
   [[ -f "$LABWC_AUTOSTART" ]] && sed -i "\#$WRAPPER_PATH#d" "$LABWC_AUTOSTART"
+  labwc_rule remove
 
   # Put back the Plasma autostart entry if we parked it.
   parked="$TARGET_HOME/.config/autostart/videointerleaving.desktop.disabled-by-kiosk"
   [[ -f "$parked" ]] && info "Plasma autostart entry left parked at $parked (rename it back to re-enable)."
 
-  prev_dm=""
-  [[ -f "$STATE_FILE" ]] && prev_dm="$(sed -n 's/^previous_dm=//p' "$STATE_FILE")"
+  # Power: sleep allowed again, guard and CPU units gone, profile restored.
+  rm -f "$LOGIND_CONF"
+  systemctl unmask "${SLEEP_TARGETS[@]}" >/dev/null 2>&1 || true
+  for u in "$GUARD_UNIT.timer" "$GUARD_UNIT.service" "$PERF_UNIT.service"; do
+    systemctl disable --now "$u" >/dev/null 2>&1 || true
+    rm -f "/etc/systemd/system/$u"
+  done
+  rm -f "$GUARD_SCRIPT"
+  if [[ "$(state_get added_ppd_wants)" == yes ]]; then
+    rm -f /etc/systemd/system/multi-user.target.wants/power-profiles-daemon.service
+  fi
+  prev_profile="$(state_get previous_power_profile)"
+  if [[ -n "$prev_profile" ]] && command -v powerprofilesctl >/dev/null 2>&1; then
+    powerprofilesctl set "$prev_profile" >/dev/null 2>&1 && info "Power profile restored to $prev_profile."
+  fi
+
+  prev_dm="$(state_get previous_dm)"
   if [[ -n "$prev_dm" ]]; then
     info "Re-enabling $prev_dm..."
     systemctl enable "$prev_dm.service" >/dev/null 2>&1 || warn "Could not enable $prev_dm.service"
@@ -167,7 +249,7 @@ fi
 
 DM="$(current_dm)"
 if $USE_SDDM && [[ "$DM" != "sddm" ]]; then
-  if [[ -f "$STATE_FILE" ]]; then
+  if [[ -n "$(state_get previous_dm)" ]]; then
     die "SDDM was switched off by an earlier run. Run with --revert first, then --use-sddm."
   fi
   die "--use-sddm needs SDDM as the display manager (found: ${DM:-none})."
@@ -227,9 +309,7 @@ fi
 if ! $USE_SDDM; then
   if [[ -n "$DM" ]]; then
     info "Disabling display manager $DM (boot to console instead)..."
-    if [[ ! -f "$STATE_FILE" ]]; then
-      echo "previous_dm=$DM" >"$STATE_FILE"
-    fi
+    state_set_once previous_dm "$DM"
     systemctl disable "$DM.service" >/dev/null 2>&1 || true
   fi
   rm -f "$SDDM_AUTOLOGIN_CONF"     # left over from an earlier --use-sddm run
@@ -281,9 +361,159 @@ PYGLFW_LIBRARY_VARIANT=wayland
 $BLOCK_END
 EOF
 
+# 5b) Make the app's "Fullscreen" window really fullscreen, without a title
+#     bar (see labwc_rule above).
+case "$(labwc_rule add)" in
+  created) info "Created $LABWC_RC with the fullscreen window rule." ;;
+  merged)  info "Added the fullscreen window rule to $LABWC_RC." ;;
+  present) info "$LABWC_RC already has a rule for the \"Fullscreen\" window; left as is." ;;
+  *)       warn "Could not place the fullscreen window rule in $LABWC_RC; add it by hand:"
+           warn '  <windowRule title="Fullscreen" serverDecoration="no"><action name="ToggleFullscreen"/></windowRule>' ;;
+esac
+
 chown -R "$TARGET_USER":"$TARGET_USER" "$LABWC_DIR"
 
-# 6) Hand back anything root owns in the checkout or the user's config (from
+# 6) Power: full speed, never sleep (on battery too), clean shutdown before
+#    the battery runs flat. Without Plasma nothing blanks or dims the screen,
+#    so only sleep itself needs blocking.
+if $KEEP_POWER; then
+  info "Leaving power settings alone (--keep-power)."
+else
+  info "Configuring power: performance, no sleep, low-battery shutdown..."
+
+  # Sleep is blocked at the source: with the targets masked nothing (lid,
+  # idle, keys, a stray `systemctl suspend`) can suspend or hibernate. The
+  # logind drop-in keeps the lid and keys from even trying; it takes effect at
+  # the next boot.
+  systemctl mask "${SLEEP_TARGETS[@]}" >/dev/null
+  mkdir -p "$(dirname "$LOGIND_CONF")"
+  cat >"$LOGIND_CONF" <<'EOF'
+# VideoInterleaving kiosk: never suspend, on battery or not.
+[Login]
+HandleSuspendKey=ignore
+HandleHibernateKey=ignore
+HandleLidSwitch=ignore
+HandleLidSwitchExternalPower=ignore
+HandleLidSwitchDocked=ignore
+IdleAction=ignore
+EOF
+
+  # Performance profile through power-profiles-daemon when present (what
+  # Plasma's power mode slider uses); balanced where the hardware has no
+  # performance profile. ppd keeps the choice across reboots, but its unit is
+  # normally pulled in by graphical.target, which a console boot never
+  # reaches, so it is also made a dependency of multi-user.target.
+  if command -v powerprofilesctl >/dev/null 2>&1 && powerprofilesctl get >/dev/null 2>&1; then
+    state_set_once previous_power_profile "$(powerprofilesctl get)"
+    if powerprofilesctl list 2>/dev/null | grep -q 'performance:'; then
+      powerprofilesctl set performance && info "Power profile: performance"
+    else
+      powerprofilesctl set balanced && info "Power profile: balanced (no performance profile on this hardware)"
+    fi
+    if ! $USE_SDDM && [[ ! -e /etc/systemd/system/multi-user.target.wants/power-profiles-daemon.service ]]; then
+      if systemctl add-wants multi-user.target power-profiles-daemon.service >/dev/null 2>&1; then
+        state_set_once added_ppd_wants yes
+      fi
+    fi
+  else
+    # No power-profiles-daemon: set the CPU governor directly at every boot.
+    cat >"/etc/systemd/system/$PERF_UNIT.service" <<'EOF'
+[Unit]
+Description=VideoInterleaving kiosk: CPU performance governor
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/sh -c 'for g in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do grep -qw performance "$${g%%/*}/scaling_available_governors" 2>/dev/null && echo performance >"$$g"; done; for e in /sys/devices/system/cpu/cpu*/cpufreq/energy_performance_preference; do echo performance >"$$e" 2>/dev/null; done; true'
+
+[Install]
+WantedBy=multi-user.target
+EOF
+    systemctl daemon-reload
+    systemctl enable --now "$PERF_UNIT.service" >/dev/null 2>&1 || true
+    info "power-profiles-daemon not found; CPU governor set to performance at boot instead."
+  fi
+
+  # Battery guard: every minute, and only while discharging, warn at
+  # BATTERY_WARN_PERCENT and power off cleanly at BATTERY_SHUTDOWN_PERCENT.
+  # First check 2 minutes after boot, so a nearly flat tablet can still be
+  # reached over SSH (and plugged in) before it shuts itself down.
+  cat >"$GUARD_SCRIPT" <<EOF
+#!/bin/sh
+# VideoInterleaving kiosk battery guard (installed by setup_vi_kiosk_debian.sh).
+# Runs every minute from $GUARD_UNIT.timer. Edit the thresholds here.
+WARN_PERCENT=$BATTERY_WARN_PERCENT
+SHUTDOWN_PERCENT=$BATTERY_SHUTDOWN_PERCENT
+EOF
+  cat >>"$GUARD_SCRIPT" <<'EOF'
+LOG=/var/log/videointerleaving.log
+WARNED=/run/vi-battery-guard.warned
+
+say() {
+  logger -t vi-battery-guard "$1"
+  echo "[$(date '+%Y-%m-%d %H:%M:%S')] BATTERY: $1" >>"$LOG" 2>/dev/null
+  wall "VideoInterleaving kiosk: $1" 2>/dev/null
+}
+
+# Lowest charge among the device's own batteries that are discharging
+# (scope=Device marks a stylus, mouse or other peripheral battery).
+lowest=""
+for b in /sys/class/power_supply/*; do
+  [ "$(cat "$b/type" 2>/dev/null)" = Battery ] || continue
+  [ "$(cat "$b/scope" 2>/dev/null)" = Device ] && continue
+  [ "$(cat "$b/status" 2>/dev/null)" = Discharging ] || continue
+  c="$(cat "$b/capacity" 2>/dev/null)" || continue
+  case "$c" in ''|*[!0-9]*) continue ;; esac
+  if [ -z "$lowest" ] || [ "$c" -lt "$lowest" ]; then lowest="$c"; fi
+done
+
+# On mains power, or no battery: nothing to do; re-arm the warning.
+if [ -z "$lowest" ]; then
+  rm -f "$WARNED"
+  exit 0
+fi
+
+if [ "$lowest" -le "$SHUTDOWN_PERCENT" ]; then
+  say "battery at ${lowest}% - shutting down now to protect it."
+  sleep 5
+  systemctl poweroff
+elif [ "$lowest" -le "$WARN_PERCENT" ]; then
+  if [ ! -e "$WARNED" ]; then
+    say "battery at ${lowest}% - plug in power. Shutting down at ${SHUTDOWN_PERCENT}%."
+    touch "$WARNED"
+  fi
+else
+  rm -f "$WARNED"
+fi
+EOF
+  chmod 0755 "$GUARD_SCRIPT"
+
+  cat >"/etc/systemd/system/$GUARD_UNIT.service" <<EOF
+[Unit]
+Description=VideoInterleaving kiosk: warn on low battery, shut down when critical
+
+[Service]
+Type=oneshot
+ExecStart=$GUARD_SCRIPT
+EOF
+  cat >"/etc/systemd/system/$GUARD_UNIT.timer" <<EOF
+[Unit]
+Description=VideoInterleaving kiosk: check the battery every minute
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=1min
+AccuracySec=10s
+
+[Install]
+WantedBy=timers.target
+EOF
+  systemctl daemon-reload
+  systemctl enable --now "$GUARD_UNIT.timer" >/dev/null
+  info "Battery guard: warning at ${BATTERY_WARN_PERCENT}%, clean shutdown at ${BATTERY_SHUTDOWN_PERCENT}% (on battery only)."
+fi
+
+# 7) Hand back anything root owns in the checkout or the user's config (from
 #    this run, or from an earlier `sudo` run of the setup scripts): a
 #    root-owned .venv, .git object or __pycache__ breaks pip, git and the app.
 info "Fixing ownership of root-owned files in $PROJECT_DIR and ~/.config..."
