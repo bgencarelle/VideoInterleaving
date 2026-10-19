@@ -2,6 +2,7 @@
 import os
 import time
 from collections import deque
+from concurrent.futures import ThreadPoolExecutor
 import threading
 import atexit
 from contextlib import nullcontext
@@ -79,13 +80,40 @@ class RollingIndexCompensator:
         return current - round((sum(self.diffs) / len(self.diffs)) * self.correction_factor)
 
 
-from image_loader import ImageLoader, FIFOImageBuffer
-from image_preparation import LookaheadPreparer, advance_tick
+from image_loader import ImageLoader, FIFOImageBuffer, TOLERANCE
+from image_preparation import advance_tick
 
 
 class FIFOImageBufferPatched(FIFOImageBuffer):
-    """Patched version for backward compatibility - base class now has current_depth()."""
-    pass
+    """main's display buffer, verbatim.
+
+    Keyed by picture number only: get() returns the nearest loaded picture
+    within TOLERANCE, whatever folder it was loaded from, so a folder switch
+    or a late load never becomes a hole. The base class gained folder/exact
+    matching for the modem source, which keeps using it; the display uses
+    main's behaviour, which ran for years without misses.
+    """
+
+    def update(self, index, data_tuple):
+        with self.lock:
+            self.total_updates += 1
+            dropped = False
+            if len(self.queue) >= self.max_size:
+                self.queue.popleft()
+                self.dropped_count += 1
+                dropped = True
+            self.queue.append((index, data_tuple))
+            return not dropped
+
+    def get(self, current_index):
+        with self.lock:
+            while self.queue and abs(self.queue[0][0] - current_index) > TOLERANCE:
+                self.queue.popleft()
+            if not self.queue: return None
+            best_idx, best_data = min(self.queue, key=lambda item: abs(item[0] - current_index))
+            if abs(best_idx - current_index) <= TOLERANCE:
+                return best_idx, best_data[0], best_data[1], best_data[2], best_data[3]
+            return None
 
 
 # -----------------------------------------------------------------------------
@@ -461,7 +489,6 @@ def run_display(clock_source=CLOCK_MODE):
     main_texture = None
     float_texture = None
     # Only create textures if NOT ascii string and GL active
-    texture_stage = renderer.TexturePairStage() if has_gl and not is_headless else None
     ascii_grid_capture = None
     ascii_web_size = getattr(settings, 'ASCII_WEB_SOURCE_SIZE', None)
     if (is_ascii and has_gl and (getattr(settings, 'ASCII_CLIENT_SIZING', False) or ascii_web_size)
@@ -475,12 +502,8 @@ def run_display(clock_source=CLOCK_MODE):
               f'colour blur={settings.ASCII_COLOR_BLUR}; no post-grid resize; '
               f'truecolour={settings.ASCII_TRUECOLOR}; tint brightness={settings.ASCII_COLOR_BRIGHTNESS}')
     if has_gl and not isinstance(res0[0], str):
-        if texture_stage is not None:
-            main_texture, float_texture = texture_stage.select(
-                (index, tuple(initial_folders)), res0)
-        else:
-            main_texture = upload_layer(res0[0])
-            float_texture = upload_layer(res0[1])
+        main_texture = upload_layer(res0[0])
+        float_texture = upload_layer(res0[1])
     cur_main, cur_float, cur_m_sbs, cur_f_sbs = res0
     shown_index = last_displayed_index = index
     # Startup inspection must not pin a full-resolution pair for the session.
@@ -491,29 +514,42 @@ def run_display(clock_source=CLOCK_MODE):
             loader, wanted, *folders, source_aspect_ratio=source_aspect_ratio,
             jpeg_scaling_factor=web_jpeg_scale, jpeg_min_size=web_jpeg_min_size)
 
-    def load_error(key, exc):
-        if monitor:
-            monitor.record_load_error(key[0], exc)
+    # --- Loading: main's model, which ran for years without misses ---
+    # A FIFO of loaded pictures keyed by picture number, filled by a thread
+    # pool that is handed the next picture in the playback direction on every
+    # picture change; the display takes the nearest loaded picture within
+    # TOLERANCE. (The deadline preparer that replaced it missed ~14 pictures
+    # a second on an eMMC tablet and a few a minute on servers.)
+    fifo = FIFOImageBufferPatched(max_size=FIFO_LENGTH)
+    fifo.update(index, (cur_main, cur_float, cur_m_sbs, cur_f_sbs))
 
-    period = 1.0 / (loop_fps or 60)
-    # main's loading model: keep the next FIFO_LENGTH pictures loaded with a
-    # wide pool, so a slow read is absorbed instead of becoming a miss. The
-    # deadline preparer (two ticks ahead, two workers) missed ~14 pictures a
-    # second on an eMMC tablet and a few on servers; main missed none.
+    compensator = RollingIndexCompensator()
+
+    def async_cb(fut, idx):
+        try:
+            fifo.update(idx, fut.result())
+        except Exception as e:
+            if monitor: monitor.record_load_error(idx, e)
+
+    # I/O-bound work: more threads than cores, as in main.
+    cpu_count = os.cpu_count() or 1
+    max_workers = min(8, cpu_count + 2)
+
+    def submit(pool, next_idx):
+        folders = folder_dictionary["Main_and_Float_Folders"]
+        future = pool.submit(prepare_picture, next_idx, folders)
+        future.add_done_callback(lambda f, i=next_idx: async_cb(f, i))
+
     with (baked if baked is not None else nullcontext()), \
-            LookaheadPreparer(prepare_picture, period=period,
-                              capacity=FIFO_LENGTH, on_error=load_error) as preparation, \
-            (texture_stage if texture_stage is not None else nullcontext()):
-        preparation.seed(index, initial_folders,
-                         (cur_main, cur_float, cur_m_sbs, cur_f_sbs))
-        cur_main = None
+            ThreadPoolExecutor(max_workers=max_workers) as pool:
+        next_idx = 1 if index == 0 else (index - 1 if index == png_paths_len - 1 else index + 1)
+        submit(pool, next_idx)
 
         frame_times = deque(maxlen=60)
         ticker_period = (1.0 / loop_fps
                          if loop_fps and loop_fps > 0 else None)
         capture_period = ticker_period if is_headless else None
         next_tick = time.monotonic()
-        preparation.anchor = next_tick
 
         def pace_iteration(iteration_start):
             """Wait for the next monotonic frame deadline; skip missed ticks."""
@@ -536,11 +572,6 @@ def run_display(clock_source=CLOCK_MODE):
                 if remaining > 0:
                     time.sleep(remaining)
             return time.perf_counter() - iteration_start
-
-        def index_at(deadline):
-            wall_deadline = time.time_ns() + round((deadline-time.monotonic())*1e9)
-            return index_calculator.calculate_free_clock_index(
-                png_paths_len, PINGPONG, at_time_ns=wall_deadline, publish=False)[0]
 
         next_miss_log = 0.0
         first_render = True
@@ -579,22 +610,20 @@ def run_display(clock_source=CLOCK_MODE):
             if index != prev:
                 update_folder_selection(index, float_folder_count, main_folder_count)
             folders = tuple(folder_dictionary['Main_and_Float_Folders'])
-            preparation.plan(folders, index,
-                             None if index_calculator.midi_mode else index_at)
-            presentation_started = time.monotonic()
 
-            # Retry held indices when a previously late exact picture arrives.
-            if (index != prev or cur_main is None or shown_index != index
-                    or shown_folders != folders):
-                layers = preparation.get(index, folders)
-                res = (index, *layers) if layers is not None else None
+            if index != prev:
+                comp_idx = compensator.get_compensated_index(index)
+                res = fifo.get(comp_idx)
 
                 if res:
                     d_idx, m_img, f_img, m_sbs, f_sbs = res
+                    compensator.update(index, d_idx)
                     previous_main, previous_float = cur_main, cur_float
 
-                    # Update loop pointers
-                    shown_index = d_idx
+                    # Update loop pointers. The picture chosen for this index
+                    # (nearest within TOLERANCE) is what is shown for it, so
+                    # headless capture follows the index as in main.
+                    shown_index = index
                     shown_folders = folders
                     cur_main = m_img
                     cur_float = f_img
@@ -619,6 +648,11 @@ def run_display(clock_source=CLOCK_MODE):
                         successful_display = True
                         last_displayed_index = d_idx
 
+                        # Trigger Next Load
+                        next_idx = 1 if index == 0 else (
+                            index - 1 if index == png_paths_len - 1 else (index + 1 if index > prev else index - 1))
+                        submit(pool, next_idx)
+
                         # Timing
                         dt = pace_iteration(iteration_start)
                         frame_times.append(dt)
@@ -639,7 +673,7 @@ def run_display(clock_source=CLOCK_MODE):
                                 "index": index,
                                 "displayed": last_displayed_index,
                                 "fps": last_actual_fps,
-                                "fifo_depth": preparation.snapshot()['pairs'],
+                                "fifo_depth": fifo.current_depth(),
                                 "successful_frame": True,
                                 "main_folder": fd["Main_and_Float_Folders"][0],
                                 "float_folder": fd["Main_and_Float_Folders"][1],
@@ -655,14 +689,10 @@ def run_display(clock_source=CLOCK_MODE):
 
                     # GL Texture Update (Only for non-string)
                     if has_gl:
-                        if texture_stage is not None:
-                            main_texture, float_texture = texture_stage.select(
-                                (index, folders), layers)
-                        else:
-                            if m_img is not previous_main:
-                                main_texture = upload_layer(m_img, main_texture)
-                            if f_img is not previous_float:
-                                float_texture = upload_layer(f_img, float_texture)
+                        if m_img is not previous_main:
+                            main_texture = upload_layer(m_img, main_texture)
+                        if f_img is not previous_float:
+                            float_texture = upload_layer(f_img, float_texture)
 
                     successful_display = True
                     last_displayed_index = d_idx
@@ -672,6 +702,10 @@ def run_display(clock_source=CLOCK_MODE):
                         next_miss_log = time.monotonic()+1.0
                     fifo_miss_count += 1
                     last_fifo_miss = index
+
+                next_idx = 1 if index == 0 else (
+                    index - 1 if index == png_paths_len - 1 else (index + 1 if index > prev else index - 1))
+                submit(pool, next_idx)
 
             # Render (GL)
             render_now = has_gl and (first_render or is_local_frame_source or successful_display or
@@ -814,12 +848,6 @@ def run_display(clock_source=CLOCK_MODE):
 
             if render_now:
                 first_render = False
-                preparation.record_render(time.monotonic()-presentation_started)
-            if texture_stage is not None:
-                for key, future_layers, deadline in preparation.upcoming():
-                    if key != texture_stage.active and not isinstance(future_layers[0], (str, dict)):
-                        texture_stage.stage(key, future_layers)
-                        break
 
             dt = pace_iteration(iteration_start)
             frame_times.append(dt)
@@ -841,9 +869,7 @@ def run_display(clock_source=CLOCK_MODE):
                     "index": index,
                     "displayed": last_displayed_index,
                     "fps": last_actual_fps,
-                    "fifo_depth": preparation.snapshot()['pairs'],
-                    "picture_preparation": preparation.snapshot(),
-                    "texture_uploads": texture_stage.uploads if texture_stage else 0,
+                    "fifo_depth": fifo.current_depth(),
                     "local_swap_ms": local_swap_seconds*1000,
                     "successful_frame": successful_display,
                     "main_folder": fd["Main_and_Float_Folders"][0],
@@ -859,8 +885,6 @@ def run_display(clock_source=CLOCK_MODE):
                 state.run_mode = False
 
         if not is_headless and has_gl and glfw:
-            if texture_stage is not None:
-                texture_stage.close()
             glfw.terminate()
         if ascii_grid_capture is not None:
             ascii_grid_capture.close()
