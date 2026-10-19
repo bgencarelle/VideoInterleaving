@@ -43,7 +43,7 @@
             align-items: center; gap: .5rem; margin: .65rem 0; }
         .adjustment input[type=range] { width: 100%; min-width: 0; }
         .adjustment input[type=number] { width: 100%; box-sizing: border-box; }
-        #picture-controls input, #picture-controls button, #settings-json, #show-controls {
+        #picture-controls input, #picture-controls button, #settings-json {
             color: #eee; background: #222; border: 1px solid #777; border-radius: .2rem;
             padding: .25rem; font: inherit; }
         #picture-controls input[type=range] { padding: 0; accent-color: #eee; }
@@ -51,21 +51,32 @@
         #background-hex { font: 12px monospace; }
         .control-actions { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem; }
         #settings-json { box-sizing: border-box; width: 100%; margin-top: .6rem; font: 11px monospace; }
-        #show-controls { position: fixed; bottom: .75rem; right: .75rem; z-index: 21;
-            padding: .5rem; cursor: pointer; }
+        @media (pointer: coarse), (max-width: 760px) {
+            #picture-controls { left: .5rem; right: .5rem; width: auto; bottom: 4.25rem;
+                max-height: 55vh; max-height: 55dvh; }
+            #picture-controls { box-sizing: border-box; }
+            #terminal-stage.controls-open { bottom: calc(55vh + 4.25rem); bottom: calc(55dvh + 4.25rem); }
+            #resolution-controls button { min-height: 2.75rem; }
+        }
+        @media (pointer: coarse) and (orientation: landscape) and (max-height: 600px) {
+            #picture-controls { top: .5rem; bottom: 4.25rem; left: .5rem; right: auto;
+                width: min(360px, 44vw); max-height: none; }
+            #terminal-stage.controls-open { left: calc(min(360px, 44vw) + 1rem); bottom: 0; }
+            #resolution-controls { left: .5rem; right: auto; bottom: .5rem; }
+        }
     </style>
 </head>
 <body>
     <div id="terminal-stage" aria-label="ASCII animation. Scroll or pinch to change resolution.">
         <div id="terminal"></div>
     </div>
-    <nav id="resolution-controls" aria-label="Resolution zoom">
+    <nav id="resolution-controls" aria-label="Resolution zoom" hidden>
         <button id="zoom-out" aria-label="Zoom out: more resolution" title="Zoom out: more cells (−)">−</button>
         <output id="resolution" aria-label="Current resolution"></output>
         <button id="zoom-in" aria-label="Zoom in: less resolution" title="Zoom in: fewer cells (+)">+</button>
         <button id="zoom-reset" aria-label="Reset to default resolution" title="Default resolution (0)">Reset</button>
     </nav>
-    <details id="picture-controls" open>
+    <details id="picture-controls" hidden>
         <summary>Picture controls</summary>
         <p>Local display adjustments. Glyphs and server defaults stay unchanged.
             Gamma above 1 lifts midtones.</p>
@@ -126,7 +137,6 @@
         </div>
         <textarea id="settings-json" aria-label="Current settings to copy" rows="8" readonly hidden></textarea>
     </details>
-    <button id="show-controls" type="button" hidden>Show controls (H)</button>
     <script src="/ascii/static/ascii_resolution.js?v=web-120-1"></script>
     <script src="/ascii/static/ascii_appearance.js?v=web-120-1"></script>
     <script src="/ascii/static/ascii_grid_renderer.js?v=schoolbook-mono-1"></script>

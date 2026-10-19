@@ -213,3 +213,6 @@ images_xy_compact
 /images_og/
 /images_sbs/
 /images_xy_compact/
+
+# Full-library RGB web bake (utilities/bake_ascii_rgb.py output; never commit).
+/images_rgb_web/

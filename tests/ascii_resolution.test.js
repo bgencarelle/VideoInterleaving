@@ -199,8 +199,8 @@ function key(value) { window.listeners.keydown({key:value, target:ids.terminal, 
     assert.equal(ids['lineSpacing-number'].value,'1.05');
     assert.equal(ids['brightness-number'].value, '1.00');
     assert.equal(ids['gamma-number'].value, '1.00');
-    assert.equal(ids['picture-controls'].hidden, false);
-    assert.equal(ids['show-controls'].hidden, true);
+    assert.equal(ids['picture-controls'].hidden, true);
+    assert.equal(ids['resolution-controls'].hidden, true);
     sockets[0].onmessage({data: JSON.stringify({type:'resize', cols:90, rows:60})});
     for (const glyph of ['A','B','C']) sockets[0].onmessage({data: source(90, 60, glyph)});
     flush();
@@ -297,17 +297,11 @@ function key(value) { window.listeners.keydown({key:value, target:ids.terminal, 
     assert.equal(settings.appearance.fontStroke,.25);
     assert.equal(settings.appearance.lineSpacing,.75);
     assert.equal(settings.appearance.background,'#ff0000');
-    assert.equal(settings.hideControls,false);
-    assert.equal(ids['settings-json'].hidden,false);
-    ids['hide-controls'].checked = true;
-    ids['hide-controls'].listeners.change({target:ids['hide-controls']});
+    assert.equal(settings.hideControls,true);
     assert.equal(ids['picture-controls'].hidden,true);
     assert.equal(ids['resolution-controls'].hidden,true);
-    assert.equal(ids['show-controls'].hidden,false);
-    key('h');
-    assert.equal(ids['picture-controls'].hidden,false);
-    key('H'); ids['show-controls'].listeners.click();
-    assert.equal(ids['picture-controls'].hidden,false);
+    key('h'); key('H');
+    assert.equal(ids['picture-controls'].hidden,true);
     ids['picture-reset'].listeners.click();
     assert.equal(ids['brightness-number'].value,'1.00');
     assert.equal(ids['contrast-number'].value,'1.00');
@@ -339,7 +333,6 @@ function key(value) { window.listeners.keydown({key:value, target:ids.terminal, 
     await Promise.resolve();
     assert.equal(hiddenIds['picture-controls'].hidden,true);
     assert.equal(hiddenIds['resolution-controls'].hidden,true);
-    assert.equal(hiddenIds['show-controls'].hidden,false);
     await new Promise(resolve=>setImmediate(resolve));flush();
     // Canvas/atlas draws synchronously and must retain latest-only scheduling
     // and all local settings when a context loss switches to the DOM fallback.

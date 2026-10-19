@@ -7,7 +7,8 @@
     const initialAppearance = appearance.normalize(config.appearance);
     let picture = {...initialAppearance};
     let colourTransform = appearance.transform(picture);
-    let hideControls = config.hideControls === true;
+    // Image only: picture and zoom controls are never shown; zoom stays on gestures and keys.
+    let hideControls = true;
     let backgroundBasis = appearance.toHsl(picture.background);
     const FONT_FAMILY = '"Interleave Schoolbook Mono", monospace';
     let sourceCols = config.sourceCols || 120, sourceRows = config.sourceRows || 80;
@@ -30,7 +31,8 @@
 
     function fit() {
         if (!layoutDirty) return;
-        const boxW = Math.min(window.innerWidth, window.innerHeight * aspect);
+        // Fit the stage itself: on compact screens it stops above the open panel.
+        const boxW = Math.min(stage.clientWidth || window.innerWidth, (stage.clientHeight || window.innerHeight) * aspect);
         const boxH = boxW / aspect;
         if (term && term.fitViewport) {
             try { term.fitViewport(boxW,boxH,picture); layoutDirty=false; }
@@ -115,8 +117,9 @@
         hideControls = hidden === true;
         document.getElementById('picture-controls').hidden = hideControls;
         document.getElementById('resolution-controls').hidden = hideControls;
-        document.getElementById('show-controls').hidden = !hideControls;
         document.getElementById('hide-controls').checked = hideControls;
+        if (stage.classList) stage.classList.toggle('controls-open', !hideControls);
+        layoutDirty = true; revision++; schedule();
         refreshSettingsPreview();
     }
     function applyAppearance() {
@@ -188,7 +191,6 @@
         updateBackgroundFields(); applyAppearance();
     });
     document.getElementById('hide-controls').addEventListener('change', event => setControlsHidden(event.target.checked));
-    document.getElementById('show-controls').addEventListener('click', () => setControlsHidden(false));
     document.getElementById('copy-settings').addEventListener('click', async () => {
         const output = document.getElementById('settings-json');
         output.hidden = false; output.value = exportSettings();
@@ -235,15 +237,14 @@
     ['pointerup', 'pointercancel', 'lostpointercapture'].forEach(name => stage.addEventListener(name, release));
     window.addEventListener('keydown', event => {
         if (event.altKey || /^(INPUT|TEXTAREA|SELECT)$/.test(event.target.tagName)) return;
-        if (event.key === 'h' || event.key === 'H') {
-            event.preventDefault(); setControlsHidden(!hideControls);
-        } else if (event.key === '+' || event.key === '=') {
+        if (event.key === '+' || event.key === '=') {
             event.preventDefault(); updateResolution(Math.ceil(resolution) - 1);
         } else if (event.key === '-' || event.key === '_') {
             event.preventDefault(); updateResolution(Math.floor(resolution) + 1);
         } else if (event.key === '0') { event.preventDefault(); resetResolution(); }
     });
     window.addEventListener('resize', () => { layoutDirty = true; revision++; schedule(); });
+    if (window.visualViewport) window.visualViewport.addEventListener('resize', () => { layoutDirty = true; revision++; schedule(); });
 
     function receiveText(text) {
         if (text[0] === '{') {
