@@ -162,10 +162,21 @@ const document = {body: new Element(), hidden: false, listeners: {},
     fonts: {load: font => {fontLoads.push(font);return Promise.resolve();}}};
 const inflateCompletions = [];
 let inflations = 0;
+let holdNextInflate = false, releaseHeldInflate = null;
 class ObservedResponse extends Response {
     constructor(stream) { super(stream); inflations++; }
     text() {
-        return super.text().then(text => {
+        let decoded = super.text();
+        if (holdNextInflate) {
+            holdNextInflate = false;
+            const original = decoded;
+            decoded = new Promise((resolve, reject) => {
+                // Preserve this response's original decode without consuming
+                // its stream a second time when the old tab resumes.
+                releaseHeldInflate = () => original.then(resolve, reject);
+            });
+        }
+        return decoded.then(text => {
             const complete = inflateCompletions.shift();
             if (complete) queueMicrotask(complete);
             return text;
@@ -389,6 +400,25 @@ function key(value) { window.listeners.keydown({key:value, target:ids.terminal, 
     canvas.socket.onmessage({data:JSON.stringify({type:'resize',cols:90,rows:60})});
     canvas.socket.onmessage({data:source(90,60,'R')});flush();
     assert.equal(canvas.elements.resolution.textContent,'90×60');
+    // A suspended old decode must not block the resumed live connection.
+    const compressed = glyph => {
+        const packed = Buffer.concat([Buffer.from('g'), gzipSync(source(90,60,glyph))]);
+        return packed.buffer.slice(packed.byteOffset, packed.byteOffset+packed.byteLength);
+    };
+    holdNextInflate = true;
+    canvas.socket.onmessage({data:compressed('U')});
+    assert.equal(typeof releaseHeldInflate,'function');
+    canvas.localDocument.hidden=true;canvas.localDocument.listeners.visibilitychange();
+    canvas.localDocument.hidden=false;canvas.localDocument.listeners.visibilitychange();
+    const resumedSocket=sockets.at(-1);
+    const freshInflate=new Promise(resolve=>inflateCompletions.push(resolve));
+    resumedSocket.onmessage({data:compressed('V')});
+    await Promise.race([freshInflate,new Promise((_,reject)=>setTimeout(()=>reject(
+        new Error('Old background decode blocked the resumed connection')),500))]);
+    await Promise.resolve();flush();
+    assert(recovered.draws.at(-1).frame.glyphs.every(glyph=>glyph==='V'));
+    releaseHeldInflate();await new Promise(resolve=>setImmediate(resolve));flush();
+    assert(recovered.draws.at(-1).frame.glyphs.every(glyph=>glyph==='V'));
     const unavailable=await atlasCase(true);
     assert.equal(unavailable.elements.terminal.dataset.renderer,'grid');
     unavailable.socket.onmessage({data:source(90,60,'Z')});flush();

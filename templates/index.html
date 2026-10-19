@@ -34,7 +34,7 @@
   </div>
 
   <div class="stage">
-    <img id="video" src="" alt="" draggable="false" onerror="handleDisconnect()">
+    <img id="video" alt="" draggable="false">
   </div>
 
   <div class="ui" role="toolbar">
@@ -49,16 +49,21 @@
     const slotCounter = document.getElementById("slot-counter");
     let pollingInterval = null;
     let isReconnecting = false;
+    let streamGeneration = 0;
 
+    img.onerror = handleDisconnect;
     startStream();
 
     function startStream() {
+      if (document.hidden) return;
+      streamGeneration++;
       // Unique timestamp forces browser to open a new connection
       img.src = "/video_feed?t=" + Date.now();
       isReconnecting = false;
     }
 
     function handleDisconnect() {
+      if (document.hidden) return;
       if (isReconnecting) return;
       isReconnecting = true;
 
@@ -72,12 +77,15 @@
     }
 
     function pollServer() {
+      if (document.hidden || !isReconnecting) return;
+      const generation = streamGeneration;
       fetch('/stats')
         .then(r => {
             if (r.ok) return r.json();
             throw new Error("Server not ready");
         })
         .then(data => {
+          if (document.hidden || !isReconnecting || generation !== streamGeneration) return;
           slotCounter.innerText = `${data.current} / ${data.max}`;
           // If server is up and has space (or we just want to try)
           if (!data.full) {
@@ -85,6 +93,7 @@
           }
         })
         .catch(() => {
+           if (document.hidden || !isReconnecting || generation !== streamGeneration) return;
            slotCounter.innerText = "Server Offline";
         });
     }
@@ -105,7 +114,13 @@
     // unconditionally -- the server sends the current frame immediately
     // on connect, so a healthy stream resumes seamlessly.
     document.addEventListener('visibilitychange', () => {
-      if (!document.hidden) {
+      if (document.hidden) {
+        streamGeneration++;
+        clearInterval(pollingInterval);
+        pollingInterval = null;
+        isReconnecting = false;
+        img.removeAttribute('src');
+      } else {
         console.log("Page visible - restarting stream");
         resume();
       }

@@ -6146,3 +6146,27 @@ subtests; 384 decoder-frame and 24 GL/ASCII/JPEG parity comparisons passed.
 The broader modem suite has unrelated experimental analog/slice failures,
 reproduced with the baker-task modules blocked from import; full details are in
 `docs/UNIFIED_BAKES.md`. Scope packaging/playback checks passed.
+
+---
+
+## Appendix A080 — Browser visibility/reconnect lifecycle — 2026-10-19
+
+**Request:** investigate hidden-tab stalls across the web viewers, including
+scope web. Both scope pages now cancel obsolete preview retries and coalesce
+luminance retries; returning browser-audio sessions request a fresh luminance
+stream rather than retaining the previous MJPEG connection. Hidden pages do
+not rebuild browser-local traces or initiate retries. AudioContext ownership,
+output selection, trace arithmetic, D0 defaults, charter and stage status are
+unchanged. No physical-device stage was reopened.
+
+Each scope page passed three Chromium visibility/freeze/resume cycles against
+actual `main.py --mode scope --xy-dir images_xy --device null`, with fresh
+preview requests, no page errors, and inspected screenshots. This is
+NullStream/HTTP browser-preview evidence only; browser audio was not started.
+Retry/coalescing behavior with browser-local audio marked running was checked
+separately in JavaScript without opening audio. Full cross-web evidence and
+limitations are in `docs/WEB_VISIBILITY.md`.
+
+**Handoff:** browser lifecycle fixes tested locally; actual Safari/macOS tab
+switching and browser-local audio playback remain unverified. Frozen scope
+defaults and closed software/hardware stages remain unchanged.

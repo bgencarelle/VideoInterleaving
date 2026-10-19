@@ -208,12 +208,16 @@
     const onBox = document.getElementById("preview-on");
     const sizeSel = document.getElementById("preview-size");
     const expSel = document.getElementById("preview-exposure");
+    let previewRetry = null;
 
     function note(t) {
         document.getElementById("preview-note").textContent = t;
     }
 
     function startPreview() {
+        if (document.hidden || !onBox.checked) return;
+        if (previewRetry !== null) clearTimeout(previewRetry);
+        previewRetry = null;
         const s = sizeSel.value;
         img.src = "scope/stream.mjpg?size=" + s
                 + "&exposure=" + expSel.value + "&t=" + Date.now();
@@ -223,6 +227,8 @@
     }
 
     function stopPreview() {
+        if (previewRetry !== null) clearTimeout(previewRetry);
+        previewRetry = null;
         img.removeAttribute("src");
         note("preview off");
     }
@@ -236,9 +242,11 @@
     };
 
     img.onerror = () => {
+        if (document.hidden || !onBox.checked || previewRetry !== null) return;
         note("preview dropped, reconnecting\u2026");
-        setTimeout(() => {
-            if (onBox.checked && !document.hidden) startPreview();
+        previewRetry = setTimeout(() => {
+            previewRetry = null;
+            startPreview();
         }, 2000);
     };
     setInterval(() => {
@@ -247,13 +255,12 @@
 
     document.addEventListener("visibilitychange", () => {
         if (document.hidden) {
-            img.removeAttribute("src");
+            stopPreview();
+            cancelLumaReconnect();
         } else {
             if (onBox.checked) startPreview();
             lastChange = Date.now();
-            if (localRunning && lumImg && !lumImg.getAttribute("src")) {
-                lumImg.src = "scope/luma.mjpg?t=" + Date.now();
-            }
+            resumeLuma();
         }
     });
 

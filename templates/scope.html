@@ -458,10 +458,14 @@
     const onBox = document.getElementById("preview-on");
     const sizeSel = document.getElementById("preview-size");
     const expSel = document.getElementById("preview-exposure");
+    let previewRetry = null;
 
     function note(t) { document.getElementById("preview-note").textContent = t; }
 
     function startPreview() {
+      if (document.hidden || !onBox.checked) return;
+      if (previewRetry !== null) clearTimeout(previewRetry);
+      previewRetry = null;
       const s = sizeSel.value;
       img.width = img.height = Number(s);
       // cache-buster: without it a reconnect can be served the dead stream
@@ -473,6 +477,8 @@
     }
 
     function stopPreview() {
+      if (previewRetry !== null) clearTimeout(previewRetry);
+      previewRetry = null;
       img.removeAttribute("src");
       note("preview off");
     }
@@ -484,8 +490,12 @@
     // directly and never read back -- so it gets a plain reconnect on error
     // plus a periodic refresh, which costs one request an hour.
     img.onerror = () => {
+      if (document.hidden || !onBox.checked || previewRetry !== null) return;
       note("preview dropped, reconnecting\u2026");
-      setTimeout(() => { if (onBox.checked && !document.hidden) startPreview(); }, 2000);
+      previewRetry = setTimeout(() => {
+        previewRetry = null;
+        startPreview();
+      }, 2000);
     };
     setInterval(() => {
       if (onBox.checked && !document.hidden && localRunning !== null) startPreview();
@@ -495,7 +505,8 @@
     // it and pick it up again on return.
     document.addEventListener("visibilitychange", () => {
       if (document.hidden) {
-        img.removeAttribute("src");
+        stopPreview();
+        cancelLumaReconnect();
       } else {
         if (onBox.checked) startPreview();
         // A hidden tab has its timers throttled to roughly once a second or
@@ -503,9 +514,7 @@
         // and fire a spurious reconnect the instant the tab came back.
         // Forgive the gap instead of reacting to it.
         lastChange = Date.now();
-        if (localRunning && lumImg && !lumImg.getAttribute("src")) {
-          lumImg.src = "scope/luma.mjpg?t=" + Date.now();
-        }
+        resumeLuma();
       }
     });
 

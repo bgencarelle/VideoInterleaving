@@ -294,7 +294,7 @@
     // whatever frame is currently showing, so a timer gets the live picture
     // without needing an event that does not exist.
     function renderFromLuma() {
-      if (!localRunning || !actx || !worklet) return;
+      if (document.hidden || !localRunning || !actx || !worklet) return;
       const w = lumImg.naturalWidth, h = lumImg.naturalHeight;
       if (!w || !h) return;
       if (lumCanvas.width !== w) { lumCanvas.width = w; lumCanvas.height = h; }
@@ -373,6 +373,7 @@
     }
     function stopLumaLoop() {
       if (lumTimer) { clearInterval(lumTimer); lumTimer = null; }
+      cancelLumaReconnect();
     }
     // ---------------------------------------------------- keepalive
     // An MJPEG connection is not forever. nginx cuts it at
@@ -387,6 +388,21 @@
     // reconnect regardless of whether anything reported a problem.
     const STALL_MS = 6000;
     let lastHash = -1, lastChange = Date.now(), reconnects = 0, backoff = 1000;
+    let lumaReconnectTimer = null;
+
+    function cancelLumaReconnect() {
+      if (lumaReconnectTimer !== null) clearTimeout(lumaReconnectTimer);
+      lumaReconnectTimer = null;
+    }
+
+    function resumeLuma() {
+      cancelLumaReconnect();
+      if (!localRunning || document.hidden) return;
+      lastHash = -1;
+      lastChange = Date.now();
+      backoff = 1000;
+      lumImg.src = "scope/luma.mjpg?t=" + Date.now();
+    }
 
     function frameHash(px, w, h) {
       // ~100 scattered pixels: enough to notice a changed picture, far
@@ -398,13 +414,14 @@
     }
 
     function reconnectLuma(why) {
-      if (!localRunning) return;
+      if (!localRunning || document.hidden || lumaReconnectTimer !== null) return;
       reconnects++;
       document.getElementById("local-status").textContent =
         `Reconnecting (${why})\u2026 attempt ${reconnects}`;
       lumImg.removeAttribute("src");
-      setTimeout(() => {
-        if (!localRunning) return;
+      lumaReconnectTimer = setTimeout(() => {
+        lumaReconnectTimer = null;
+        if (!localRunning || document.hidden) return;
         lumImg.src = "scope/luma.mjpg?t=" + Date.now();
         lastChange = Date.now();
         // back off so a server that is down is not hammered, but cap it:

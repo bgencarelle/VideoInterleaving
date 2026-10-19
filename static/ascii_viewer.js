@@ -24,7 +24,7 @@
     let term = null, ws = null, reconnectTimer = null;
     let frame = null, revision = 0, painted = -1, writing = false, scheduled = false;
     let spareFrame = null;
-    let pendingCompressed = null, inflating = false;
+    let pendingCompressed = null, inflating = null;
     let layoutDirty = true;
     let rendererLayoutVersion = 0;
     const aspect = defaults[0] * config.fontRatio / defaults[1];
@@ -264,23 +264,23 @@
         if (decoded) { spareFrame = frame; frame = decoded; revision++; schedule(); }
     }
     async function inflateLatest() {
-        if (inflating) return;
-        inflating = true;
-        let inflatingSocket = null;
+        const socket = ws;
+        if (!socket || inflating === socket) return;
+        inflating = socket;
         try {
             // One in flight and ONE replaceable pending compressed frame.
-            while (pendingCompressed) {
+            // An old, suspended connection must never consume or block a
+            // resumed connection's pending frame.
+            while (pendingCompressed && ws === socket && !document.hidden) {
                 const item = pendingCompressed; pendingCompressed = null;
-                inflatingSocket = item.socket;
                 const stream = new Blob([new Uint8Array(item.data,1)]).stream()
                     .pipeThrough(new DecompressionStream('gzip'));
                 const text = await new Response(stream).text();
-                if (ws === item.socket) receiveText(text);
+                if (ws === socket && !document.hidden) receiveText(text);
             }
         } catch (_) {
-            pendingCompressed = null;
-            if (ws === inflatingSocket) ws.close();
-        } finally { inflating = false; }
+            if (ws === socket) { pendingCompressed = null; socket.close(); }
+        } finally { if (inflating === socket) inflating = null; }
     }
 
     function connect() {
@@ -293,6 +293,7 @@
         const socket = new WebSocket(url);
         socket.binaryType = 'arraybuffer'; ws = socket;
         socket.onopen = () => {
+            if (ws !== socket || document.hidden) { socket.close(); return; }
             // Older browsers keep the identical uncompressed master stream.
             if (typeof DecompressionStream === 'function') {
                 socket.send(JSON.stringify({type: 'encoding', encoding: 'gzip'}));
