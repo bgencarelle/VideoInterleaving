@@ -136,7 +136,7 @@ def broadcast_loop():
                 # draining more than a couple of frames, throw the backlog
                 # away and enqueue only this one. A healthy client's queue
                 # empties between broadcasts (the select loop runs every
-                # 0.1s and frames arrive at ~15fps), so it never trips this;
+                # 10ms and frames arrive at ~15fps), so it never trips this;
                 # a frozen one caps at three frames.
                 if len(client.sendq) >= 3:
                     client.sendq.clear()
@@ -209,5 +209,9 @@ def start_server():
     t = threading.Thread(target=broadcast_loop, daemon=True, name="WS-Broadcaster")
     t.start()
 
-    server = SimpleWebSocketServer(HOST, port, AsciiWebSocket)
+    # sendMessage queues data on a producer thread; it does not wake the
+    # library's select(). Its 100-ms default added a polling-period delay to
+    # frames already ready for presentation. Bound that handoff to 10 ms.
+    server = SimpleWebSocketServer(HOST, port, AsciiWebSocket,
+                                  selectInterval=0.01)
     server.serveforever()

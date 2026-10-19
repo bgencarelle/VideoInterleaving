@@ -49,3 +49,42 @@ visibility, ASCII rendering, protocol, page routing, lazy imports and scope
 output-mode/timing checks. Safari and actual macOS tab switching have not been
 verified here; slow-network reconnect latency and end-to-end frame age are not
 bounded by these checks.
+
+## Shared-clock presentation check — goal not yet met (2026-10-19)
+
+An additional controlled run sampled actual native-window pixels, browser
+canvas/MJPEG pixels, and plain ASCII TCP receipt against the application's
+shared birth-time clock at 30 IPS. A 128-image Gray-coded JPEG/matte fixture
+made the frame identity visible without trusting server publication counters.
+All processes used the same clock epoch and independent face/float pair `(0,0)`;
+the harness pinned that pair because the one-folder fixture triggered the
+stochastic selector's empty-deque case. This does not validate stochastic folder
+changes. All modes ran concurrently on the software-rendered Linux test host.
+
+Median / 95th-percentile measured frame age, milliseconds:
+
+- Local native-window pixels: 39 / 56.
+- Plain ASCII TCP receipt: 42 / 51 (not terminal paint timing).
+- Web MJPEG browser pixels: 115 / 141.
+- ASCII-web canvas pixels: 99 / 152.
+- Scope raster HTTP-preview pixels: 178 / 224 (NullStream, not physical output).
+
+These steady-state statistics exclude the first 300 ms after tab return and
+positions within eight source ticks of ping-pong turns, where the same image
+appears on both sides and pixels alone cannot disambiguate signed age.
+Separate resume samples show ASCII-web retaining its pre-hide picture for
+roughly 150 ms before new frames arrived, then jumping directly to live data.
+There was no replay of the two-second hidden interval. That held picture was
+still about two seconds old; reconnect success is not presentation sync.
+
+The browsers trail local on this host: the primary cross-mode synchronization
+goal is **not established** by the visibility fixes. These are measured results,
+not approved offset budgets or compensation defaults. Scope frame-code reading
+was corrected to find the fixed pilot bars in actual trace pixels rather than
+assuming the trace's geometry. Raw first-attempt data is retained separately.
+
+Artifacts: `tmp/cross_mode_clock_20261019/{summary.json,browser_samples.json,local_samples.json,tcp_samples.json}`,
+screenshots and application logs. Helpers: `tmp/build_clock_identity_source.py`,
+`tmp/cross_mode_clock_worker.py`, `tmp/check_cross_mode_clock.cjs`.
+Modem, physical scope, real terminal paint, Safari/macOS, and arbitrary network
+delay are not covered. No synchronization compensation was changed by this test.

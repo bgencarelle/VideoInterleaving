@@ -24,6 +24,11 @@ function browser() {
     const document = {hidden:false,listeners:{},body:{classList:classes()},
         getElementById:element,addEventListener(name,fn){this.listeners[name]=fn;}};
     const context = vm.createContext({document,console:{log(){}},Date,Float32Array,Math,
+        LiveImageStream: class {
+            constructor(image){this.image=image;}
+            start(url){this.image.src=url;}
+            stop(){this.image.removeAttribute('src');}
+        },
         window:{addEventListener(){},matchMedia(){return {matches:false};}},
         setTimeout(fn){const id=++next;timers.set(id,fn);return id;},
         clearTimeout(id){timers.delete(id);},

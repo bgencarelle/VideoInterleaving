@@ -29,6 +29,28 @@ HEADER_CTYPE_JPEG = b'Content-Type: image/jpeg\r\n\r\n'
 HEADER_CTYPE_WEBP = b'Content-Type: image/webp\r\n\r\n'
 
 
+class _MjpegWriter:
+    """Finish each multipart image now, not when the next picture arrives."""
+
+    def __init__(self, stream):
+        self.stream = stream
+        self.started = False
+
+    def write(self, payload, content_type=HEADER_CTYPE_JPEG):
+        if not self.started:
+            self.stream.write(HEADER_BOUNDARY)
+            self.started = True
+        self.stream.write(content_type.rstrip(b'\r\n') +
+                          b'\r\nContent-Length: ' + str(len(payload)).encode('ascii') +
+                          b'\r\n\r\n')
+        self.stream.write(payload)
+        # This delimiter ends the current part and opens the next. Its
+        # headers can arrive later; a browser need not hold this picture for
+        # another producer tick to discover where its JPEG/WebP ends.
+        self.stream.write(HEADER_NEWLINE + HEADER_BOUNDARY)
+        self.stream.flush()
+
+
 def _set_heartbeat(cid):
     with _hb_lock:
         _client_heartbeats[cid] = time.monotonic()
@@ -613,6 +635,7 @@ class StreamHandler(RobustHandlerMixin, http.server.BaseHTTPRequestHandler):
         # If the producer stops sending frames for >10s, we disconnect the client.
         stall_timeout = getattr(settings, "STREAM_STALL_TIMEOUT", 10.0)
         last_frame_time = time.monotonic()
+        writer = _MjpegWriter(self.wfile)
 
         try:
             while True:
@@ -655,11 +678,7 @@ class StreamHandler(RobustHandlerMixin, http.server.BaseHTTPRequestHandler):
 
                 # 3. Send Frame
                 try:
-                    self.wfile.write(HEADER_BOUNDARY)
-                    self.wfile.write(ctype)
-                    self.wfile.write(frame_data)
-                    self.wfile.write(HEADER_NEWLINE)
-                    self.wfile.flush()
+                    writer.write(frame_data, ctype)
                 except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError, OSError) as write_err:
                     # Connection closed during write - normal disconnect
                     print(f"[Stream] Client {cid}: Write error: {write_err}")

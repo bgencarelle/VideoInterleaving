@@ -9,6 +9,15 @@ import ascii_web_server
 
 
 class BroadcastTests(TestCase):
+    def test_websocket_handoff_does_not_use_the_100ms_library_poll_default(self):
+        config = mock.Mock()
+        config.get_ascii_websocket_port.return_value = 2424
+        with mock.patch.object(ascii_web_server, 'get_config', return_value=config), \
+                mock.patch.object(ascii_web_server.threading, 'Thread'), \
+                mock.patch.object(ascii_web_server, 'SimpleWebSocketServer') as server:
+            ascii_web_server.start_server()
+        self.assertEqual(server.call_args.kwargs['selectInterval'], .01)
+
     def test_multiple_frames_and_bounded_slow_client_backlog(self):
         client = mock.Mock()
         client.sendq = deque(['old1', 'old2', 'old3'])
