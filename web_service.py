@@ -547,7 +547,7 @@ class MonitorHandler(RobustHandlerMixin, http.server.BaseHTTPRequestHandler):
         self.send_error(404)
 
 
-def _tight_stream_socket(conn):
+def _tight_stream_socket(conn, sndbuf=32768):
     """Minimal buffering for MJPEG streams.
 
     The frame exchange (and the scope tap) only ever holds the LATEST frame,
@@ -560,7 +560,7 @@ def _tight_stream_socket(conn):
     reconnect).
     """
     try:
-        conn.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 32768)
+        conn.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, sndbuf)
         conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         conn.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
         conn.settimeout(15)
@@ -623,7 +623,9 @@ class StreamHandler(RobustHandlerMixin, http.server.BaseHTTPRequestHandler):
             _current_viewer_count += 1
         _set_heartbeat(cid)
 
-        _tight_stream_socket(self.connection)
+        # One picture of kernel buffer at most: a larger buffer is an old
+        # picture the viewer would still see before the newest one.
+        _tight_stream_socket(self.connection, sndbuf=8192)
 
         self.send_response(200)
         self.send_header('Content-Type', 'multipart/x-mixed-replace; boundary=frame')

@@ -31,6 +31,11 @@ ANSI_HOME = "\033[H"
 
 
 class AsciiWebSocket(WebSocket):
+    def _sendBuffer(self, buff, send_all=False):
+        remaining = super()._sendBuffer(buff, send_all)
+        self._head_started = remaining is not None
+        return remaining
+
     def handleConnected(self):
         self.frame_encoding = 'text'
         if not _sem.acquire(blocking=False):
@@ -100,6 +105,21 @@ class AsciiWebSocket(WebSocket):
             pass
 
 
+def _keep_only_latest(client):
+    """Drop queued pictures no viewer needs; the newest one replaces them.
+
+    The library's head entry is a picture it has already begun to write when
+    _head_started is set: that one must stay whole, so only the entries behind
+    it are dropped. Otherwise nothing has begun and the whole queue is stale.
+    """
+    queue = client.sendq
+    if getattr(client, '_head_started', False) is True:
+        while len(queue) > 1:
+            queue.pop()
+    else:
+        queue.clear()
+
+
 def broadcast_loop():
     """Push each frame published by the ASCII_FPS-paced image producer."""
     while True:
@@ -138,8 +158,7 @@ def broadcast_loop():
                 # empties between broadcasts (the select loop runs every
                 # 10ms and frames arrive at ~15fps), so it never trips this;
                 # a frozen one caps at three frames.
-                if len(client.sendq) >= 3:
-                    client.sendq.clear()
+                _keep_only_latest(client)
 
                 # If buffer is empty, send the new frame
                 client.sendMessage(compressed if getattr(client, 'frame_encoding', 'text') == 'gzip'

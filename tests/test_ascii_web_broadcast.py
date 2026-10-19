@@ -28,7 +28,8 @@ class BroadcastTests(TestCase):
                                   side_effect=['one', b'two', stop]):
             with self.assertRaisesRegex(RuntimeError, 'finished test input'):
                 ascii_web_server.broadcast_loop()
-        self.assertEqual(list(client.sendq), ['\033[Hone', '\033[Htwo'])
+        # A viewer keeps no picture older than the newest one it is handed.
+        self.assertEqual(list(client.sendq), ['\033[Htwo'])
         self.assertEqual(client.sendMessage.call_count, 2)
 
     def test_shared_gzip_is_encoded_once_per_frame_not_per_client(self):
@@ -75,3 +76,16 @@ class BroadcastTests(TestCase):
             self.assertEqual(json.loads(messages[1]), {'type':'resize', 'cols':120, 'rows':80})
             self.assertEqual(client.frame_encoding, 'text')
             ascii_web_server.AsciiWebSocket.handleClose(client)
+
+
+class LatestOnlyQueueTests(TestCase):
+    def test_unstarted_queue_is_replaced_entirely(self):
+        client = mock.Mock(sendq=deque(['old1', 'old2']))
+        ascii_web_server._keep_only_latest(client)
+        self.assertEqual(list(client.sendq), [])
+
+    def test_started_head_stays_whole_and_nothing_older_is_kept(self):
+        client = mock.Mock(sendq=deque(['partial', 'old1', 'old2']))
+        client._head_started = True
+        ascii_web_server._keep_only_latest(client)
+        self.assertEqual(list(client.sendq), ['partial'])
