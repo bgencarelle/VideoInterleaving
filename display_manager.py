@@ -1208,9 +1208,25 @@ def display_init(state: DisplayState, *, log_backend=True):
                 # Additional hints to prevent fullscreen loss on monitor disconnect
                 glfw.window_hint(glfw.RESIZABLE, glfw.FALSE)  # Prevent window resizing
                 glfw.window_hint(glfw.FLOATING, glfw.FALSE)  # Keep window managed
-                # Use borderless fullscreen-sized windows on Wayland/macOS;
-                # monitor-attached fullscreen is reserved for X11.
-                if is_wayland or _is_macos():
+                # Wayland: ask the compositor for real fullscreen first, as
+                # main did. A plain screen-sized window is composited every
+                # frame instead of going straight to the display, which on
+                # weak GPUs (Cherry Trail tablet under labwc) dropped the
+                # loop from ~52 to ~30 fps with ~8 missed images a second;
+                # compositors also decorate it. The borderless window stays
+                # as the fallback.
+                if is_wayland:
+                    try:
+                        win = glfw.create_window(fs_w, fs_h, "Fullscreen", mon, None)
+                        if win:
+                            return win
+                    except Exception as e:
+                        print(f"[DISPLAY] Wayland fullscreen failed: {e}, falling back to borderless window")
+                    glfw.window_hint(glfw.DECORATED, glfw.FALSE)
+                    return glfw.create_window(fs_w, fs_h, "Fullscreen", None, None)
+                # macOS: borderless fullscreen-sized window, positioned on
+                # the monitor; monitor-attached fullscreen is for X11 only.
+                if _is_macos():
                     glfw.window_hint(glfw.DECORATED, glfw.FALSE)
                     win = glfw.create_window(fs_w, fs_h, "Fullscreen", None, None)
                     if win:

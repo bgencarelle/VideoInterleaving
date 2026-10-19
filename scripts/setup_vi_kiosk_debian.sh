@@ -138,21 +138,28 @@ remove_block() {
   sed -i "/^$BLOCK_BEGIN\$/,/^$BLOCK_END\$/d" "$f"
 }
 
-# On Wayland the app opens a borderless, screen-sized window titled
-# "Fullscreen" rather than asking for fullscreen (display_manager.py), and
-# labwc defaults to server-side decorations, so it would draw a title bar
-# saying "Fullscreen". This rule removes the decoration and makes the window
-# truly fullscreen. The block is fenced with comments so reruns replace it and
-# --revert removes it; an existing rc.xml is merged into, never replaced.
+# The app asks the compositor for real fullscreen on Wayland. If that fails it
+# falls back to a borderless, screen-sized window titled "Fullscreen"
+# (display_manager.py), and labwc, which defaults to server-side decorations,
+# would draw a title bar on it. This rule keeps that fallback undecorated.
+#
+# It deliberately has no ToggleFullscreen action: on a window that is already
+# fullscreen that would switch fullscreen off. An older rule for the
+# "Fullscreen" window that does carry that action (an earlier version of this
+# script, or the hand-made test copy) is removed for the same reason.
+#
+# The block is fenced with comments so reruns replace it and --revert removes
+# it; an existing rc.xml is merged into, never replaced.
 # Usage: labwc_rule add|remove
 labwc_rule() {
   python3 - "$1" "$LABWC_RC" <<'PY'
 import os, re, sys
 mode, path = sys.argv[1], sys.argv[2]
 BEGIN, END = "<!-- >>> VideoInterleaving kiosk >>> -->", "<!-- <<< VideoInterleaving kiosk <<< -->"
-RULE = ('    <windowRule title="Fullscreen" serverDecoration="no">\n'
-        '      <action name="ToggleFullscreen"/>\n'
-        '    </windowRule>\n')
+RULE = '    <windowRule title="Fullscreen" serverDecoration="no"/>\n'
+# An unfenced rule for the "Fullscreen" window that toggles fullscreen.
+stale = re.compile(r'[ \t]*<windowRule\b[^>]*title="Fullscreen"[^>]*>(?:(?!</windowRule>).)*?'
+                   r'ToggleFullscreen(?:(?!</windowRule>).)*?</windowRule>[ \t]*\n?', re.S | re.I)
 fence = re.compile(r"[ \t]*" + re.escape(BEGIN) + r".*?" + re.escape(END) + r"[ \t]*\n?", re.S)
 text = open(path).read() if os.path.exists(path) else None
 if mode == "remove":
@@ -164,9 +171,11 @@ if text is None:
                           f"  {BEGIN}\n{RULE}  {END}\n  </windowRules>\n</labwc_config>\n")
     print("created"); sys.exit(0)
 text = fence.sub("", text)
-# A hand-added copy of the rule must not be doubled: two ToggleFullscreen
-# actions would switch fullscreen on and straight back off.
+text, n_stale = stale.subn("", text)
+# Any other rule the user wrote for this window is theirs; leave it be.
 if re.search(r'<windowRule\b[^>]*title="Fullscreen"', text, re.I):
+    if n_stale:
+        open(path, "w").write(text)
     print("present"); sys.exit(0)
 if re.search(r"<windowRules\s*>", text):
     text = re.sub(r"(<windowRules\s*>[ \t]*\n?)", lambda m: m.group(1) + f"  {BEGIN}\n{RULE}  {END}\n", text, count=1)
@@ -176,7 +185,7 @@ elif re.search(r"</(labwc|openbox)_config\s*>", text):
 else:
     print("unknown"); sys.exit(0)
 open(path, "w").write(text)
-print("merged")
+print("replaced" if n_stale else "merged")
 PY
 }
 
@@ -361,14 +370,15 @@ PYGLFW_LIBRARY_VARIANT=wayland
 $BLOCK_END
 EOF
 
-# 5b) Make the app's "Fullscreen" window really fullscreen, without a title
-#     bar (see labwc_rule above).
+# 5b) Keep the app's "Fullscreen" window free of a title bar if it ever falls
+#     back to a borderless window (see labwc_rule above).
 case "$(labwc_rule add)" in
-  created) info "Created $LABWC_RC with the fullscreen window rule." ;;
-  merged)  info "Added the fullscreen window rule to $LABWC_RC." ;;
+  created)  info "Created $LABWC_RC with the window rule." ;;
+  merged)   info "Added the window rule to $LABWC_RC." ;;
+  replaced) info "Replaced the old ToggleFullscreen rule in $LABWC_RC (it would undo real fullscreen)." ;;
   present) info "$LABWC_RC already has a rule for the \"Fullscreen\" window; left as is." ;;
   *)       warn "Could not place the fullscreen window rule in $LABWC_RC; add it by hand:"
-           warn '  <windowRule title="Fullscreen" serverDecoration="no"><action name="ToggleFullscreen"/></windowRule>' ;;
+           warn '  <windowRule title="Fullscreen" serverDecoration="no"/>' ;;
 esac
 
 chown -R "$TARGET_USER":"$TARGET_USER" "$LABWC_DIR"
