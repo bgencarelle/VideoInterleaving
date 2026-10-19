@@ -1,9 +1,22 @@
 import threading
 import socket
 import gzip
+import ssl
 import settings
 from shared_state import exchange_ascii
-from SimpleWebSocketServer import SimpleWebSocketServer, WebSocket
+
+# SimpleWebSocketServer 0.1.2 evaluates this removed constant while defining
+# its unused SSL server, even when importing only the plain WebSocket server.
+# Supply a modern server-context default for that import only; do not leave
+# a deprecated-protocol alias installed process-wide (Python 3.14+).
+_missing_legacy_tls_default = not hasattr(ssl, 'PROTOCOL_TLSv1_2')
+if _missing_legacy_tls_default:
+    ssl.PROTOCOL_TLSv1_2 = ssl.PROTOCOL_TLS_SERVER
+try:
+    from SimpleWebSocketServer import SimpleWebSocketServer, WebSocket
+finally:
+    if _missing_legacy_tls_default:
+        del ssl.PROTOCOL_TLSv1_2
 from server_config import get_config
 
 # Configuration
