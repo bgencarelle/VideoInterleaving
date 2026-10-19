@@ -80,7 +80,7 @@ class RollingIndexCompensator:
 
 
 from image_loader import ImageLoader, FIFOImageBuffer
-from image_preparation import DeadlinePreparer, advance_tick
+from image_preparation import LookaheadPreparer, advance_tick
 
 
 class FIFOImageBufferPatched(FIFOImageBuffer):
@@ -496,12 +496,13 @@ def run_display(clock_source=CLOCK_MODE):
             monitor.record_load_error(key[0], exc)
 
     period = 1.0 / (loop_fps or 60)
-    # Full-resolution local staging needs enough room to span long reads.
-    # This is an upper bound, not an eagerly filled speculative cache.
-    preparation_capacity = 4 if is_headless else 8
+    # main's loading model: keep the next FIFO_LENGTH pictures loaded with a
+    # wide pool, so a slow read is absorbed instead of becoming a miss. The
+    # deadline preparer (two ticks ahead, two workers) missed ~14 pictures a
+    # second on an eMMC tablet and a few on servers; main missed none.
     with (baked if baked is not None else nullcontext()), \
-            DeadlinePreparer(prepare_picture, period=period, workers=2,
-                          capacity=preparation_capacity, on_error=load_error) as preparation, \
+            LookaheadPreparer(prepare_picture, period=period,
+                              capacity=FIFO_LENGTH, on_error=load_error) as preparation, \
             (texture_stage if texture_stage is not None else nullcontext()):
         preparation.seed(index, initial_folders,
                          (cur_main, cur_float, cur_m_sbs, cur_f_sbs))
