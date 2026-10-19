@@ -1,4 +1,4 @@
-"""Real WebSocket delivery: setup survives and paused clients skip history."""
+"""Real WebSocket delivery: preserve setup/partial writes; never wait for ACKs."""
 import base64
 import gzip
 import json
@@ -82,32 +82,30 @@ class SocketDeliveryTests(unittest.TestCase):
             time.sleep(.005)
         self.assertTrue(predicate())
 
-    def test_paused_reader_gets_one_inflight_then_current_not_a_backlog(self):
+    def test_continuous_gzip_delivery_needs_no_ack_even_after_old_flow_message(self):
         self.send(type='encoding', encoding='gzip')
-        self.send(type='flow')
-        self.wait_for(lambda: self.client._flow and self.client.frame_encoding == 'gzip')
-        self.client.queue_picture('first', b'g' + gzip.compress(b'first'))
-        self.assertEqual(json.loads(self.receive()), {'type': 'frame', 'id': 1})
-        self.assertEqual(gzip.decompress(self.receive()[1:]), b'first')
-        # No acknowledgement: publish six seconds' worth of 15 fps pictures.
-        for i in range(90):
-            self.client.queue_picture(str(i), b'g' + gzip.compress(str(i).encode()))
-        self.sock.settimeout(.1)
-        with self.assertRaises(socket.timeout):
-            self.receive()
-        self.sock.settimeout(2)
-        self.send(type='ack', id=1)
-        self.assertEqual(json.loads(self.receive()), {'type': 'frame', 'id': 2})
-        self.assertEqual(gzip.decompress(self.receive()[1:]), b'89')
-        self.client.queue_picture('current', b'g' + gzip.compress(b'current'))
-        self.send(type='ack', id=1)  # stale acknowledgement cannot grant credit
-        self.sock.settimeout(.1)
-        with self.assertRaises(socket.timeout):
-            self.receive()
-        self.sock.settimeout(2)
-        self.send(type='ack', id=2)
-        self.assertEqual(json.loads(self.receive()), {'type': 'frame', 'id': 3})
-        self.assertEqual(gzip.decompress(self.receive()[1:]), b'current')
+        self.send(type='flow')  # a cached viewer must not opt back into gating
+        self.wait_for(lambda: self.client.frame_encoding == 'gzip')
+        for value in ('first', 'second', 'third'):
+            self.client.queue_picture(value, b'g' + gzip.compress(value.encode()))
+            self.assertEqual(gzip.decompress(self.receive()[1:]), value.encode())
+
+    def test_15fps_producer_is_not_capped_by_missing_browser_feedback(self):
+        count = 12
+        def produce():
+            start = time.monotonic()
+            for i in range(count):
+                self.client.queue_picture(str(i))
+                time.sleep(max(0, start + (i + 1) / 15 - time.monotonic()))
+        producer = threading.Thread(target=produce)
+        start = time.monotonic()
+        producer.start()
+        try:
+            self.assertEqual([self.receive() for _ in range(count)],
+                             [str(i) for i in range(count)])
+            self.assertLess(time.monotonic() - start, 1.5)
+        finally:
+            producer.join(timeout=2)
 
     def test_legacy_client_keeps_receiving_without_flow_negotiation(self):
         for value in ('first', 'second'):

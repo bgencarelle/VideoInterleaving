@@ -62,8 +62,10 @@ test('web MJPEG drops hidden stream and rejects old status replies',async()=>{
 for(const page of ['scope.html']) {
     test(`${page}: fresh preview/luma on return, no stale retry`,()=>{
         const b=browser();
+        b.context.LiveImageStream=class {constructor(){throw Error('Scope must use native MJPEG');}};
         b.run(fs.readFileSync(path.join(root,'static/scope_renderer.js'),'utf8'));
         const html=fs.readFileSync(path.join(root,'templates',page),'utf8');
+        assert(!html.includes('live_image_stream.js'),'scope reintroduced the JavaScript image reader');
         const start=html.indexOf('    const img = document.getElementById("scope-img");');
         const end=html.indexOf('\n    startPreview();',start)+'\n    startPreview();'.length;
         assert(start>0&&end>start);
@@ -75,7 +77,7 @@ for(const page of ['scope.html']) {
         assert.equal(b.timers.size,1,'preview errors accumulated retries');
         b.run('reconnectLuma("test");reconnectLuma("test")');
         assert.equal(b.timers.size,2,'luma errors accumulated retries');
-        b.hide();assert.equal(img.src,'');assert.equal(b.timers.size,0);
+        b.hide();assert.equal(img.src,'');assert.equal(luma.src,'');assert.equal(b.timers.size,0);
         b.run('startPreview();reconnectLuma("hidden")');
         assert.equal(img.src,'');assert.equal(b.timers.size,0);
         b.show();assert.match(img.src,/scope\/stream/);

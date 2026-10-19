@@ -263,11 +263,6 @@
         const decoded = grid.decode(text, sourceCols, sourceRows, spareFrame);
         if (decoded) { spareFrame = frame; frame = decoded; revision++; schedule(); }
     }
-    // One picture in flight: the server sends the next only after this.
-    function acknowledge(socket, id) {
-        if (ws === socket && !document.hidden && Number.isInteger(id) &&
-                socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify({type: 'ack', id}));
-    }
     async function inflateLatest() {
         const socket = ws;
         if (!socket || inflating === socket) return;
@@ -282,7 +277,6 @@
                     .pipeThrough(new DecompressionStream('gzip'));
                 const text = await new Response(stream).text();
                 if (ws === socket && !document.hidden) receiveText(text);
-                acknowledge(item.socket, item.id);
             }
         } catch (_) {
             if (ws === socket) { pendingCompressed = null; socket.close(); }
@@ -297,7 +291,6 @@
         const url = (!location.port || location.port === '80' || location.port === '443') ?
             protocol + location.host + '/ascii_ws/' : protocol + location.hostname + ':' + config.websocketPort;
         const socket = new WebSocket(url);
-        let pictureId = null;
         socket.binaryType = 'arraybuffer'; ws = socket;
         socket.onopen = () => {
             if (ws !== socket || document.hidden) { socket.close(); return; }
@@ -305,30 +298,14 @@
             if (typeof DecompressionStream === 'function') {
                 socket.send(JSON.stringify({type: 'encoding', encoding: 'gzip'}));
             }
-            // Opt in to one-picture-in-flight delivery: each picture is acknowledged.
-            socket.send(JSON.stringify({type: 'flow'}));
         };
         socket.onmessage = event => {
             if (ws !== socket) return;
-            if (typeof event.data === 'string' && event.data[0] === '{') {
-                try {
-                    const message = JSON.parse(event.data);
-                    if (message.type === 'frame' && Number.isInteger(message.id)) {
-                        pictureId = message.id;
-                        return;
-                    }
-                } catch (_) { /* receiveText handles other controls. */ }
-            }
             if (event.data instanceof ArrayBuffer && new Uint8Array(event.data)[0] === 103) {
-                // A picture replaced here is never decoded; acknowledge it now.
-                if (pendingCompressed) acknowledge(pendingCompressed.socket, pendingCompressed.id);
-                pendingCompressed = {socket, id: pictureId, data: event.data};
-                pictureId = null;
-                inflateLatest(); return;
+                pendingCompressed = {socket, data: event.data}; inflateLatest(); return;
             }
             const text = typeof event.data === 'string' ? event.data : new TextDecoder().decode(event.data);
             receiveText(text);
-            if (text[0] !== '{') { acknowledge(socket, pictureId); pictureId = null; }
         };
         socket.onclose = () => {
             if (ws !== socket) return;

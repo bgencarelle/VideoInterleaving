@@ -160,3 +160,64 @@ before/after screenshots; `tmp/check_web_scope_repair.cjs`,
 `tmp/web_scope_repair_browser_v2.log`, `tmp/web_scope_repair_final_python.log`.
 The first invalid freeze-assumption attempt is retained separately in
 `tmp/web_scope_repair_20261019/` and `tmp/web_scope_repair_browser.log`.
+
+## Correction: restore continuous ASCII and native scope delivery (2026-10-19)
+
+The preceding repair's performance acceptance is superseded. Matched actual
+main.py/browser comparisons against the owner's `86989a6b7` found that the
+`6756f01da` ACK gate reduced ASCII-web from about 15 fps to 8.1 fps with 120 ms
+of added ACK turnaround and 3.3 fps with 300 ms. The baseline remained about
+15 fps. This is deliberately delayed browser feedback, not a packet-level WAN
+test. Scope's JavaScript reader also raised software-browser CPU from roughly
+20% to 25% of one core in repeated runs without improving preview cadence.
+Comparison evidence is retained at `tmp/compare_last_push_20261019/` and
+`tmp/compare_last_push_scope_repeat_20261019/`.
+
+Owner-directed correction:
+
+- Remove per-picture ACKs, frame-ID messages and flow negotiation entirely.
+  The ASCII browser controller is restored byte-for-byte to `86989a6b7`.
+  Server socket-thread ownership, preserved controls/partial writes and one
+  replaceable waiting-picture mailbox remain; no browser response gates output.
+  Cached clients' obsolete flow/ACK messages are ignored, not re-enabled.
+- Restore native `<img>` MJPEG for scope preview and browser-audio luminance.
+  Scope no longer loads or instantiates `LiveImageStream`. Hidden pages detach
+  both image feeds; resume opens fresh native connections without changing
+  AudioContext ownership. Keep scope2's promotion and compatibility aliases.
+- Keep compatible per-picture HTTP lengths/boundaries. Web mode's existing
+  reader is unchanged from the owner's push; its in-flight decode can still
+  present before a newer pending picture. No claim of universal freshness or
+  zero network buffering is made for either native MJPEG or that reader.
+- Do not change the owner's FIFO, fullscreen, pacing or modem implementation.
+
+Supporting regression checks: 64 Python tests and 11 Node test entries pass.
+The tests now prohibit ASCII ACK/flow transmission, require continuous real
+WebSocket delivery without feedback (including a 15-fps producer), and reject
+reintroduction of the JavaScript reader into scope. Prior lifecycle/hash tests
+proved recovery, not smoothness/freshness under all conditions; their stronger
+interpretation is withdrawn.
+
+Matched verification of the correction against `86989a6b7`: actual main.py,
+same fixed independent folder pair and assets, software Chromium/Xvfb, same
+960x720 viewport and measurement harness. ASCII-web remains approximately
+15 fps in all three feedback-delay settings (0/120/300 ms), matching the
+baseline; there are no ACKs to delay. Scope preview cadence is about 13 Hz in
+both, browser CPU 20.29% baseline / 20.14% corrected (100% is one core), summed
+browser-process RSS 984.4 / 985.8 MiB. These are sampled short-window software
+measurements, not physical scanout or a general memory bound. Web remains
+about 15.3 sampled picture changes/s with similar resources in both versions.
+All matched pages pass two visibility/resume cycles without JavaScript errors.
+
+The corrected native scope root also passes three separate hide/freeze/resume
+cycles with real browser-local AudioContext/worklet start, retention, stop,
+X-only restart and stop. Both preview and luminance requests are verified as
+native browser image requests, not JavaScript fetch/blob delivery. Output is
+muted on the existing verified `auto_null` / `auto_null.monitor` 96-kHz route;
+scope server output is NullStream. This is software lifecycle/integration
+evidence only, not physical waveform/audio quality or hardware-WebGL validation.
+
+Artifacts: `tmp/continuous_native_restore_20261019/summary.json`, logs and
+screenshots, `tmp/continuous_native_restore_compare.log`,
+`tmp/native_scope_restore_20261019/summary.json`,
+`tmp/native_scope_restore_browser.log`, `tmp/native_restore_python.log`.
+Runners: `tmp/compare_last_push.cjs`, `tmp/check_native_scope_restore.cjs`.

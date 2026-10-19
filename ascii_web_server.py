@@ -38,9 +38,6 @@ class AsciiWebSocket(WebSocket):
         self._delivery_lock = threading.Lock()
         self._controls = deque()
         self._pending_picture = None
-        self._flow = False
-        self._awaiting_ack = None
-        self._picture_id = 0
 
     def sendMessage(self, message):
         # Control messages may originate outside the socket thread too. Never
@@ -57,17 +54,12 @@ class AsciiWebSocket(WebSocket):
         with self._delivery_lock:
             while self._controls:
                 super().sendMessage(self._controls.popleft())
-            if (self.sendq or self._pending_picture is None or
-                    (self._flow and self._awaiting_ack is not None)):
+            if self.sendq or self._pending_picture is None:
                 return
             plain, compressed = self._pending_picture
             self._pending_picture = None
         message = (compressed if self.frame_encoding == 'gzip' and
                    compressed is not None else plain)
-        if self._flow:
-            self._picture_id += 1
-            self._awaiting_ack = self._picture_id
-            super().sendMessage(json.dumps({'type': 'frame', 'id': self._picture_id}))
         super().sendMessage(message)
 
     def handleConnected(self):
@@ -129,13 +121,6 @@ class AsciiWebSocket(WebSocket):
                 return
             if data.get('type') == 'encoding' and data.get('encoding') == 'gzip':
                 self.frame_encoding = 'gzip'
-            if data.get('type') == 'flow':
-                # Repeated negotiation must not grant extra frame credit.
-                self._flow = True
-            if (data.get('type') == 'ack' and self._flow and
-                    type(data.get('id')) is int and
-                    data['id'] == self._awaiting_ack):
-                self._awaiting_ack = None
             if data.get('type') == 'resize':
                 # Client requesting dimension change (optional feature)
                 # For now, we'll let the server control dimensions via HTTP API
@@ -149,7 +134,7 @@ class AsciiWebSocket(WebSocket):
 class LatestWebSocketServer(SimpleWebSocketServer):
     def serveonce(self):
         # Admission and library writes share one owner. Producers only replace
-        # mailboxes; neither they nor acknowledgements ever clear sendq.
+        # mailboxes; producers never clear sendq or wait for browser feedback.
         for client in list(self.connections.values()):
             client.flush_delivery()
         super().serveonce()

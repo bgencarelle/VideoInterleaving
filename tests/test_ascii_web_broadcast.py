@@ -113,7 +113,7 @@ class LatestOnlyQueueTests(TestCase):
         self.assertEqual([call.args[0] for call in send.call_args_list],
                          ['clear', 'dimensions', 'newest'])
 
-    def test_flow_waits_for_matching_ack_and_only_sends_latest_after_pause(self):
+    def test_old_flow_and_ack_messages_never_gate_continuous_delivery(self):
         client = viewer()
         def control(**message):
             client.data = json.dumps(message)
@@ -122,21 +122,14 @@ class LatestOnlyQueueTests(TestCase):
         with mock.patch.object(ascii_web_server.WebSocket, 'sendMessage') as send:
             client.queue_picture('first')
             client.flush_delivery()
-            self.assertEqual(client._awaiting_ack, 1)
-            for i in range(90):
-                client.queue_picture(str(i))
-                client.flush_delivery()
-            control(type='flow')  # repeated negotiation is not an acknowledgement
+            client.queue_picture('second')
+            client.flush_delivery()  # no acknowledgement required
+            control(type='flow')
             control(type='ack', id=999)
-            control(type='ack', id=True)
+            client.queue_picture('third')
             client.flush_delivery()
-            self.assertEqual(send.call_count, 2)  # frame ID, picture
-            control(type='ack', id=1)
-            client.flush_delivery()
-            self.assertEqual(send.call_args.args[0], '89')
-            self.assertEqual(client._awaiting_ack, 2)
-            control(type='ack', id=1)  # a duplicate cannot release the next frame
-            self.assertEqual(client._awaiting_ack, 2)
+            self.assertEqual([call.args[0] for call in send.call_args_list],
+                             ['first', 'second', 'third'])
 
     def test_encoding_is_selected_when_the_socket_thread_admits_the_picture(self):
         client = viewer()

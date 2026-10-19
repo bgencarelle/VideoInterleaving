@@ -201,8 +201,7 @@
     <img id="luma-src" style="display:none" alt="">
 </div>
 
-<script src="/static/live_image_stream.js?v=latest-scope-2"></script>
-<script src="/static/scope_renderer.js?v=latest-scope-2"></script>
+<script src="/static/scope_renderer.js?v=native-scope-3"></script>
 <script>
     // ---------------------------------------------------------------- preview
     const img = document.getElementById("scope-img");
@@ -210,7 +209,6 @@
     const sizeSel = document.getElementById("preview-size");
     const expSel = document.getElementById("preview-exposure");
     let previewRetry = null;
-    const previewStream = new LiveImageStream(img, {onError: () => img.onerror()});
 
     function note(t) {
         document.getElementById("preview-note").textContent = t;
@@ -221,8 +219,8 @@
         if (previewRetry !== null) clearTimeout(previewRetry);
         previewRetry = null;
         const s = sizeSel.value;
-        previewStream.start("/scope/stream.mjpg?size=" + s
-                + "&exposure=" + expSel.value + "&t=" + Date.now());
+        img.src = "/scope/stream.mjpg?size=" + s
+                + "&exposure=" + expSel.value + "&t=" + Date.now();
         note(Number(s) < 512
                 ? "below 512 the scanlines merge \u2014 expect a blob, not features"
                 : "");
@@ -231,7 +229,7 @@
     function stopPreview() {
         if (previewRetry !== null) clearTimeout(previewRetry);
         previewRetry = null;
-        previewStream.stop();
+        img.removeAttribute("src");
         note("preview off");
     }
 
@@ -259,7 +257,7 @@
         if (document.hidden) {
             stopPreview();
             cancelLumaReconnect();
-            lumaStream.stop(false);
+            lumImg.removeAttribute("src");
         } else {
             if (onBox.checked) startPreview();
             lastChange = Date.now();
@@ -284,6 +282,6 @@
     poll();
     setInterval(poll, 1000);
 </script>
-<script src="/static/scope_audio.js?v=latest-scope-2"></script>
+<script src="/static/scope_audio.js?v=native-scope-3"></script>
 </body>
 </html>

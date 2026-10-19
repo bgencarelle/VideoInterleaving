@@ -88,7 +88,7 @@
           if (actx) await actx.close();
           actx = null;
           worklet = null;
-          lumaStream.stop();
+          lumImg.removeAttribute("src");
           document.getElementById("local-btn").textContent = "Start audio";
           document.getElementById("local-status").textContent = "Not running.";
           return;
@@ -125,7 +125,7 @@
         if (actx) { try { await actx.close(); } catch (_) {} }
         actx = null;
         worklet = null;
-        lumaStream.stop();
+        lumImg.removeAttribute("src");
         document.getElementById("local-btn").textContent = "Start audio";
         document.getElementById("local-status").textContent = "Failed: " + e;
       } finally { setAudioBusy(false); }
@@ -148,7 +148,7 @@
         if (actx) { try { await actx.close(); } catch (_) {} }
         actx = null;
         worklet = null;
-        lumaStream.stop();
+        lumImg.removeAttribute("src");
         document.getElementById("local-btn").textContent = "Start audio";
         document.getElementById("local-status").textContent = "Stopped: selected output disconnected.";
         document.getElementById("output-label").textContent = "Selected output unavailable";

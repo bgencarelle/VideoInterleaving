@@ -6220,3 +6220,53 @@ Safari/macOS and hardware WebGL are not validated by these checks.
 **Handoff:** the requested browser delivery repair and scope2 promotion are
 software-checked. Preserve the owner's restored display playback path. Do not
 restart closed scope software/hardware stages from this browser-only change.
+
+---
+
+## Appendix A082 — Restore native scope browser delivery — 2026-10-19
+
+**Correction to A081:** matched actual-process/browser comparison with the
+owner's `86989a6b7` found additional browser CPU in the new scope image-reader
+path: approximately 20% -> 25% of one core on software Chromium, with no preview
+cadence improvement. Reversed-order repetition reproduced that cost. Browser
+RSS was higher but variable; no leak is established. The prior recovery tests
+were not sufficient performance acceptance. Evidence and methodology are in
+`tmp/compare_last_push_20261019/REVIEW.md` and
+`tmp/compare_last_push_scope_repeat_20261019/`.
+
+**Owner direction:** restore continuous ASCII delivery and native scope MJPEG,
+retaining the requested scope2 promotion and the owner's playback fixes.
+Scope preview/luminance now use native image sources again; scope no longer
+loads or instantiates the JavaScript multipart/blob reader. Hide/resume still
+detaches/refreshes feeds, with AudioContext/output ownership unchanged. The
+length-framed HTTP responses remain compatible with native MJPEG. Scope root
+and all existing scope/scope2 aliases still share the promoted template.
+
+No scope source adapter, trajectory arithmetic, producer/output scheduler,
+defaults, charter or closed validation stage changes. The owner's display
+FIFO, fullscreen and pacing implementation remains untouched.
+
+**Supporting checks:** 64 focused Python tests and 11 Node entries pass.
+Native scope lifecycle coverage throws if the JavaScript reader is constructed;
+ASCII coverage rejects ACK-gated delivery. Full cross-web correction details
+are appended in `docs/WEB_VISIBILITY.md`.
+
+**Matched correction evidence:** baseline/corrected scope browser CPU is
+20.29% / 20.14% of one core, summed browser-process RSS 984.4 / 985.8 MiB,
+preview cadence about 13 Hz in both. Actual main.py, same assets/fixed pair,
+same viewport and software Chromium, audio off for these resource windows.
+Two visibility/resume cycles pass without page errors. A separate native
+scope root check passes three cycles with real AudioContext/worklet ownership,
+fresh preview/luminance image requests, stop, X-only restart and stop at the
+advertised 96 kHz. Browser output is muted on the existing verified
+`auto_null` / `auto_null.monitor` route; server output remains NullStream.
+No physical audio/scanout, Safari or hardware-WebGL result is claimed.
+
+Artifacts: `tmp/continuous_native_restore_20261019/`,
+`tmp/native_scope_restore_20261019/`, `tmp/native_restore_python.log` and
+the corresponding runners/logs listed in `docs/WEB_VISIBILITY.md`.
+
+**Handoff:** continuous ASCII/native scope delivery is restored and checked
+against the owner's push; scope2 promotion/aliases remain. Preserve the owner's
+FIFO/fullscreen/pacing code and do not reinstate per-picture ACK gating or the
+scope JavaScript image reader. Closed scope stages remain closed.
