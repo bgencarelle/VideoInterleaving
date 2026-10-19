@@ -1,7 +1,26 @@
 #!/bin/bash
 set -euo pipefail  # Better error handling: exit on error, undefined vars, pipe failures
 
-trap 'setup_status=$?; if [ "$setup_status" -ne 0 ]; then printf "Setup failed (exit %s). See the error above.\n" "$setup_status" >&2; fi' EXIT
+# Under sudo, anything this script creates in the user's checkout or home
+# (logs, the venv's hash file, __pycache__ from the import checks, the
+# systemd user directory) would otherwise be left owned by root, which then
+# breaks pip, git and `systemctl --user` for the user. Hand it all back on
+# exit -- also after a failure, and also anything an earlier sudo run left.
+repair_ownership() {
+    local user="${USERNAME:-}" group home
+    [ "$(id -u)" -eq 0 ] || return 0
+    [ -n "$user" ] && [ "$user" != root ] || return 0
+    [ "${DRY_RUN:-false}" = false ] || return 0
+    group="$(id -gn "$user" 2>/dev/null)" || return 0
+    home="$(getent passwd "$user" | cut -d: -f6)"
+    local paths=("$PROJECT_DIR")
+    for p in "$home/.config" "$home/.cache/pip"; do
+        [ -n "$home" ] && [ -e "$p" ] && paths+=("$p")
+    done
+    find "${paths[@]}" -xdev -user 0 -exec chown -h "$user:$group" {} + 2>/dev/null || true
+}
+
+trap 'setup_status=$?; repair_ownership; if [ "$setup_status" -ne 0 ]; then printf "Setup failed (exit %s). See the error above.\n" "$setup_status" >&2; fi' EXIT
 
 # --- CONFIGURATION ---
 PROJECT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)  # repo root = parent of scripts/
@@ -61,6 +80,20 @@ if [ -n "${SUDO_USER:-}" ]; then
 else
     USERNAME=$(whoami)
 fi
+
+# Run a command as the target user (a no-op wrapper when not under sudo), so
+# files it creates in the user's checkout or home belong to them.
+run_as_user() {
+    if [ "$USERNAME" = "$(whoami)" ]; then
+        "$@"
+    else
+        sudo -u "$USERNAME" -H "$@"
+    fi
+}
+
+# Undo root-owned files from an earlier sudo run before anything below runs
+# as the user (pip into a root-owned venv would fail).
+repair_ownership
 
 # --- PORT DETECTION ---
 # Default ports from server_config.py
@@ -663,7 +696,7 @@ else
 
         # Store requirements hash
         if [ -f "$PROJECT_DIR/requirements.txt" ]; then
-            requirements_hash > "$VENV_DIR/.requirements_hash"
+            requirements_hash | run_as_user tee "$VENV_DIR/.requirements_hash" >/dev/null
         fi
 
         log_success "Python packages installed/updated"
@@ -680,9 +713,10 @@ if [ "$DRY_RUN" = false ]; then
             sudo -u "$USERNAME" "$VENV_DIR/bin/python" -m pip install 'opencv-python>=4.5'
         fi
     fi
-    "$VENV_DIR/bin/python" "$PROJECT_DIR/utilities/check_modem_setup.py"
-    "$VENV_DIR/bin/python" "$PROJECT_DIR/utilities/check_graphics_setup.py"
-    "$VENV_DIR/bin/python" -c 'import cv2, mss; print("Scope dependencies available (OpenCV and mss).")'
+    # As the user: these imports write __pycache__ into the checkout and venv.
+    run_as_user "$VENV_DIR/bin/python" "$PROJECT_DIR/utilities/check_modem_setup.py"
+    run_as_user "$VENV_DIR/bin/python" "$PROJECT_DIR/utilities/check_graphics_setup.py"
+    run_as_user "$VENV_DIR/bin/python" -c 'import cv2, mss; print("Scope dependencies available (OpenCV and mss).")'
 else
     log_info "[DRY-RUN] Would check modem, graphics, and scope imports and install OpenCV if missing"
 fi
@@ -1142,7 +1176,9 @@ EOF
         USER_SERVICE_DIR="$USER_HOME/.config/systemd/user"
         if [ "$DRY_RUN" = false ] && [ -d "$USER_HOME" ]; then
             log_info "Creating user service for local mode (better GUI compatibility)..."
-            mkdir -p "$USER_SERVICE_DIR"
+            # As the user: a root-owned ~/.config/systemd/user stops
+            # `systemctl --user enable` from creating its .wants links.
+            run_as_user mkdir -p "$USER_SERVICE_DIR"
 
             # Create user service
             cat <<EOF > "$USER_SERVICE_DIR/vi-local.service"
