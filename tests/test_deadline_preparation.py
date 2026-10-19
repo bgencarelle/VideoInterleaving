@@ -153,6 +153,31 @@ class LocalPacingTests(unittest.TestCase):
         self.assertAlmostEqual(deadline,4*period)
         self.assertEqual(wait,0)
 
+    @staticmethod
+    def _iterations_per_second(work, period, *, swap_consumed, seconds=2.0):
+        """Simulate the image loop: do `work` seconds, then pace."""
+        from image_preparation import advance_tick
+        now = deadline = 0.0
+        count = 0
+        while now < seconds:
+            now += work
+            deadline, wait = advance_tick(deadline, period, now,
+                                          swap_consumed=swap_consumed)
+            now += wait
+            count += 1
+        return count / seconds
+
+    def test_slightly_late_window_loop_keeps_its_rate(self):
+        # A 60 fps loop whose iterations take 19 ms (Cherry Trail tablet,
+        # where the refresh wait lands in the texture upload). Holding for
+        # the next tick after each overrun halves it to the 30 fps the tablet
+        # measured; presenting at once keeps it near main's ~52.
+        period = 1/60
+        held = self._iterations_per_second(.019, period, swap_consumed=False)
+        visible = self._iterations_per_second(.019, period, swap_consumed=True)
+        self.assertAlmostEqual(held, 30, delta=1)
+        self.assertGreater(visible, 50)
+
     def test_regular_pacing_sleeps_and_overload_skips_to_future_without_swap(self):
         from image_preparation import advance_tick
         period=1/60

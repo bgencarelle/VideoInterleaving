@@ -519,9 +519,19 @@ def run_display(clock_source=CLOCK_MODE):
             nonlocal next_tick
             if ticker_period is not None:
                 now = time.monotonic()
+                # A visible window never holds after a late iteration: the
+                # image index follows the wall clock, so waiting out a tick
+                # that has already passed only drops the images due meanwhile
+                # (a skip beats a hold). The swap-time test below cannot tell
+                # this on Mesa, where swap_buffers returns at once and the
+                # refresh wait lands in the next GL call (the texture upload);
+                # holding there cut a Cherry Trail tablet and X11 machines
+                # from ~52 fps to ~30 with images missed. Headless output
+                # keeps its capture grid.
                 next_tick, remaining = advance_tick(
                     next_tick, ticker_period, now,
-                    swap_consumed=local_swap_seconds >= ticker_period*.5)
+                    swap_consumed=(not is_headless
+                                   or local_swap_seconds >= ticker_period*.5))
                 if remaining > 0:
                     time.sleep(remaining)
             return time.perf_counter() - iteration_start
