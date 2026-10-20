@@ -6270,3 +6270,30 @@ the corresponding runners/logs listed in `docs/WEB_VISIBILITY.md`.
 against the owner's push; scope2 promotion/aliases remain. Preserve the owner's
 FIFO/fullscreen/pacing code and do not reinstate per-picture ACK gating or the
 scope JavaScript image reader. Closed scope stages remain closed.
+
+---
+
+## Appendix A083 — Repair public scope URL prefix — 2026-10-20
+
+**Owner report:** the pulled `/scope` page showed only a broken image.
+Read-only deployed probes establish that root-relative preview/data URLs
+return 404, while the correctly prefixed stream and data routes return 200.
+The prior local/direct-port validation missed nginx's prefix stripping.
+
+Restore relative preview, luminance, retry and data URLs, matching the owner's
+original deployment convention. Native MJPEG, scope2 promotion/aliases, FIFO,
+fullscreen/pacing, server routing/configuration, defaults and arithmetic remain
+unchanged. Renderer cache key is bumped. No setup or nginx change is needed.
+
+**Checks:** new URL-resolution test first reproduces the failure, then covers
+direct pages and both public prefixes, including retry/resume. Twelve Node
+entries and 13 focused Python tests pass. Browser GETs through both actual
+public prefixes, substituting only the local corrected HTML/renderer assets,
+decode preview/luminance images and receive scope JSON with no page errors;
+screenshots are inspected. Remote files/configuration are not modified, and
+audio is not started. Evidence is in `tmp/deployed_scope_prefix_20261020/` and
+`docs/WEB_VISIBILITY.md`. No physical/hardware stage is reopened.
+
+**Handoff:** pull the correction and reload `/scope/` (or `/scope2/`). Preserve
+relative subresource URLs; direct-port-only tests cannot establish proxy-path
+correctness.

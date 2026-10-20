@@ -201,7 +201,7 @@
     <img id="luma-src" style="display:none" alt="">
 </div>
 
-<script src="/static/scope_renderer.js?v=native-scope-3"></script>
+<script src="/static/scope_renderer.js?v=scope-prefix-4"></script>
 <script>
     // ---------------------------------------------------------------- preview
     const img = document.getElementById("scope-img");
@@ -219,7 +219,8 @@
         if (previewRetry !== null) clearTimeout(previewRetry);
         previewRetry = null;
         const s = sizeSel.value;
-        img.src = "/scope/stream.mjpg?size=" + s
+        // Relative to /scope/ or /scope2/ behind nginx, and / when direct.
+        img.src = "scope/stream.mjpg?size=" + s
                 + "&exposure=" + expSel.value + "&t=" + Date.now();
         note(Number(s) < 512
                 ? "below 512 the scanlines merge \u2014 expect a blob, not features"
@@ -270,7 +271,7 @@
     let lastData = {};
     async function poll() {
         try {
-            const response = await fetch("/data", {cache: "no-store"});
+            const response = await fetch("data", {cache: "no-store"});
             if (!response.ok) throw new Error("Monitor unavailable");
             lastData = await response.json();
             syncLocalOutputMode(lastData);

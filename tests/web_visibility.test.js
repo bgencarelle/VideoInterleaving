@@ -88,3 +88,37 @@ for(const page of ['scope.html']) {
         assert.equal(b.timers.size,0,'stopping left a pending luma reconnect');
     });
 }
+
+test('scope preview, luma, retries and data retain the public proxy prefix',async()=>{
+    const html=fs.readFileSync(path.join(root,'templates/scope.html'),'utf8');
+    const inline=html.match(/<script>([\s\S]*?)<\/script>/)[1];
+    for(const [base,prefix] of [
+        ['http://localhost:8890/',''],
+        ['http://localhost:8890/scope',''],
+        ['http://localhost:8890/scope2',''],
+        ['http://localhost:8890/scope.html',''],
+        ['https://example.test/scope/','/scope'],
+        ['https://example.test/scope2/','/scope2']
+    ]) {
+        const b=browser(),fetches=[];
+        b.context.fetch=async url=>{fetches.push(url);return {ok:true,json:async()=>({})};};
+        b.run(fs.readFileSync(path.join(root,'static/scope_renderer.js'),'utf8'));
+        b.run(inline);
+        const upstream=resource=>{
+            const pathname=new URL(resource,base).pathname;
+            assert(pathname.startsWith(prefix+'/'),`${resource} escaped ${prefix} at ${base}`);
+            return pathname.slice(prefix.length);
+        };
+        assert.equal(upstream(b.element('scope-img').src),'/scope/stream.mjpg',base);
+        assert.equal(upstream(fetches[0]),'/data',base);
+        b.run('localRunning=true;resumeLuma()');
+        assert.equal(upstream(b.element('luma-src').src),'/scope/luma.mjpg',base);
+        b.run('reconnectLuma("test")');
+        for(const callback of [...b.timers.values()])callback();
+        assert.equal(upstream(b.element('luma-src').src),'/scope/luma.mjpg',base);
+        b.hide();b.show();
+        assert.equal(upstream(b.element('scope-img').src),'/scope/stream.mjpg',base);
+        assert.equal(upstream(b.element('luma-src').src),'/scope/luma.mjpg',base);
+        await new Promise(resolve=>setImmediate(resolve));
+    }
+});

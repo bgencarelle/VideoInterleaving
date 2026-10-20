@@ -401,7 +401,7 @@
       lastHash = -1;
       lastChange = Date.now();
       backoff = 1000;
-      lumImg.src = "/scope/luma.mjpg?t=" + Date.now();
+      lumImg.src = "scope/luma.mjpg?t=" + Date.now();
     }
 
     function frameHash(px, w, h) {
@@ -422,7 +422,7 @@
       lumaReconnectTimer = setTimeout(() => {
         lumaReconnectTimer = null;
         if (!localRunning || document.hidden) return;
-        lumImg.src = "/scope/luma.mjpg?t=" + Date.now();
+        lumImg.src = "scope/luma.mjpg?t=" + Date.now();
         lastChange = Date.now();
         // back off so a server that is down is not hammered, but cap it:
         // this is an installation, it should recover on its own eventually

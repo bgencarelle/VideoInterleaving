@@ -221,3 +221,26 @@ screenshots, `tmp/continuous_native_restore_compare.log`,
 `tmp/native_scope_restore_20261019/summary.json`,
 `tmp/native_scope_restore_browser.log`, `tmp/native_restore_python.log`.
 Runners: `tmp/compare_last_push.cjs`, `tmp/check_native_scope_restore.cjs`.
+
+## Public nginx prefix correction (2026-10-20)
+
+The direct-port checks above missed a deployment regression: root-relative
+scope URLs escaped nginx's stripped `/scope/` or `/scope2/` prefix. On the
+owner's deployed site `/scope/stream.mjpg` and `/data` returned 404, while
+`/scope/scope/stream.mjpg` streamed normally and `/scope/data` returned JSON.
+The backend was running; this was not an audio/setup failure.
+
+Restore the owner's relative `scope/stream.mjpg`, `scope/luma.mjpg` and `data`
+URLs, including reconnect paths. They resolve correctly both on direct backend
+pages and under either public prefix. Bump the renderer script cache key; do
+not alter nginx, services, FIFO, pacing, audio arithmetic or output devices.
+
+A new regression test fails on the root-relative version, then passes on the
+fix across direct root/scope/scope2/scope.html and public scope/scope2 prefixes,
+including retries and visibility resume. The 12 Node entries and 13 focused
+Python routing/framing/lazy-import tests pass. A browser also verifies both
+real public prefixes with only local HTML/renderer asset substitution: preview,
+luminance and data all return 200, native images decode, no page errors, and
+screenshots are inspected. The remote server is unchanged and audio is never
+started. Artifacts: `tmp/deployed_scope_prefix_20261020/`,
+`tmp/deployed_scope_prefix_check.log`, `tmp/check_deployed_scope_prefix.cjs`.
