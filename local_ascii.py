@@ -476,10 +476,12 @@ class LocalAsciiDisplay:
         data['colour'] = colours.reshape(-1, 3)
         self.instances.write(data.tobytes())
 
-        # Fit the picture (the sampled cell proportions) inside the window,
-        # then space rows like the browser: line_spacing apart, fitted to
-        # the picture height.
-        aspect = cols * _setting('ASCII_FONT_RATIO', .5) / rows
+        # Fit the picture inside the window, then space rows like the
+        # browser: line_spacing apart, fitted to the picture height. The
+        # frame is the master grid's shape at every size: each size covers
+        # the whole master, and its own rounded cols/rows would move the
+        # frame a little on every zoom step. The cells absorb the difference.
+        aspect = master_w * _setting('ASCII_FONT_RATIO', .5) / master_h
         if width / height > aspect:
             area_h, area_w = float(height), height * aspect
         else:
