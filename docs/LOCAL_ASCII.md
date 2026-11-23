@@ -108,6 +108,29 @@ off by default:
 
 Example: `--mode asciilocal --ascii-glow 0.6 --ascii-strokes 0.5`.
 
+## The biography
+
+The palette is built from the subject's biography (`constantStorage/
+bio_constants.py`): the letters of BEN GENCARELLE, the digits of 1978 and
+the date's separators, with filler letters for the density range.
+`--ascii-bio` makes it readable, in every ASCII mode (default: as it is):
+
+- `palette`: only the biography's characters (`B8GRNEALencra971-` and the
+  blank), in the palette's own density order.
+- `runs`: the phrase, name then birth date (`BEN GENCARELLE 11-17-1978`,
+  then `BIRTH_PLACE` when set),
+  runs along the rows through the picture; the faintest cells
+  (`ASCII_BIO_RUNS_KEEP`) keep their palette character, so the tone and
+  edges survive, and colour carries the rest.
+- `reveal`: the palette as usual, but every `ASCII_BIO_REVEAL_EVERY`
+  (6-20 s) the phrase surfaces on one line for `ASCII_BIO_REVEAL_FOR`
+  (2-5 s).
+
+Here the phrase is applied to the grid as shown, so it reads at every zoom
+size. The browser viewer resamples the server's master grid itself, so
+there `runs` and `reveal` read only at the master size; other sizes pick
+every few letters.
+
 ## Settings (settings.py)
 
 | Setting | Default | Meaning |

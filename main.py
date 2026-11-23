@@ -151,6 +151,15 @@ def configure_runtime():
     )
 
     parser.add_argument(
+        "--ascii-bio",
+        choices=("palette", "runs", "reveal"),
+        help="ASCII modes: make the biography the palette is built from readable. "
+             "palette: only its characters; runs: the name and birth date run "
+             "through the picture; reveal: they surface now and then. "
+             "Default: the palette as it is"
+    )
+
+    parser.add_argument(
         "--ascii-grid",
         metavar="COLSxROWS",
         help="--mode asciilocal: finest grid, e.g. 200x120 (default "
@@ -665,6 +674,12 @@ def configure_runtime():
             if cols < 15 or rows < 10:
                 parser.error("--ascii-grid must be at least 15x10 (the coarsest size)")
             settings.LOCAL_ASCII_GRID = (cols, rows)
+    if args.ascii_bio is not None:
+        if args.mode in ("ascii", "asciiweb") or settings.LOCAL_ASCII:
+            settings.ASCII_BIO = args.ascii_bio
+        else:
+            print("⚠️  --ascii-bio ignored: it applies to --mode ascii, asciiweb and "
+                  "asciilocal. Each mode in VideoInterleaving runs standalone.")
     if args.mode not in ("ascii", "asciiweb") and not settings.LOCAL_ASCII:
         _ascii_used = [f for f, v in (("--ascii-contrast", args.ascii_contrast),
                                       ("--ascii-brightness", args.ascii_brightness),

@@ -478,7 +478,9 @@ class LocalAsciiDisplay:
         self._framebuffer = None
         self.target = ctx.simple_framebuffer(self.master, components=3)
 
-        atlas, self.tile_px, pitch = build_atlas(list(ascii_converter.CHARS))
+        ascii_converter.refresh_palette()
+        # GLYPHS: the palette plus any letters the biography phrase needs.
+        atlas, self.tile_px, pitch = build_atlas(list(ascii_converter.GLYPHS))
         h, w = atlas.shape
         self.atlas = ctx.texture((w, h), 1, np.ascontiguousarray(atlas).tobytes())
         self.atlas.build_mipmaps()
@@ -703,7 +705,9 @@ class LocalAsciiDisplay:
                         self._draw_glow(g_glyphs, g_colours, (width, height), (area_w, area_h),
                                         g_cell_h, strength, quarter)
                 data = np.empty(rows * cols, self.instance_dtype)
-                data['glyph'] = glyphs.ravel()
+                # --ascii-bio spells on the grid as shown, after resampling,
+                # so the phrase reads at every zoom size.
+                data['glyph'] = ascii_converter.apply_bio(glyphs.astype(np.int64)).ravel()
                 data['colour'] = colours.reshape(-1, 3)
                 self.instances.write(data.tobytes())
                 self.program['viewport'].value = (float(width), float(height))

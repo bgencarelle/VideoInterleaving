@@ -26,6 +26,20 @@ ASCII_GAMMA      = .9  # neutral given your LUT definition
 ASCII_PADDING_CHAR = " "     # <--- NEW: Character for pillar/letterboxing
 
 # --- THE GENCARELLE PALETTE ---
+# Built from the subject's biography (bio_constants): the letters of BEN
+# GENCARELLE, the digits of 1978 and the date's separators, with filler
+# letters to fill out the density range.
+#
+# --ascii-bio makes the biography readable (default None: as below):
+#   'palette'  only the biography's characters, in this density order
+#   'runs'     the phrase (name, birth date) runs through the picture; the
+#              faintest cells keep their palette character, so tone survives
+#   'reveal'   the palette as usual, but now and then the phrase surfaces on
+#              one line for a few seconds
+ASCII_BIO = None
+ASCII_BIO_RUNS_KEEP = .8           # 'runs': cells this far toward blank keep their palette character
+ASCII_BIO_REVEAL_EVERY = (6, 20)   # 'reveal': seconds between reveals
+ASCII_BIO_REVEAL_FOR = (2, 5)      # 'reveal': seconds a reveal stays
 ASCII_PALETTE_LIGHT = "MWB8GRDNHESAVTOLPmevncray97stji1-/., "
 ASCII_PALETTE_DARK = " ,.1ijts79yarcnvemCPLOTVASEHNDRG8BWM"
 ASCII_PALETTE = ASCII_PALETTE_LIGHT

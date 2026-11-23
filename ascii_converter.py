@@ -1,10 +1,106 @@
+import random
+import time
+
 import numpy as np
 import cv2
 import settings
 
 # 1. LOAD PALETTE
-_raw_chars = getattr(settings, 'ASCII_PALETTE', 'MB8NG9SEaemvyznocrtlj17i. ')
-CHARS = np.asarray(list(_raw_chars))
+# CHARS is the palette brightness is graded onto (densest first). GLYPHS is
+# CHARS plus any letters of the biography phrase it lacks, so the --ascii-bio
+# looks can spell the phrase; an index from apply_bio() picks from GLYPHS.
+_palette_key = None
+CHARS = GLYPHS = _PHRASE = None
+
+
+def bio_phrase():
+    """The subject's biography as one line: name, birth date (m-d-y), then
+    birth place when one is set."""
+    name = str(getattr(settings, 'SUBJECT_NAME', '') or '').strip()
+    date = ''
+    try:
+        year, month, day = (int(v) for v in
+                            str(getattr(settings, 'BIRTH_TIME', '')).split(',')[:3])
+        date = f"{month}-{day}-{year}"
+    except ValueError:
+        pass
+    place = str(getattr(settings, 'BIRTH_PLACE', '') or '').strip()
+    return ' '.join(part for part in (name, date, place) if part)
+
+
+def refresh_palette():
+    """Rebuild CHARS / GLYPHS when the palette, the bio look or the phrase
+    moved. Gated on the values, as _refresh_gamma_lut is, so it costs one
+    comparison a call."""
+    global _palette_key, CHARS, GLYPHS, _PHRASE
+    raw = getattr(settings, 'ASCII_PALETTE', 'MB8NG9SEaemvyznocrtlj17i. ')
+    bio = getattr(settings, 'ASCII_BIO', None)
+    phrase = bio_phrase()
+    key = (raw, bio, phrase)
+    if key == _palette_key:
+        return
+    _palette_key = key
+    if bio == 'palette' and phrase:
+        # Only the biography's characters, in the palette's own density
+        # order; the blank stays last so dark areas stay dark.
+        keep = set(phrase.upper())
+        raw = ''.join(c for c in raw if c.upper() in keep and c != ' ') + ' '
+    CHARS = np.asarray(list(raw))
+    text = phrase + ' '
+    glyphs = list(raw) + [c for c in dict.fromkeys(text) if c not in raw]
+    GLYPHS = np.asarray(glyphs)
+    first = {}
+    for i, c in enumerate(glyphs):
+        first.setdefault(c, i)
+    _PHRASE = np.array([first[c] for c in text], dtype=np.int64)
+
+
+refresh_palette()
+
+_reveal = {}
+
+
+def apply_bio(indices, now=None):
+    """The --ascii-bio looks that change characters: ``indices`` (graded
+    into CHARS) for the grid as shown, returned as indices into GLYPHS.
+
+    'runs': the phrase runs along the rows, over and over, through every
+    cell but the faintest (those keep their palette character, so the
+    picture's tone and edges survive). 'reveal': as graded, except that now
+    and then the phrase surfaces on one line for a few seconds. Anything
+    else returns ``indices`` unchanged. Apply it to the grid as shown (after
+    any resampling), or the phrase is cut apart.
+    """
+    refresh_palette()
+    bio = getattr(settings, 'ASCII_BIO', None)
+    if bio not in ('runs', 'reveal') or indices.size == 0:
+        return indices
+    rows, cols = indices.shape
+    if bio == 'runs':
+        cut = int(round((len(CHARS) - 1) * float(getattr(settings, 'ASCII_BIO_RUNS_KEEP', .8))))
+        letters = _PHRASE[np.arange(rows * cols) % len(_PHRASE)].reshape(rows, cols)
+        return np.where(indices >= cut, indices, letters)
+    now = time.monotonic() if now is None else now
+    every = getattr(settings, 'ASCII_BIO_REVEAL_EVERY', (6, 20))
+    lasts = getattr(settings, 'ASCII_BIO_REVEAL_FOR', (2, 5))
+    if 'next' not in _reveal:
+        _reveal['next'] = now + random.uniform(*every)
+        _reveal['until'] = 0.0
+    if now >= _reveal['next']:
+        _reveal['until'] = now + random.uniform(*lasts)
+        _reveal['next'] = _reveal['until'] + random.uniform(*every)
+        _reveal['at'] = (random.uniform(.15, .85), random.random())
+    if now >= _reveal['until']:
+        return indices
+    text = _PHRASE[:-1]                    # without the run's trailing space
+    row_at, col_at = _reveal['at']
+    start = (int(row_at * rows) * cols +
+             int(col_at * max(0, cols - len(text))))    # fits the line when it can
+    where = np.arange(start, start + len(text))
+    where = where[where < rows * cols]     # a long phrase on a small grid wraps, then stops
+    out = indices.copy()
+    out.flat[where] = text[:len(where)]
+    return out
 
 # 2. COLOR & GAMMA TABLES
 _ansi_colors = [f"\033[38;5;{i}m" for i in range(256)]
@@ -74,7 +170,9 @@ def grade_cells(frame, *, width=None, height=None, sampled=False):
 
     Returns ``(indices, colours, rows, cols)``: ``indices`` picks from CHARS
     per cell and ``colours`` is the RGB tint per cell (uint8), or ``None`` when
-    ASCII_COLOR is off. This is exactly the work ``to_ascii`` does before it
+    ASCII_COLOR is off. The --ascii-bio phrase is not applied: a caller that
+    resamples the grid applies ``apply_bio`` to the grid it shows. This is
+    exactly the work ``to_ascii`` does before it
     writes text, so a local glyph display and the terminal/web output choose
     the same characters and colours from the same grid.
     """
@@ -147,6 +245,7 @@ def _grade(frame, *, width=None, height=None, sampled=False):
     # --- Step C & D: Map and Compose ---
     gray = cv2.cvtColor(frame_boosted, cv2.COLOR_RGB2GRAY)
     _refresh_gamma_lut()          # no-op unless ASCII_GAMMA actually moved
+    refresh_palette()             # no-op unless the palette or --ascii-bio moved
     gray = cv2.LUT(gray, GAMMA_LUT)
     indices = ((255 - gray) / 255 * (len(CHARS) - 1)).astype(int)
 
@@ -173,7 +272,10 @@ def to_ascii(frame, *, width=None, height=None, sampled=False):
         return ""
     indices, color_source, truecolor, _, max_rows, max_cols = _grade(
         frame, width=width, height=height, sampled=sampled)
-    char_array = CHARS[indices]
+    spelled = apply_bio(indices)
+    # Without a phrase overlay, read CHARS exactly as before: a caller (or a
+    # test) that sets CHARS directly keeps its palette.
+    char_array = (GLYPHS if spelled is not indices else CHARS)[spelled]
 
     if color_source is not None:
         if truecolor:
