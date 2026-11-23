@@ -91,6 +91,9 @@ class Zoom:
         self.walk_rate = float(_setting('LOCAL_ASCII_WALK_RATE', 30))
         low_s, high_s = _setting('LOCAL_ASCII_RANDOM_TRANSITION', (2.0, 8.0))
         self.transition = (max(0.0, float(low_s)), max(0.0, float(low_s), float(high_s)))
+        hold_min, hold_max = _setting('LOCAL_ASCII_HOLD', (6.0, 20.0))
+        self.hold = (max(0.0, float(hold_min)), max(0.0, float(hold_min), float(hold_max)))
+        self.crossfade = bool(_setting('LOCAL_ASCII_CROSSFADE', True))
         self._move = None                  # (start rows, start time, seconds) of a random change
         self._rng = random.Random()
         self._last = time.monotonic()
@@ -98,6 +101,21 @@ class Zoom:
 
     def grid(self):
         return dimensions(self.rows, self.default, self.finest, self.coarsest)
+
+    def layers(self):
+        """What to draw for the current row count: ``[(grid, weight), ...]``.
+
+        Between two whole row counts the two neighbouring grids cross-fade
+        by how far ``rows`` is between them, so a size change glides instead
+        of stepping a row at a time. Off (LOCAL_ASCII_CROSSFADE = False) or
+        on a whole count, one grid at full weight.
+        """
+        low = math.floor(self.rows)
+        part = self.rows - low
+        if not self.crossfade or part < .01 or part > .99:
+            return [(self.grid(), 1.0)]
+        return [(dimensions(low, self.default, self.finest, self.coarsest), 1.0 - part),
+                (dimensions(low + 1, self.default, self.finest, self.coarsest), part)]
 
     # Manual control ---------------------------------------------------------
     def nudge(self, steps):
@@ -113,7 +131,7 @@ class Zoom:
 
     # Per loop ----------------------------------------------------------------
     def update(self, index):
-        """Advance the driver and the walk; True when the shown grid changed."""
+        """Advance the driver and the walk; True when the picture must be redrawn."""
         now = time.monotonic()
         elapsed, self._last = now - self._last, now
         if self.driver == 'random':
@@ -125,7 +143,7 @@ class Zoom:
                 # Time the next pick from when this change lands, so a slow
                 # change is not cut short by the next one.
                 self._random['last_time'] = time.time() + seconds
-        before = self.grid()
+        before = self.grid(), self.rows
         if self._move is not None:
             start, began, seconds = self._move
             t = (now - began) / seconds if seconds > 0 else 1.0
@@ -133,27 +151,33 @@ class Zoom:
                 self.rows, self._move = float(self.target), None
             else:
                 t = max(0.0, t)
-                self.rows = start + (self.target - start) * t * t * (3.0 - 2.0 * t)
+                # smootherstep: no jolt at either end, not just no jump
+                self.rows = start + (self.target - start) * t * t * t * (t * (6.0 * t - 15.0) + 10.0)
         elif self.walk_rate <= 0:
             self.rows = float(self.target)
         else:
             step = self.walk_rate * elapsed
             delta = self.target - self.rows
             self.rows = float(self.target) if abs(delta) <= step else self.rows + math.copysign(step, delta)
-        return self.grid() != before
+        if self.crossfade:
+            return self.rows != before[1]
+        return self.grid() != before[0]
 
 
 def update_zoom_selection(index, zoom, state):
     """Pick zoom targets the way update_folder_selection picks folders.
 
-    Same structure, its own state: rest at the home size while the folders
-    rest (their rest zone, so both settle together), a first pick when the
-    pass leaves it, then periodic picks when the index lands on a modulus
+    Same structure, its own state: the folders leaving their rest zone is a
+    pick (the first one, and later ones too if the size has been held long
+    enough), then periodic picks when the index lands on a modulus
     built from a random multiplier -- offset from the main (3) and float (7)
-    triggers so the three do not always fire together -- at least ~1 s apart
-    and at most ~20 s, with jitter. Picks come from a pre-shuffled deck of
+    triggers so the three do not always fire together -- held at least
+    LOCAL_ASCII_HOLD[0] and at most [1] seconds after a change lands, with
+    jitter. Picks come from a pre-shuffled deck of
     the allowed row counts, so every size comes up before any repeats.
-    Returns the new target, or None to keep the current one.
+    Returns the new target, or None to keep the current one. The folders'
+    rest does not pull the size back home: it comes round once per pass,
+    so a size would only ever get one pass before snapping back.
     """
     from folder_selector import folder_dictionary, LOCAL_CONTROLFPS
     import index_calculator
@@ -171,20 +195,24 @@ def update_zoom_selection(index, zoom, state):
     state.setdefault('last_time', now)
     state.setdefault('active', False)
 
-    if not folder_dictionary.get('active_cycle', False):
-        state['active'] = False                    # folders resting: so is the zoom
-        return zoom.home
-    if not state['active']:
-        state['active'] = True
-        state['last_time'] = now
-        state['rand_mult'] = rng.randint(1, 4)
-        return deck.popleft()
-
     rand_mult = state['rand_mult']
     jitter = rng.uniform(-rand_mult / LOCAL_CONTROLFPS, rand_mult / LOCAL_CONTROLFPS)
-    min_interval = max(1.0, 1.0 + jitter)
-    max_interval = max(min_interval, 20.0 + jitter)
+    hold_min, hold_max = getattr(zoom, 'hold', (6.0, 20.0))
+    min_interval = max(hold_min, hold_min + jitter)
+    max_interval = max(min_interval, hold_max + jitter)
     elapsed = now - state['last_time']
+
+    if not folder_dictionary.get('active_cycle', False):
+        state['active'] = False                    # folders resting: hold the size
+        return None
+    if not state['active']:
+        state['active'] = True
+        if not state.get('started') or elapsed >= min_interval:
+            state['started'] = True
+            state['last_time'] = now
+            state['rand_mult'] = rng.randint(1, 4)
+            return deck.popleft()
+
     period = LOCAL_CONTROLFPS * (1 + rand_mult // 2) + rand_mult
     if (elapsed >= min_interval and index % period == 11 + rand_mult) or elapsed >= max_interval:
         state['last_time'] = now
@@ -323,11 +351,12 @@ void main() {
 
 FRAGMENT = """
 uniform sampler2D atlas;
+uniform float fade;
 in vec2 uv;
 in vec3 tint;
 out vec4 result;
 void main() {
-    result = vec4(tint, texture(atlas, uv).r);
+    result = vec4(tint, texture(atlas, uv).r * fade);
 }
 """
 
@@ -464,18 +493,7 @@ class LocalAsciiDisplay:
         self.dirty = False
         if self.glyphs is None or width <= 0 or height <= 0:
             return
-        cols, rows = self.zoom.grid()
         master_w, master_h = self.master
-        # Nearest master cell per shown cell, as the browser resamples.
-        ys = np.minimum(master_h - 1, ((np.arange(rows) + .5) * master_h / rows).astype(int))
-        xs = np.minimum(master_w - 1, ((np.arange(cols) + .5) * master_w / cols).astype(int))
-        data = np.empty(rows * cols, self.instance_dtype)
-        glyphs = self.glyphs[np.ix_(ys, xs)]
-        colours = self.colours[np.ix_(ys, xs)]
-        data['glyph'] = glyphs.ravel()
-        data['colour'] = colours.reshape(-1, 3)
-        self.instances.write(data.tobytes())
-
         # Fit the picture inside the window, then space rows like the
         # browser: line_spacing apart, fitted to the picture height. The
         # frame is the master grid's shape at every size: each size covers
@@ -486,23 +504,50 @@ class LocalAsciiDisplay:
             area_h, area_w = float(height), height * aspect
         else:
             area_w, area_h = float(width), width / aspect
-        cell_h = area_h / (1 + (rows - 1) * self.line_spacing)
-        cell_w = area_w / cols
-        self.program['viewport'].value = (float(width), float(height))
-        self.program['origin'].value = ((width - area_w) / 2, (height - area_h) / 2)
-        self.program['cell'].value = (cell_w, cell_h)
-        self.program['row_step'].value = cell_h * self.line_spacing
-        self.program['columns'].value = cols
+        origin = ((width - area_w) / 2, (height - area_h) / 2)
+
         import moderngl
         self.atlas.use(0)
         self.ctx.enable(moderngl.BLEND)
         self.ctx.blend_func = moderngl.SRC_ALPHA, moderngl.ONE_MINUS_SRC_ALPHA
         try:
-            strength = glow_strength(cell_h, self.glow, self.glow_from, self.glow_full)
-            if strength > 0:
-                self._draw_glow(glyphs, colours, (width, height), (area_w, area_h),
-                                cell_h, strength)
-            self.vao.render(mode=moderngl.TRIANGLE_STRIP, instances=rows * cols)
+            layers = self.zoom.layers()
+            # Mid-change two neighbouring grids cross-fade (one at weight
+            # 1-f, one at f); their letters barely overlap, so the overall
+            # ink stays the same through the fade.
+            for n, ((cols, rows), weight) in enumerate(layers):
+                # Nearest master cell per shown cell, as the browser resamples.
+                ys = np.minimum(master_h - 1, ((np.arange(rows) + .5) * master_h / rows).astype(int))
+                xs = np.minimum(master_w - 1, ((np.arange(cols) + .5) * master_w / cols).astype(int))
+                glyphs = self.glyphs[np.ix_(ys, xs)]
+                colours = self.colours[np.ix_(ys, xs)]
+                cell_h = area_h / (1 + (rows - 1) * self.line_spacing)
+                if n == 0:
+                    # Glow once, from the grid that dominates.
+                    g_glyphs, g_colours, g_cell_h = glyphs, colours, cell_h
+                    if len(layers) > 1 and layers[1][1] > weight:
+                        (g_cols, g_rows), _ = layers[1]
+                        g_ys = np.minimum(master_h - 1, ((np.arange(g_rows) + .5) * master_h / g_rows).astype(int))
+                        g_xs = np.minimum(master_w - 1, ((np.arange(g_cols) + .5) * master_w / g_cols).astype(int))
+                        g_glyphs = self.glyphs[np.ix_(g_ys, g_xs)]
+                        g_colours = self.colours[np.ix_(g_ys, g_xs)]
+                        g_cell_h = area_h / (1 + (g_rows - 1) * self.line_spacing)
+                    strength = glow_strength(g_cell_h, self.glow, self.glow_from, self.glow_full)
+                    if strength > 0:
+                        self._draw_glow(g_glyphs, g_colours, (width, height), (area_w, area_h),
+                                        g_cell_h, strength)
+                data = np.empty(rows * cols, self.instance_dtype)
+                data['glyph'] = glyphs.ravel()
+                data['colour'] = colours.reshape(-1, 3)
+                self.instances.write(data.tobytes())
+                self.program['viewport'].value = (float(width), float(height))
+                self.program['origin'].value = origin
+                self.program['cell'].value = (area_w / cols, cell_h)
+                self.program['row_step'].value = cell_h * self.line_spacing
+                self.program['columns'].value = cols
+                self.program['fade'].value = float(weight)
+                self.atlas.use(0)
+                self.vao.render(mode=moderngl.TRIANGLE_STRIP, instances=rows * cols)
         finally:
             self.ctx.disable(moderngl.BLEND)
 

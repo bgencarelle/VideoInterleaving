@@ -133,8 +133,8 @@ class RandomTransitionTests(unittest.TestCase):
     def test_change_takes_the_drawn_time_and_eases(self):
         self.picks.append(80)
         self.step(0)
-        self.step(1.0)                         # quarter way: smoothstep(.25) = .15625
-        self.assertAlmostEqual(self.zoom.rows, 40 + 40 * .15625)
+        self.step(1.0)                         # quarter way: smootherstep(.25) = .103515625
+        self.assertAlmostEqual(self.zoom.rows, 40 + 40 * .103515625)
         self.step(1.0)                         # halfway in time is halfway in size
         self.assertAlmostEqual(self.zoom.rows, 60.0)
         self.step(2.0)
@@ -151,6 +151,27 @@ class RandomTransitionTests(unittest.TestCase):
         self.step(1.0)
         self.zoom.nudge(-1)                    # wheel: walk at the manual rate from here
         self.assertIsNone(self.zoom._move)
+
+    def test_mid_change_the_neighbouring_grids_cross_fade(self):
+        self.zoom.rows = 50.25
+        (low, w_low), (high, w_high) = self.zoom.layers()
+        self.assertEqual((low, high), (dimensions(50, DEFAULT, MASTER), dimensions(51, DEFAULT, MASTER)))
+        self.assertAlmostEqual(w_low, .75)
+        self.assertAlmostEqual(w_high, .25)
+        self.zoom.rows = 50.0
+        self.assertEqual(self.zoom.layers(), [(dimensions(50, DEFAULT, MASTER), 1.0)])
+
+    def test_cross_fade_redraws_every_step_of_a_change(self):
+        self.picks.append(80)
+        self.step(0)
+        self.clock[0] += .01                   # less than a row's worth
+        self.assertTrue(self.zoom.update(0))
+
+    def test_without_cross_fade_one_grid_is_drawn(self):
+        with settings(LOCAL_ASCII_CROSSFADE=False):
+            zoom = Zoom(COARSE, DEFAULT, MASTER)
+        zoom.rows = 50.25
+        self.assertEqual(zoom.layers(), [(dimensions(50, DEFAULT, MASTER), 1.0)])
 
     def test_range_is_drawn_from(self):
         with settings(LOCAL_ASCII_RANDOM_TRANSITION=(2.0, 8.0)):
@@ -176,8 +197,27 @@ class RandomDriverTests(unittest.TestCase):
     def pick(self, index=0):
         return update_zoom_selection(index, self.zoom, self.state)
 
-    def test_rests_at_home_while_the_folders_rest(self):
-        self.assertEqual(self.pick(), 25)
+    def test_waits_while_the_folders_rest_at_startup(self):
+        self.assertIsNone(self.pick())
+
+    def test_the_folders_rest_does_not_pull_the_size_home(self):
+        self.folders['active_cycle'] = True
+        self.pick()
+        self.folders['active_cycle'] = False       # the pass comes round
+        self.now[0] += 30
+        self.assertIsNone(self.pick())
+        self.folders['active_cycle'] = True        # and leaves rest: a new size
+        self.assertIn(self.pick(), range(20, 30))
+
+    def test_leaving_rest_soon_after_a_pick_keeps_the_hold(self):
+        self.zoom.hold = (6.0, 20.0)
+        self.folders['active_cycle'] = True
+        self.pick()
+        self.folders['active_cycle'] = False
+        self.now[0] += 2
+        self.pick()
+        self.folders['active_cycle'] = True
+        self.assertIsNone(self.pick())
 
     def test_first_pick_when_the_folders_leave_rest(self):
         self.pick()
@@ -185,6 +225,14 @@ class RandomDriverTests(unittest.TestCase):
         first = self.pick()
         self.assertIn(first, range(20, 30))
         self.assertIsNone(self.pick())         # not again straight away
+
+    def test_a_size_is_held_at_least_the_minimum(self):
+        self.zoom.hold = (6.0, 20.0)
+        self.folders['active_cycle'] = True
+        self.pick()
+        for index in range(400):               # every modulus slot, 5 s after
+            self.now[0] = 1005.0
+            self.assertIsNone(self.pick(index))
 
     def test_long_quiet_spell_forces_a_pick(self):
         self.folders['active_cycle'] = True

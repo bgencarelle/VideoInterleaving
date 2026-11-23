@@ -37,17 +37,24 @@ Two drivers set it:
 - **Mouse and keys:** wheel, `+`/`-`, `0` resets. Touching them takes over
   from the random driver; `0` hands control back.
 - **Random** (`LOCAL_ASCII_ZOOM = 'random'`): built like the folder
-  selector. It rests at the home size while the folders rest, picks when
-  they leave rest, then picks when the index lands on its own modulus
-  (offset from the main and float triggers), at least ~1 s and at most ~20 s
-  apart, from a shuffled deck of the allowed sizes. MIDI clock holds the
-  home size.
+  selector. It starts at the home size, picks when the folders leave
+  their rest zone (and again each time they do, once the size has been
+  held long enough; the rest itself does not pull it home), and picks when
+  the index lands on its own modulus
+  (offset from the main and float triggers), from a shuffled deck of the
+  allowed sizes. Each size is held at least and at most `LOCAL_ASCII_HOLD`
+  (default 6-20 s) after its change lands. MIDI clock holds the home size.
 
 Mouse and key changes walk at `LOCAL_ASCII_WALK_RATE` rows a second (0
 jumps). Each random change takes its own random time from
-`LOCAL_ASCII_RANDOM_TRANSITION` (default 2-8 s) and eases in and out; the
+`LOCAL_ASCII_RANDOM_TRANSITION` (default 2-8 s) and eases in and out
+(smootherstep); the
 next random pick is timed from when it lands, so a slow change is never cut
 short.
+
+While the size is between two whole row counts, the two neighbouring grids
+cross-fade (`LOCAL_ASCII_CROSSFADE`), so a change glides rather than
+stepping a row at a time.
 
 The finest grid can be set per run: `--mode asciilocal --ascii-grid 200x120`
 (at least 15x10). Zoom then ranges from 15x10 up to it.
@@ -83,12 +90,14 @@ Example: `--mode asciilocal --ascii-glow 0.6 --ascii-strokes 0.5`.
 | `LOCAL_ASCII_ZOOM` | `'random'` | `'random'` or `'manual'` |
 | `LOCAL_ASCII_WALK_RATE` | 30 | Mouse/keys: rows per second toward a new size |
 | `LOCAL_ASCII_RANDOM_TRANSITION` | `(2.0, 8.0)` | Random driver: seconds each change takes, drawn per change, eased; `(0, 0)` jumps |
+| `LOCAL_ASCII_HOLD` | `(6.0, 20.0)` | Random driver: seconds each size stays, at least / at most, after its change lands |
+| `LOCAL_ASCII_CROSSFADE` | True | Cross-fade neighbouring grid sizes mid-change |
 | `LOCAL_ASCII_LINE_SPACING` | 1.05 | As the web viewer |
 | `LOCAL_ASCII_GLOW` | 0 | `--ascii-glow`: neighbouring cells' colour under small letters |
 | `LOCAL_ASCII_GLOW_FROM` | 32 | Cell height (pixels) where the glow starts |
 | `LOCAL_ASCII_GLOW_FULL` | 8 | Cell height (pixels) from which it is at full strength |
 | `LOCAL_ASCII_STROKES` | 0 | `--ascii-strokes`: keep small letters bright |
-| `LOCAL_ASCII_FONT` | Schoolbook Mono Black | Any font Pillow can open |
+| `LOCAL_ASCII_FONT` | `CenturySchoolbookBold.ttf` | Path to any TTF/OTF/WOFF2 Pillow can open, from the repo root or absolute |
 
 The range is a look decision: set it by eye on the display it runs on.
 
