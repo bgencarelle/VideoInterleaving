@@ -10,9 +10,11 @@ instanced draw, so a weak machine uploads a few kilobytes per picture.
 Size control is the browser's (static/ascii_resolution.js): one row count,
 mapped to a grid by ``dimensions()`` through the default size, and each shown
 cell picks the nearest master cell. The row count is set by the mouse wheel
-and keys, or by a random driver built like the folder selector. The local
-master is ``ASCII_WEB_MAX_SIZE`` times ``LOCAL_ASCII_MULTIPLIER``, sampled on
-this machine, so finer grids cost no other viewer anything.
+and keys, or by a random driver built like the folder selector, whose changes
+each take a random time and ease in and out. The local master is
+``LOCAL_ASCII_GRID`` (``--ascii-grid``), or ``ASCII_WEB_MAX_SIZE`` times
+``LOCAL_ASCII_MULTIPLIER``, sampled on this machine, so finer grids cost no
+other viewer anything.
 """
 from collections import deque
 import math
@@ -65,9 +67,12 @@ def dimensions(rows, default, finest, coarsest=(15, 10)):
 class Zoom:
     """The row count, and what moves it: mouse/keys or the random driver.
 
-    ``target`` is where the driver wants to be; ``rows`` walks there at
-    LOCAL_ASCII_WALK_RATE rows a second (0 jumps). Touching the wheel or keys
-    takes over from the random driver; ``0`` hands it back.
+    ``target`` is where the driver wants to be. Mouse and keys walk ``rows``
+    there at LOCAL_ASCII_WALK_RATE rows a second (0 jumps). Each random change
+    instead takes a time drawn from LOCAL_ASCII_RANDOM_TRANSITION and eases in
+    and out (smoothstep), and the next random pick is timed from when it
+    lands. Touching the wheel or keys takes over from the random driver; ``0``
+    hands it back.
     """
 
     def __init__(self, coarsest, default, finest):
@@ -83,6 +88,10 @@ class Zoom:
         self.target = self.home
         self.driver = 'random' if _setting('LOCAL_ASCII_ZOOM', 'random') == 'random' else 'manual'
         self.walk_rate = float(_setting('LOCAL_ASCII_WALK_RATE', 30))
+        low_s, high_s = _setting('LOCAL_ASCII_RANDOM_TRANSITION', (2.0, 8.0))
+        self.transition = (max(0.0, float(low_s)), max(0.0, float(low_s), float(high_s)))
+        self._move = None                  # (start rows, start time, seconds) of a random change
+        self._rng = random.Random()
         self._last = time.monotonic()
         self._random = {}
 
@@ -92,24 +101,39 @@ class Zoom:
     # Manual control ---------------------------------------------------------
     def nudge(self, steps):
         self.driver = 'manual'
+        self._move = None
         self.target = max(self.low, min(self.high, int(round(self.target)) + steps))
 
     def reset(self):
         self.driver = 'random' if _setting('LOCAL_ASCII_ZOOM', 'random') == 'random' else 'manual'
         self.target = self.home
+        self._move = None
         self._random.clear()
 
     # Per loop ----------------------------------------------------------------
     def update(self, index):
         """Advance the driver and the walk; True when the shown grid changed."""
-        if self.driver == 'random':
-            picked = update_zoom_selection(index, self, self._random)
-            if picked is not None:
-                self.target = picked
-        before = self.grid()
         now = time.monotonic()
         elapsed, self._last = now - self._last, now
-        if self.walk_rate <= 0:
+        if self.driver == 'random':
+            picked = update_zoom_selection(index, self, self._random)
+            if picked is not None and picked != self.target:
+                self.target = picked
+                seconds = self._rng.uniform(*self.transition)
+                self._move = (self.rows, now, seconds)
+                # Time the next pick from when this change lands, so a slow
+                # change is not cut short by the next one.
+                self._random['last_time'] = time.time() + seconds
+        before = self.grid()
+        if self._move is not None:
+            start, began, seconds = self._move
+            t = (now - began) / seconds if seconds > 0 else 1.0
+            if t >= 1.0:
+                self.rows, self._move = float(self.target), None
+            else:
+                t = max(0.0, t)
+                self.rows = start + (self.target - start) * t * t * (3.0 - 2.0 * t)
+        elif self.walk_rate <= 0:
             self.rows = float(self.target)
         else:
             step = self.walk_rate * elapsed
@@ -249,12 +273,19 @@ class LocalAsciiDisplay:
         import moderngl
         self.ctx = ctx
         base = tuple(_setting('ASCII_WEB_MAX_SIZE', (120, 80)))
-        mult = max(1, int(_setting('LOCAL_ASCII_MULTIPLIER', 1)))
+        grid = _setting('LOCAL_ASCII_GRID', None)
+        if grid:
+            self.master = (int(grid[0]), int(grid[1]))
+        else:
+            mult = max(1, int(_setting('LOCAL_ASCII_MULTIPLIER', 1)))
+            self.master = (base[0] * mult, base[1] * mult)
+        # 'all' scales the coarse and default sizes by as much as the master
+        # grew over the web's 120x80; 'fine' leaves them where the web has them.
         whole_scale = _setting('LOCAL_ASCII_MULTIPLY', 'fine') == 'all'
-        self.master = (base[0] * mult, base[1] * mult)
-        scale = mult if whole_scale else 1
-        coarsest = (15 * scale, 10 * scale)
-        default = (_setting('ASCII_WIDTH', 60) * scale, _setting('ASCII_HEIGHT', 40) * scale)
+        scale = max(1.0, self.master[1] / base[1]) if whole_scale else 1.0
+        coarsest = (_js_round(15 * scale), _js_round(10 * scale))
+        default = (_js_round(_setting('ASCII_WIDTH', 60) * scale),
+                   _js_round(_setting('ASCII_HEIGHT', 40) * scale))
         self.zoom = Zoom(coarsest, default, self.master)
         self.line_spacing = float(_setting('LOCAL_ASCII_LINE_SPACING', 1.05))
         self.target = ctx.simple_framebuffer(self.master, components=3)
@@ -288,7 +319,8 @@ class LocalAsciiDisplay:
         self.dirty = True
         print(f"[ASCII-LOCAL] Master grid {self.master[0]}x{self.master[1]}; "
               f"rows {self.zoom.low}-{self.zoom.high}, home {self.zoom.home}; "
-              f"zoom: {self.zoom.driver}")
+              f"zoom: {self.zoom.driver}, random changes "
+              f"{self.zoom.transition[0]:g}-{self.zoom.transition[1]:g} s")
 
     # Input -------------------------------------------------------------------
     def attach(self, window):

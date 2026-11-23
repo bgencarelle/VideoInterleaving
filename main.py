@@ -151,6 +151,13 @@ def configure_runtime():
     )
 
     parser.add_argument(
+        "--ascii-grid",
+        metavar="COLSxROWS",
+        help="--mode asciilocal: finest grid, e.g. 200x120 (default "
+             "ASCII_WEB_MAX_SIZE, 120x80). Zoom ranges up to it"
+    )
+
+    parser.add_argument(
         "--dir",
         help="Path to image source folder (overrides settings.py)"
     )
@@ -618,6 +625,18 @@ def configure_runtime():
     # Options that only mean anything in one mode; say so rather than silently
     # ignoring them. The whole point of a knob is that turning it does
     # something, and a flag accepted in the wrong mode does nothing quietly.
+    if args.ascii_grid is not None:
+        if not settings.LOCAL_ASCII:
+            print("⚠️  --ascii-grid ignored: it applies to --mode asciilocal. "
+                  "Each mode in VideoInterleaving runs standalone.")
+        else:
+            try:
+                cols, rows = (int(v) for v in args.ascii_grid.lower().split("x"))
+            except ValueError:
+                parser.error("--ascii-grid takes COLSxROWS, e.g. 200x120")
+            if cols < 15 or rows < 10:
+                parser.error("--ascii-grid must be at least 15x10 (the coarsest size)")
+            settings.LOCAL_ASCII_GRID = (cols, rows)
     if args.mode not in ("ascii", "asciiweb") and not settings.LOCAL_ASCII:
         _ascii_used = [f for f, v in (("--ascii-contrast", args.ascii_contrast),
                                       ("--ascii-brightness", args.ascii_brightness),

@@ -32,7 +32,8 @@ class DimensionsTests(unittest.TestCase):
 
 def settings(**values):
     defaults = dict(LOCAL_ASCII_ROWS=(None, None), LOCAL_ASCII_HOME_ROWS=None,
-                    LOCAL_ASCII_ZOOM='random', LOCAL_ASCII_WALK_RATE=0)
+                    LOCAL_ASCII_ZOOM='random', LOCAL_ASCII_WALK_RATE=0,
+                    LOCAL_ASCII_RANDOM_TRANSITION=(0, 0))
     defaults.update(values)
     return mock.patch.multiple(local_ascii.settings, create=True, **defaults)
 
@@ -82,6 +83,57 @@ class ZoomTests(unittest.TestCase):
         zoom.nudge(-30)
         zoom.update(0)
         self.assertEqual(zoom.rows, 10.0)
+
+
+class RandomTransitionTests(unittest.TestCase):
+    """Random changes take a random time, ease in and out, and the next pick
+    waits for the change to land."""
+
+    def setUp(self):
+        self.clock = [100.0]
+        self.wall = [1000.0]
+        self.picks = []
+        patches = [mock.patch.object(local_ascii.time, 'monotonic', lambda: self.clock[0]),
+                   mock.patch.object(local_ascii.time, 'time', lambda: self.wall[0]),
+                   mock.patch.object(local_ascii, 'update_zoom_selection',
+                                     lambda index, zoom, state: self.picks.pop(0) if self.picks else None)]
+        for p in patches:
+            p.start()
+            self.addCleanup(p.stop)
+        with settings(LOCAL_ASCII_RANDOM_TRANSITION=(4.0, 4.0), LOCAL_ASCII_WALK_RATE=30):
+            self.zoom = Zoom(COARSE, DEFAULT, MASTER)       # home 40 rows
+
+    def step(self, seconds):
+        self.clock[0] += seconds
+        self.wall[0] += seconds
+        self.zoom.update(0)
+
+    def test_change_takes_the_drawn_time_and_eases(self):
+        self.picks.append(80)
+        self.step(0)
+        self.step(1.0)                         # quarter way: smoothstep(.25) = .15625
+        self.assertAlmostEqual(self.zoom.rows, 40 + 40 * .15625)
+        self.step(1.0)                         # halfway in time is halfway in size
+        self.assertAlmostEqual(self.zoom.rows, 60.0)
+        self.step(2.0)
+        self.assertEqual(self.zoom.rows, 80.0)
+
+    def test_next_pick_is_timed_from_when_the_change_lands(self):
+        self.picks.append(80)
+        self.step(0)
+        self.assertEqual(self.zoom._random['last_time'], self.wall[0] + 4.0)
+
+    def test_hand_control_drops_the_slow_change(self):
+        self.picks.append(80)
+        self.step(0)
+        self.step(1.0)
+        self.zoom.nudge(-1)                    # wheel: walk at the manual rate from here
+        self.assertIsNone(self.zoom._move)
+
+    def test_range_is_drawn_from(self):
+        with settings(LOCAL_ASCII_RANDOM_TRANSITION=(2.0, 8.0)):
+            zoom = Zoom(COARSE, DEFAULT, MASTER)
+        self.assertEqual(zoom.transition, (2.0, 8.0))
 
 
 class RandomDriverTests(unittest.TestCase):
