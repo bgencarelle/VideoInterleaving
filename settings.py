@@ -108,7 +108,7 @@ LOCAL_ASCII_GLOW = 0.0           # --ascii-glow: neighbouring cells' colour unde
 LOCAL_ASCII_GLOW_FROM = 32       # Glow starts when cells are this many pixels high...
 LOCAL_ASCII_GLOW_FULL = 8        # ...and is at full strength from this height down.
 LOCAL_ASCII_STROKES = 0.0        # --ascii-strokes: keep small letters bright (0 averaged as before, 1 brightest pixel).
-LOCAL_ASCII_FONT = 'static/fonts/schoolbook-mono/InterleaveSchoolbookMono-Black.woff2'  # weight 900, as on the web
+LOCAL_ASCII_FONT =  'CenturySchoolbookBold.ttf' #'static/fonts/schoolbook-mono/InterleaveSchoolbookMono-Black.woff2'  # weight 900, as on the web
 JPEG_QUALITY = 60# Image quality (lower = fewer bytes per frame on slow links)
 HEADLESS_RES = (320, 400)   # Resolution for the virtual screen (web frame size)
 
