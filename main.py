@@ -89,7 +89,7 @@ def configure_runtime():
 
     parser.add_argument(
         "--mode",
-        choices=["web", "ascii", "asciiweb", "local", "scope", "modem"],
+        choices=["web", "ascii", "asciiweb", "local", "asciilocal", "scope", "modem"],
         default="local",
         help="Operating Mode (default: local)"
     )
@@ -128,7 +128,7 @@ def configure_runtime():
         metavar="F",
         help="ASCII grading contrast, scaled about mid-grey "
              "(default: ASCII_CONTRAST, 1.0 = neutral, >1 more punch, "
-             "<1 flatter). Applies to --mode ascii and asciiweb"
+             "<1 flatter). Applies to --mode ascii, asciiweb and asciilocal"
     )
 
     parser.add_argument(
@@ -148,13 +148,6 @@ def configure_runtime():
         help="ASCII gamma on the grey the character is chosen from "
              "(default: ASCII_GAMMA, 1.0 = linear, <1 lifts shadows). "
              "Applied last, after contrast and brightness"
-    )
-
-    parser.add_argument(
-        "--ascii-display",
-        action="store_true",
-        help="--mode local only: show the picture as ASCII glyphs in the window "
-             "(zoom: mouse wheel, +/-, 0 resets; LOCAL_ASCII_* in settings.py)"
     )
 
     parser.add_argument(
@@ -455,6 +448,13 @@ def configure_runtime():
     parser.add_argument("--modem-frame-duration", type=float, default=1.0,
                         help="Existing MIDI clock's frame scaling factor")
     args = parser.parse_args()
+    # asciilocal is local mode whose window shows the ASCII picture as glyphs
+    # (zoom: mouse wheel, +/-, 0 resets; LOCAL_ASCII_* in settings.py). From
+    # here on it runs as local; only the process title keeps its own name.
+    process_title = args.mode
+    settings.LOCAL_ASCII = args.mode == "asciilocal"
+    if settings.LOCAL_ASCII:
+        args.mode = "local"
     settings.LAYER_BAKE_DIR = None
     if args.bake_dir:
         if args.dir or args.xy_dir or args.modem_dir:
@@ -491,7 +491,7 @@ def configure_runtime():
     settings.LOCAL_FRAME_PORT = args.local_frame_port
     settings.LOCAL_FRAME_FPS = (args.local_frame_fps or
                                 getattr(settings, "FPS", 30))
-    _set_process_title(args.mode)
+    _set_process_title(process_title)
 
     if args.mode == "modem":
         if args.modem_frames < 0:
@@ -618,20 +618,14 @@ def configure_runtime():
     # Options that only mean anything in one mode; say so rather than silently
     # ignoring them. The whole point of a knob is that turning it does
     # something, and a flag accepted in the wrong mode does nothing quietly.
-    if args.ascii_display:
-        if args.mode == "local":
-            settings.LOCAL_ASCII = True
-        else:
-            print("⚠️  --ascii-display ignored: it applies to --mode local. "
-                  "Each mode in VideoInterleaving runs standalone.")
-    if args.mode not in ("ascii", "asciiweb") and not (args.mode == "local" and args.ascii_display):
+    if args.mode not in ("ascii", "asciiweb") and not settings.LOCAL_ASCII:
         _ascii_used = [f for f, v in (("--ascii-contrast", args.ascii_contrast),
                                       ("--ascii-brightness", args.ascii_brightness),
                                       ("--ascii-gamma", args.ascii_gamma))
                        if v is not None]
         if _ascii_used:
             print(f"⚠️  {', '.join(_ascii_used)} ignored: these apply to "
-                  f"--mode ascii, asciiweb, and local with --ascii-display. "
+                  f"--mode ascii, asciiweb and asciilocal. "
                   f"Each mode in VideoInterleaving runs standalone.")
 
     # Scope options only mean anything in scope mode; say so rather than

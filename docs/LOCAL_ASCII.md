@@ -1,6 +1,6 @@
 # Local ASCII display
 
-`--mode local --ascii-display` (or `scripts/run_app.sh --local-ascii`) shows
+`--mode asciilocal` (or `scripts/run_app.sh --asciilocal`) shows
 the ASCII picture fullscreen in the local window, as glyphs, instead of the
 images themselves. It is local mode in every other respect: the same window,
 fullscreen and kiosk setup, frame loading, pacing, folder selection and

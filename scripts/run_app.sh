@@ -104,8 +104,8 @@ parse_args() {
                     args="$args --mode local --dir ${SBS_DIR:-images_sbs}"
                     mode_specified=true
                     ;;
-                --local-ascii)
-                    args="$args --mode local --ascii-display --dir ${SBS_DIR:-images_sbs}"
+                --asciilocal)
+                    args="$args --mode asciilocal --dir ${SBS_DIR:-images_sbs}"
                     mode_specified=true
                     ;;
                 --scope)

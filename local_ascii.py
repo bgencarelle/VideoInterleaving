@@ -1,4 +1,4 @@
-"""Fullscreen ASCII in the local window (``--mode local --ascii-display``).
+"""Fullscreen ASCII in the local window (``--mode asciilocal``).
 
 The picture is the one ASCII mode makes: both layers are sampled on the GPU
 into a master character grid, graded, and given characters by

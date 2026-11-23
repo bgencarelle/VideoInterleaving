@@ -501,7 +501,7 @@ def run_display(clock_source=CLOCK_MODE):
         print(f'[ASCII] Direct source-layer grids: {grid_description}; '
               f'colour blur={settings.ASCII_COLOR_BLUR}; no post-grid resize; '
               f'truecolour={settings.ASCII_TRUECOLOR}; tint brightness={settings.ASCII_COLOR_BRIGHTNESS}')
-    # Local ASCII (--mode local --ascii-display): the window shows the ASCII
+    # Local ASCII (--mode asciilocal): the window shows the ASCII
     # picture as glyphs instead of the images themselves.
     local_ascii = None
     if getattr(settings, 'LOCAL_ASCII', False):

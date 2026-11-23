@@ -93,8 +93,8 @@ ASCII_WEB_MAX_SIZE = (120, 80)  # Live web master; terminal scales remain separa
 ASCII_WEB_SOURCE_SIZE = None  # Enabled only in asciiweb; baked packages keep their own grid.
 ASCII_SOURCE_IMAGE_ASPECT_RATIO = 1.333333333
 
-# --- Local ASCII display (--mode local --ascii-display) ---
-LOCAL_ASCII = False              # Set by --ascii-display.
+# --- Local ASCII display (--mode asciilocal) ---
+LOCAL_ASCII = False              # Set by --mode asciilocal.
 LOCAL_ASCII_MULTIPLIER = 1       # Local master = ASCII_WEB_MAX_SIZE x this (2 -> 240x160). Sampled on this machine only.
 LOCAL_ASCII_MULTIPLY = 'fine'    # 'fine': only the finest end grows; 'all': coarsest and default sizes scale too.
 LOCAL_ASCII_ROWS = (None, None)  # Allowed row range (min, max); None = 10 / the master's rows.
