@@ -110,6 +110,25 @@ class ZoomTests(unittest.TestCase):
             self.assertEqual(got, rows)
             self.assertAlmostEqual(cols / rows, 269 / 80, delta=.06)
 
+    def test_wheel_scales_by_the_same_proportion_at_every_size(self):
+        zoom = self.make(LOCAL_ASCII_ZOOM='manual')
+        zoom.rows = 20.0
+        zoom.scale(1.5)
+        self.assertEqual((zoom.driver, zoom.target), ('manual', 30.0))
+        zoom.rows = 40.0
+        zoom.scale(1.5)
+        self.assertEqual(zoom.target, 60.0)
+        zoom.scale(100)
+        self.assertEqual(zoom.target, 80.0)
+
+    def test_keys_move_one_whole_row_from_a_fractional_size(self):
+        zoom = self.make(LOCAL_ASCII_ZOOM='manual')
+        zoom.rows = 40.4
+        zoom.nudge(-1)
+        self.assertEqual(zoom.target, 40)
+        zoom.nudge(1)
+        self.assertEqual(zoom.target, 41)
+
     def test_zero_walk_rate_jumps(self):
         zoom = self.make(LOCAL_ASCII_ZOOM='manual')
         zoom.nudge(-30)
@@ -144,9 +163,9 @@ class RandomTransitionTests(unittest.TestCase):
         self.picks.append(80)
         self.step(0)
         self.step(1.0)                         # quarter way: smootherstep(.25) = .103515625
-        self.assertAlmostEqual(self.zoom.rows, 40 + 40 * .103515625)
-        self.step(1.0)                         # halfway in time is halfway in size
-        self.assertAlmostEqual(self.zoom.rows, 60.0)
+        self.assertAlmostEqual(self.zoom.rows, 40 * 2 ** .103515625)
+        self.step(1.0)                         # halfway in time is halfway in ratio
+        self.assertAlmostEqual(self.zoom.rows, 40 * 2 ** .5)
         self.step(2.0)
         self.assertEqual(self.zoom.rows, 80.0)
 
@@ -163,6 +182,7 @@ class RandomTransitionTests(unittest.TestCase):
         self.assertIsNone(self.zoom._move)
 
     def test_mid_change_the_neighbouring_grids_cross_fade(self):
+        self.zoom.crossfade = True
         self.zoom.rows = 50.25
         (low, w_low), (high, w_high) = self.zoom.layers()
         self.assertEqual((low, high), (dimensions(50, DEFAULT, MASTER), dimensions(51, DEFAULT, MASTER)))
@@ -172,10 +192,15 @@ class RandomTransitionTests(unittest.TestCase):
         self.assertEqual(self.zoom.layers(), [(dimensions(50, DEFAULT, MASTER), 1.0)])
 
     def test_cross_fade_redraws_every_step_of_a_change(self):
+        self.zoom.crossfade = True
         self.picks.append(80)
         self.step(0)
         self.clock[0] += .01                   # less than a row's worth
         self.assertTrue(self.zoom.update(0))
+
+    def test_cross_fade_is_off_by_default(self):
+        with settings():
+            self.assertFalse(Zoom(COARSE, DEFAULT, MASTER).crossfade)
 
     def test_without_cross_fade_one_grid_is_drawn(self):
         with settings(LOCAL_ASCII_CROSSFADE=False):

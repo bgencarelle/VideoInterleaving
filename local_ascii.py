@@ -27,6 +27,7 @@ import ascii_converter
 import renderer
 import settings
 
+WHEEL_PER_PIXEL = .0015    # static/ascii_viewer.js: resolution * exp(deltaY * .0015)
 ATLAS_FONT_PX = 96        # glyphs are drawn once, large, and mipmapped down
 ATLAS_COLUMNS = 8
 ATLAS_GUTTER = 8          # empty pixels around each tile: small mip levels must not bleed
@@ -68,11 +69,12 @@ def dimensions(rows, default, finest, coarsest=(15, 10)):
 class Zoom:
     """The row count, and what moves it: mouse/keys or the random driver.
 
-    ``target`` is where the driver wants to be. Mouse and keys walk ``rows``
-    there at LOCAL_ASCII_WALK_RATE rows a second (0 jumps). Each random change
-    instead takes a time drawn from LOCAL_ASCII_RANDOM_TRANSITION and eases in
-    and out (smoothstep), and the next random pick is timed from when it
-    lands. Touching the wheel or keys takes over from the random driver; ``0``
+    ``target`` is where the driver wants to be. Mouse and keys act as in the
+    browser: the wheel scales the row count, keys move one row, both instant
+    (LOCAL_ASCII_WALK_RATE > 0 walks instead). Each random change takes a
+    time drawn from LOCAL_ASCII_RANDOM_TRANSITION, eases in and out
+    (smootherstep) and moves proportionally, as a wheel zoom does; the next
+    random pick is timed from when it lands. Touching the wheel or keys takes over from the random driver; ``0``
     hands it back.
     """
 
@@ -88,12 +90,12 @@ class Zoom:
         self.rows = float(self.home)
         self.target = self.home
         self.driver = 'random' if _setting('LOCAL_ASCII_ZOOM', 'random') == 'random' else 'manual'
-        self.walk_rate = float(_setting('LOCAL_ASCII_WALK_RATE', 30))
+        self.walk_rate = float(_setting('LOCAL_ASCII_WALK_RATE', 0))
         low_s, high_s = _setting('LOCAL_ASCII_RANDOM_TRANSITION', (2.0, 8.0))
         self.transition = (max(0.0, float(low_s)), max(0.0, float(low_s), float(high_s)))
         hold_min, hold_max = _setting('LOCAL_ASCII_HOLD', (6.0, 20.0))
         self.hold = (max(0.0, float(hold_min)), max(0.0, float(hold_min), float(hold_max)))
-        self.crossfade = bool(_setting('LOCAL_ASCII_CROSSFADE', True))
+        self.crossfade = bool(_setting('LOCAL_ASCII_CROSSFADE', False))
         self.cols_for = None               # picture/window shape: rows -> cols in proportion
         self._move = None                  # (start rows, start time, seconds) of a random change
         self._rng = random.Random()
@@ -127,9 +129,18 @@ class Zoom:
 
     # Manual control ---------------------------------------------------------
     def nudge(self, steps):
+        """Keys, as the browser: one whole row from where the size is now."""
         self.driver = 'manual'
         self._move = None
-        self.target = max(self.low, min(self.high, int(round(self.target)) + steps))
+        here = math.ceil(self.rows) if steps < 0 else math.floor(self.rows)
+        self.target = max(self.low, min(self.high, here + steps))
+
+    def scale(self, factor):
+        """Wheel, as the browser: the row count times a factor, so each notch
+        changes the size by the same proportion at every size."""
+        self.driver = 'manual'
+        self._move = None
+        self.target = max(float(self.low), min(float(self.high), self.rows * factor))
 
     def reset(self):
         self.driver = 'random' if _setting('LOCAL_ASCII_ZOOM', 'random') == 'random' else 'manual'
@@ -160,7 +171,11 @@ class Zoom:
             else:
                 t = max(0.0, t)
                 # smootherstep: no jolt at either end, not just no jump
-                self.rows = start + (self.target - start) * t * t * t * (t * (6.0 * t - 15.0) + 10.0)
+                e = t * t * t * (t * (6.0 * t - 15.0) + 10.0)
+                # Proportional, as the browser's wheel moves: equal times give
+                # equal ratios (10 -> 20 rows takes as long as 40 -> 80), so
+                # the coarse end does not jump and the fine end does not crawl.
+                self.rows = start * (self.target / start) ** e if start > 0 else float(self.target)
         elif self.walk_rate <= 0:
             self.rows = float(self.target)
         else:
@@ -488,8 +503,11 @@ class LocalAsciiDisplay:
 
         def on_scroll(win, dx, dy):
             if dy:
-                # Like the browser: scrolling up zooms in (fewer, larger cells).
-                self.zoom.nudge(-1 if dy > 0 else 1)
+                # As the browser: each notch scales the row count by the same
+                # proportion (a notch there is 100 px at 0.0015 a pixel,
+                # clamped to 200 px); scrolling up zooms in (fewer, larger cells).
+                pixels = max(-200.0, min(200.0, -dy * 100.0))
+                self.zoom.scale(math.exp(pixels * WHEEL_PER_PIXEL))
 
         def on_char(win, codepoint):
             ch = chr(codepoint)

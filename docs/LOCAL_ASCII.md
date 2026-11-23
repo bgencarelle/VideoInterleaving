@@ -52,8 +52,10 @@ sampled picture.
 
 Two drivers set it:
 
-- **Mouse and keys:** wheel, `+`/`-`, `0` resets. Touching them takes over
-  from the random driver; `0` hands control back.
+- **Mouse and keys:** as the browser. Each wheel notch scales the row
+  count by the same proportion (about 16%); `+`/`-` move one whole row;
+  `0` resets. Changes are instant. Touching them takes over from the
+  random driver; `0` hands control back.
 - **Random** (`LOCAL_ASCII_ZOOM = 'random'`): built like the folder
   selector. It starts at the home size, picks when the folders leave
   their rest zone (and again each time they do, once the size has been
@@ -63,16 +65,19 @@ Two drivers set it:
   allowed sizes. Each size is held at least and at most `LOCAL_ASCII_HOLD`
   (default 6-20 s) after its change lands. MIDI clock holds the home size.
 
-Mouse and key changes walk at `LOCAL_ASCII_WALK_RATE` rows a second (0
-jumps). Each random change takes its own random time from
-`LOCAL_ASCII_RANDOM_TRANSITION` (default 2-8 s) and eases in and out
-(smootherstep); the
-next random pick is timed from when it lands, so a slow change is never cut
-short.
+Each random change takes its own random time from
+`LOCAL_ASCII_RANDOM_TRANSITION` (default 2-8 s), eases in and out
+(smootherstep), and moves proportionally, as a wheel zoom does: equal times
+give equal ratios, so 10 -> 20 rows takes as long as 40 -> 80, and the
+coarse end does not jump while the fine end crawls. The next random pick is
+timed from when it lands, so a slow change is never cut short.
+`LOCAL_ASCII_WALK_RATE` (default 0, instant, as the browser) can make wheel
+and key changes walk instead.
 
-While the size is between two whole row counts, the two neighbouring grids
-cross-fade (`LOCAL_ASCII_CROSSFADE`), so a change glides rather than
-stepping a row at a time.
+A change steps a whole grid at a time, as a text screen would.
+`LOCAL_ASCII_CROSSFADE = True` instead cross-fades the two neighbouring
+grids while the size is between two row counts: smoother, but it reads as
+graphics rather than text.
 
 The finest grid can be set per run: `--mode asciilocal --ascii-grid 200x120`
 (at least 15x10). Zoom then ranges from 10 rows up to its rows; with
@@ -108,10 +113,10 @@ Example: `--mode asciilocal --ascii-glow 0.6 --ascii-strokes 0.5`.
 | `LOCAL_ASCII_ROWS` | `(None, None)` | Allowed row range; None = 10 / the master's rows |
 | `LOCAL_ASCII_HOME_ROWS` | None | Size at rest and after reset; None = `ASCII_HEIGHT` |
 | `LOCAL_ASCII_ZOOM` | `'random'` | `'random'` or `'manual'` |
-| `LOCAL_ASCII_WALK_RATE` | 30 | Mouse/keys: rows per second toward a new size |
+| `LOCAL_ASCII_WALK_RATE` | 0 | Mouse/keys: rows per second toward a new size; 0 instant, as the browser |
 | `LOCAL_ASCII_RANDOM_TRANSITION` | `(2.0, 8.0)` | Random driver: seconds each change takes, drawn per change, eased; `(0, 0)` jumps |
 | `LOCAL_ASCII_HOLD` | `(6.0, 20.0)` | Random driver: seconds each size stays, at least / at most, after its change lands |
-| `LOCAL_ASCII_CROSSFADE` | True | Cross-fade neighbouring grid sizes mid-change |
+| `LOCAL_ASCII_CROSSFADE` | False | Cross-fade neighbouring grid sizes mid-change instead of stepping |
 | `LOCAL_ASCII_LINE_SPACING` | 1.05 | As the web viewer |
 | `LOCAL_ASCII_GLOW` | 0 | `--ascii-glow`: neighbouring cells' colour under small letters |
 | `LOCAL_ASCII_GLOW_FROM` | 32 | Cell height (pixels) where the glow starts |
