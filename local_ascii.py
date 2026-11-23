@@ -38,6 +38,33 @@ def _setting(name, default):
     return getattr(settings, name, default)
 
 
+def decode_scale(source_size):
+    """JPEG decode scale for this display: ``(scale, min_size)`` for
+    ImageLoader.read_image, or ``(None, None)`` for full size.
+
+    The picture is only ever sampled into the master grid, one sample a
+    cell, so a full-size decode and upload is spent on pixels that are
+    never read. TurboJPEG decodes at 1/2, 1/4 or 1/8 for a fraction of the
+    work (and averages as it shrinks, so the samples are steadier). The
+    largest reduction that keeps LOCAL_ASCII_DECODE_ROW_PX decoded pixels
+    per finest row is used; files too small for it decode at full size.
+    """
+    per_row = int(_setting('LOCAL_ASCII_DECODE_ROW_PX', 4))
+    if not source_size or per_row <= 0:
+        return None, None
+    grid = _setting('LOCAL_ASCII_GRID', None)
+    if grid:
+        rows = int(grid[1])
+    else:
+        rows = (int(_setting('ASCII_WEB_MAX_SIZE', (120, 80))[1]) *
+                max(1, int(_setting('LOCAL_ASCII_MULTIPLIER', 1))))
+    need = per_row * rows                  # decoded pixels high, at least
+    for divisor in (8, 4, 2):
+        if source_size[1] // divisor >= need:
+            return (1, divisor), (1, need * divisor)
+    return None, None
+
+
 # --- Size mapping: a port of AsciiResolution.dimensions --------------------
 
 def _js_round(value):
@@ -529,10 +556,14 @@ class LocalAsciiDisplay:
     def update(self, index):
         if self.zoom.update(index):
             self.dirty = True
-        if self.fill and self.window is not None:
-            import glfw
-            if self._fit_key(glfw.get_framebuffer_size(self.window)) != self._framebuffer:
-                self.dirty = True          # resized, fullscreen toggled or new picture shape: refit
+        # A resize, fullscreen toggle or rotation already redraws (the
+        # display code marks the view dirty) and fit() then sees it. Only a
+        # picture of a new shape needs flagging here. Asking the window its
+        # size every loop cost a window-system round trip each time (1.3 s
+        # of a 25 s profiled run).
+        if (self.shape == 'picture' and self._framebuffer is not None
+                and tuple(renderer._image_size) != self._framebuffer[3:]):
+            self.dirty = True
 
     @staticmethod
     def _canvas(framebuffer_size):

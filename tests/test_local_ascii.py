@@ -8,7 +8,8 @@ from unittest import mock
 import local_ascii
 import numpy as np
 
-from local_ascii import Zoom, dimensions, glow_strength, mip_levels, update_zoom_selection
+from local_ascii import (Zoom, decode_scale, dimensions, glow_strength, mip_levels,
+                         update_zoom_selection)
 
 COARSE, DEFAULT, MASTER = (15, 10), (60, 40), (120, 80)
 
@@ -50,6 +51,31 @@ class SmallLetterTests(unittest.TestCase):
         self.assertEqual(kept[0].max(), 255)
         self.assertEqual(kept[-1].shape, (1, 1))
         self.assertEqual(kept[-1][0, 0], 255)
+
+
+class DecodeScaleTests(unittest.TestCase):
+    def scale(self, size, **values):
+        defaults = dict(LOCAL_ASCII_DECODE_ROW_PX=4, LOCAL_ASCII_GRID=None,
+                        ASCII_WEB_MAX_SIZE=(120, 80), LOCAL_ASCII_MULTIPLIER=1)
+        defaults.update(values)
+        with mock.patch.multiple(local_ascii.settings, create=True, **defaults):
+            return decode_scale(size)
+
+    def test_largest_reduction_that_keeps_four_pixels_a_row(self):
+        # 80 rows x 4 px = 320 px high at least.
+        self.assertEqual(self.scale((1920, 2160)), ((1, 4), (1, 1280)))
+        self.assertEqual(self.scale((1920, 1080)), ((1, 2), (1, 640)))
+        self.assertEqual(self.scale((480, 640)), ((1, 2), (1, 640)))
+        self.assertEqual(self.scale((3840, 4320)), ((1, 8), (1, 2560)))
+
+    def test_small_pictures_and_off_decode_at_full_size(self):
+        self.assertEqual(self.scale((480, 600)), (None, None))
+        self.assertEqual(self.scale((1920, 2160), LOCAL_ASCII_DECODE_ROW_PX=0), (None, None))
+        self.assertEqual(self.scale(None), (None, None))
+
+    def test_finer_grids_keep_more_pixels(self):
+        self.assertEqual(self.scale((1920, 1080), LOCAL_ASCII_GRID=(240, 160)), (None, None))
+        self.assertEqual(self.scale((1920, 2160), LOCAL_ASCII_MULTIPLIER=2), ((1, 2), (1, 1280)))
 
 
 def settings(**values):

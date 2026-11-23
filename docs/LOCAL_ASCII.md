@@ -22,7 +22,10 @@ status page.
    draw.
 
 The master is sampled on this machine only, so a multiplier costs no other
-viewer anything. Per picture the GPU work is one small grid render and a
+viewer anything. Since only the grid is ever read from the picture, JPEGs
+are decoded smaller (TurboJPEG's 1/2, 1/4 or 1/8) while each keeps at least
+`LOCAL_ASCII_DECODE_ROW_PX` (4) pixels per finest row: less decoding and
+far less to upload, for the same picture. Per picture the GPU work is one small grid render and a
 draw of at most master-size glyph quads.
 
 ## Size control
@@ -109,6 +112,7 @@ Example: `--mode asciilocal --ascii-glow 0.6 --ascii-strokes 0.5`.
 
 | Setting | Default | Meaning |
 |---|---|---|
+| `LOCAL_ASCII_DECODE_ROW_PX` | 4 | JPEG decode keeps at least this many pixels per finest row (1/2-1/8 size); 0 = full size |
 | `LOCAL_ASCII_SHAPE` | `'picture'` | Grid shape: `'picture'` (whole image, as large as the window allows), `'window'` (fills it, image cropped), `'grid'` (browser's, letterboxed) |
 | `LOCAL_ASCII_GRID` | None | Master (finest) grid `(cols, rows)`; `--ascii-grid` sets it. None = 120x80 x multiplier. `'picture'`/`'window'` use only its rows |
 | `LOCAL_ASCII_MULTIPLIER` | 1 | Master = 120x80 x this, when no grid is given |

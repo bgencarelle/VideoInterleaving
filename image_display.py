@@ -509,9 +509,16 @@ def run_display(clock_source=CLOCK_MODE):
             print("⚠️  [ASCII-LOCAL] Needs a local window with OpenGL 3.3 / GLES 3; "
                   "showing the images instead")
         else:
-            from local_ascii import LocalAsciiDisplay
+            from local_ascii import LocalAsciiDisplay, decode_scale
             local_ascii = LocalAsciiDisplay(renderer.ctx)
             local_ascii.attach(window)
+            # Only the master grid is ever read from the picture: decode
+            # JPEGs smaller (TurboJPEG scaling) when they stay big enough.
+            local_scale, local_min = decode_scale(source_image_size)
+            if local_scale is not None:
+                web_jpeg_scale, web_jpeg_min_size = local_scale, local_min
+                print(f"[ASCII-LOCAL] JPEG decode at {local_scale[0]}/{local_scale[1]} size "
+                      f"(source {source_image_size[0]}x{source_image_size[1]})")
     local_ascii_window = window
 
     if has_gl and not isinstance(res0[0], str):
