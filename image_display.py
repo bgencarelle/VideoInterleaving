@@ -731,6 +731,7 @@ def run_display(clock_source=CLOCK_MODE):
                                     (local_ascii is not None and local_ascii.dirty))
             if render_now and local_ascii is not None:
                 framebuffer_size = glfw.get_framebuffer_size(window)
+                local_ascii.fit(framebuffer_size)      # fill mode: grid follows the window
                 if successful_display or first_render or local_ascii.glyphs is None:
                     local_ascii.capture(main_texture, float_texture, BACKGROUND_COLOR,
                                         cur_m_sbs, cur_f_sbs, framebuffer_size)

@@ -27,10 +27,25 @@ draw of at most master-size glyph quads.
 
 ## Size control
 
-The browser's: one **row count**, mapped to a grid by `dimensions()` (a port
-of `static/ascii_resolution.js`, checked against it): 15x10 at the coarse
-end, `ASCII_WIDTH`x`ASCII_HEIGHT` (60x40) at the default, the master at the
-fine end. The whole picture stays fitted; zoom changes resolution, not crop.
+One **row count** sets the size; zoom changes resolution, not crop.
+
+`LOCAL_ASCII_SHAPE` sets the grid's shape; its rows stay as set and the
+columns follow, at every zoom size:
+
+- **`'picture'`** (default): the picture's shape. The whole image fills
+  the grid, nothing cropped, and the grid is drawn as large as the window
+  allows, so bars appear only where the screen's shape differs from the
+  picture's (a 3:4 picture on a 16:10 screen: 126x80, 750x1000 of
+  1600x1000).
+- **`'window'`**: the window's shape (16:10 at 80 rows is 269x80); the image
+  is cropped to cover it, as ASCII mode's cover sampling does.
+- **`'grid'`**: the browser's mapping,
+  `dimensions()` (a port of `static/ascii_resolution.js`, checked against
+  it): 15x10 at the coarse end, `ASCII_WIDTH`x`ASCII_HEIGHT` (60x40) at the
+  default, the master at the fine end; the grid is letterboxed in the
+  window and the image in the grid.
+
+The grid is reshaped when the window changes (fullscreen toggle, resize).
 
 Two drivers set it:
 
@@ -57,7 +72,8 @@ cross-fade (`LOCAL_ASCII_CROSSFADE`), so a change glides rather than
 stepping a row at a time.
 
 The finest grid can be set per run: `--mode asciilocal --ascii-grid 200x120`
-(at least 15x10). Zoom then ranges from 15x10 up to it.
+(at least 15x10). Zoom then ranges from 10 rows up to its rows; with
+`'picture'` or `'window'` its columns come from that shape instead.
 
 ## Small letters
 
@@ -82,7 +98,8 @@ Example: `--mode asciilocal --ascii-glow 0.6 --ascii-strokes 0.5`.
 
 | Setting | Default | Meaning |
 |---|---|---|
-| `LOCAL_ASCII_GRID` | None | Master (finest) grid `(cols, rows)`; `--ascii-grid` sets it. None = 120x80 x multiplier |
+| `LOCAL_ASCII_SHAPE` | `'picture'` | Grid shape: `'picture'` (whole image, as large as the window allows), `'window'` (fills it, image cropped), `'grid'` (browser's, letterboxed) |
+| `LOCAL_ASCII_GRID` | None | Master (finest) grid `(cols, rows)`; `--ascii-grid` sets it. None = 120x80 x multiplier. `'picture'`/`'window'` use only its rows |
 | `LOCAL_ASCII_MULTIPLIER` | 1 | Master = 120x80 x this, when no grid is given |
 | `LOCAL_ASCII_MULTIPLY` | `'fine'` | `'fine'`: only the finest end grows; `'all'`: coarsest and default sizes grow by as much as the master |
 | `LOCAL_ASCII_ROWS` | `(None, None)` | Allowed row range; None = 10 / the master's rows |

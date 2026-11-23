@@ -40,6 +40,7 @@ _mirror_mode: int = 0
 # Viewport / FBO size
 _viewport_size: tuple[int, int] = (0, 0)
 _viewport_pixel_aspect: float = 1.0
+_viewport_cover: bool = False   # cover (crop) instead of letterbox; local ASCII only
 _quad_data: np.ndarray | None = None
 _quad_dirty: bool = True
 
@@ -329,10 +330,12 @@ def _update_bg_linear(background_color: tuple[int, int, int]) -> tuple[float, fl
     return _bg_linear_color
 
 
-def set_viewport_size(width: int, height: int, *, pixel_aspect: float = 1.0) -> None:
-    global _viewport_size, _quad_dirty, _viewport_pixel_aspect
+def set_viewport_size(width: int, height: int, *, pixel_aspect: float = 1.0,
+                      cover: bool = False) -> None:
+    global _viewport_size, _quad_dirty, _viewport_pixel_aspect, _viewport_cover
     _viewport_size = (width, height)
     _viewport_pixel_aspect = pixel_aspect
+    _viewport_cover = cover
     _quad_dirty = True
     if _backend == "legacy":
         gl = _lazy_import_gl()
@@ -678,14 +681,15 @@ def compute_transformed_quad():
     global _quad_data
     view_w, view_h = _viewport_size
 
-    # Headless / Web: Letterbox inside viewport
+    # Headless / Web: Letterbox inside viewport (or cover it, cropping the
+    # overflow, when the caller asked: local ASCII filling its window)
     if view_w > 0 and view_h > 0:
         img_w, img_h = _image_size
 
         target_aspect = view_w * _viewport_pixel_aspect / view_h
         image_aspect = (img_w / img_h) if img_h > 0 else 1.0
 
-        if image_aspect > target_aspect:
+        if (image_aspect > target_aspect) != _viewport_cover:
             x_scale = 1.0
             y_scale = target_aspect / image_aspect
         else:

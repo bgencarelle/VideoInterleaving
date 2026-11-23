@@ -100,6 +100,16 @@ class ZoomTests(unittest.TestCase):
             zoom.update(0)
             self.assertEqual(zoom.rows, 70.0)
 
+    def test_filling_the_window_keeps_its_shape_at_every_size(self):
+        zoom = self.make()
+        zoom.cols_for = lambda r: round(r * 269 / 80)     # a 16:10 window
+        zoom.finest = (269, 80)
+        for rows in (10, 25, 40, 80):
+            zoom.rows = float(rows)
+            cols, got = zoom.grid()
+            self.assertEqual(got, rows)
+            self.assertAlmostEqual(cols / rows, 269 / 80, delta=.06)
+
     def test_zero_walk_rate_jumps(self):
         zoom = self.make(LOCAL_ASCII_ZOOM='manual')
         zoom.nudge(-30)

@@ -94,13 +94,22 @@ class Zoom:
         hold_min, hold_max = _setting('LOCAL_ASCII_HOLD', (6.0, 20.0))
         self.hold = (max(0.0, float(hold_min)), max(0.0, float(hold_min), float(hold_max)))
         self.crossfade = bool(_setting('LOCAL_ASCII_CROSSFADE', True))
+        self.cols_for = None               # picture/window shape: rows -> cols in proportion
         self._move = None                  # (start rows, start time, seconds) of a random change
         self._rng = random.Random()
         self._last = time.monotonic()
         self._random = {}
 
+    def dims(self, rows):
+        """Grid (cols, rows) for a row count: the browser's mapping, or, when
+        the picture fills the window, columns in proportion to the window."""
+        if self.cols_for is None:
+            return dimensions(rows, self.default, self.finest, self.coarsest)
+        rows = _js_round(min(max(rows, self.coarsest[1]), self.finest[1]))
+        return self.cols_for(rows), rows
+
     def grid(self):
-        return dimensions(self.rows, self.default, self.finest, self.coarsest)
+        return self.dims(self.rows)
 
     def layers(self):
         """What to draw for the current row count: ``[(grid, weight), ...]``.
@@ -114,8 +123,7 @@ class Zoom:
         part = self.rows - low
         if not self.crossfade or part < .01 or part > .99:
             return [(self.grid(), 1.0)]
-        return [(dimensions(low, self.default, self.finest, self.coarsest), 1.0 - part),
-                (dimensions(low + 1, self.default, self.finest, self.coarsest), part)]
+        return [(self.dims(low), 1.0 - part), (self.dims(low + 1), part)]
 
     # Manual control ---------------------------------------------------------
     def nudge(self, steps):
@@ -383,6 +391,21 @@ class LocalAsciiDisplay:
                    _js_round(_setting('ASCII_HEIGHT', 40) * scale))
         self.zoom = Zoom(coarsest, default, self.master)
         self.line_spacing = float(_setting('LOCAL_ASCII_LINE_SPACING', 1.05))
+        self.font_ratio = float(_setting('ASCII_FONT_RATIO', .5))
+        # The grid's shape (its rows stay as set; columns follow):
+        #   'picture' (default): the picture's shape. The whole image fills
+        #       the grid, and the grid is fitted as large as the window
+        #       allows, so bars appear only where the screen's shape differs.
+        #   'window': the window's shape; the image is cropped to cover it.
+        #   'grid': the browser's mapping, letterboxed in the window and the
+        #       image letterboxed in the grid.
+        shape = str(_setting('LOCAL_ASCII_SHAPE', 'picture')).lower()
+        self.shape = shape if shape in ('picture', 'window', 'grid') else 'picture'
+        self.fill = self.shape != 'grid'
+        self.cell_aspect = self.font_ratio
+        self.frame_aspect = None
+        self.window = None
+        self._framebuffer = None
         self.target = ctx.simple_framebuffer(self.master, components=3)
 
         atlas, self.tile_px, pitch = build_atlas(list(ascii_converter.CHARS))
@@ -426,7 +449,8 @@ class LocalAsciiDisplay:
         self.glyphs = None
         self.colours = None
         self.dirty = True
-        print(f"[ASCII-LOCAL] Master grid {self.master[0]}x{self.master[1]}; "
+        print(f"[ASCII-LOCAL] Master grid {self.master[0] if not self.fill else 'N'}x"
+              f"{self.master[1]}, shaped to the {self.shape}; "
               f"rows {self.zoom.low}-{self.zoom.high}, home {self.zoom.home}; "
               f"zoom: {self.zoom.driver}, random changes "
               f"{self.zoom.transition[0]:g}-{self.zoom.transition[1]:g} s; "
@@ -436,6 +460,7 @@ class LocalAsciiDisplay:
     # Input -------------------------------------------------------------------
     def attach(self, window):
         import glfw
+        self.window = window
 
         def on_scroll(win, dx, dy):
             if dy:
@@ -458,6 +483,63 @@ class LocalAsciiDisplay:
     def update(self, index):
         if self.zoom.update(index):
             self.dirty = True
+        if self.fill and self.window is not None:
+            import glfw
+            if self._fit_key(glfw.get_framebuffer_size(self.window)) != self._framebuffer:
+                self.dirty = True          # resized, fullscreen toggled or new picture shape: refit
+
+    def _fit_key(self, framebuffer_size):
+        key = tuple(framebuffer_size)
+        return key + tuple(renderer._image_size) if self.shape == 'picture' else key
+
+    def _area(self, width, height, aspect):
+        """The largest width/height of this aspect that fits the window."""
+        if width / height > aspect:
+            return height * aspect, float(height)
+        return float(width), width / aspect
+
+    def fit(self, framebuffer_size):
+        """Shape the master grid to the picture or the window. True when it
+        was rebuilt (the picture must then be captured again)."""
+        width, height = framebuffer_size
+        if not self.fill or width <= 0 or height <= 0:
+            return False
+        key = self._fit_key(framebuffer_size)
+        if key == self._framebuffer:
+            return False
+        self._framebuffer = key
+        aspect = width / height
+        if self.shape == 'picture':
+            image_w, image_h = renderer._image_size
+            if image_w > 0 and image_h > 0:
+                aspect = image_w / image_h
+        self.frame_aspect = aspect
+        area_w, area_h = self._area(width, height, aspect)
+        rows = self.master[1]
+        cols = max(1, _js_round(rows * self.line_spacing * area_w / (self.font_ratio * area_h)))
+        # Proportions of one master cell as it lands on the window: width
+        # over row pitch. The image is sampled with them, so it is not
+        # stretched.
+        cell_h = area_h / (1 + (rows - 1) * self.line_spacing)
+        self.cell_aspect = (area_w / cols) / (cell_h * self.line_spacing)
+        self.zoom.cols_for = lambda r, c=cols, m=rows: max(1, _js_round(r * c / m))
+        self.zoom.finest = (cols, rows)
+        if (cols, rows) == self.master and self.glyphs is not None:
+            return False
+        self.master = (cols, rows)
+        for resource in (self.vao, self.instances, self.target):
+            resource.release()
+        self.target = self.ctx.simple_framebuffer(self.master, components=3)
+        self.instances = self.ctx.buffer(reserve=cols * rows * self.instance_dtype.itemsize)
+        self.vao = self.ctx.vertex_array(self.program, [
+            (self.corners, '2f', 'corner'),
+            (self.instances, '1f 3f1 1x/i', 'glyph', 'colour'),
+        ])
+        self.glyphs = self.colours = None
+        self.dirty = True
+        print(f"[ASCII-LOCAL] Window {width}x{height}: master grid {cols}x{rows}, "
+              f"picture {area_w:.0f}x{area_h:.0f}")
+        return True
 
     def capture(self, main, front, background, main_sbs, front_sbs, framebuffer_size):
         """Sample both layers into the master grid and grade it, as ASCII mode does."""
@@ -467,7 +549,7 @@ class LocalAsciiDisplay:
         # never drawn to the screen here, so nothing needs the window's back.
         # Set every time: display_init writes its own after a resize or F.
         renderer.update_mvp(np.eye(4, dtype='f4'))
-        renderer.set_viewport_size(*self.master, pixel_aspect=_setting('ASCII_FONT_RATIO', .5))
+        renderer.set_viewport_size(*self.master, pixel_aspect=self.cell_aspect, cover=self.shape == 'window')
         try:
             renderer.overlay_images_single_pass(main, front, background, main_sbs, front_sbs)
             data = self.target.read(components=3, alignment=1)
@@ -499,11 +581,9 @@ class LocalAsciiDisplay:
         # frame is the master grid's shape at every size: each size covers
         # the whole master, and its own rounded cols/rows would move the
         # frame a little on every zoom step. The cells absorb the difference.
-        aspect = master_w * _setting('ASCII_FONT_RATIO', .5) / master_h
-        if width / height > aspect:
-            area_h, area_w = float(height), height * aspect
-        else:
-            area_w, area_h = float(width), width / aspect
+        aspect = (self.frame_aspect if self.fill and self.frame_aspect
+                  else master_w * self.font_ratio / master_h)
+        area_w, area_h = self._area(width, height, aspect)
         origin = ((width - area_w) / 2, (height - area_h) / 2)
 
         import moderngl

@@ -75,17 +75,6 @@ def _is_macos() -> bool:
     return sys.platform == 'darwin'
 
 
-def _position_macos_fullscreen(window, monitor) -> None:
-    """Align a borderless macOS window with its monitor after resizing it."""
-    if not _is_macos() or glfw is None or monitor is None:
-        return
-    try:
-        x, y = glfw.get_monitor_pos(monitor)
-        glfw.set_window_pos(window, x, y)
-    except Exception:
-        pass
-
-
 class DisplayState:
     def __init__(self, image_size: tuple[int, int] = (640, 480)) -> None:
         self.image_size = image_size
@@ -1224,14 +1213,10 @@ def display_init(state: DisplayState, *, log_backend=True):
                         print(f"[DISPLAY] Wayland fullscreen failed: {e}, falling back to borderless window")
                     glfw.window_hint(glfw.DECORATED, glfw.FALSE)
                     return glfw.create_window(fs_w, fs_h, "Fullscreen", None, None)
-                # macOS: borderless fullscreen-sized window, positioned on
-                # the monitor; monitor-attached fullscreen is for X11 only.
-                if _is_macos():
-                    glfw.window_hint(glfw.DECORATED, glfw.FALSE)
-                    win = glfw.create_window(fs_w, fs_h, "Fullscreen", None, None)
-                    if win:
-                        _position_macos_fullscreen(win, mon)
-                    return win
+                # X11 and macOS: monitor-attached fullscreen, as main had it.
+                # A borderless screen-sized window on macOS stays under the
+                # menu bar and dock and is pushed down, so it is not
+                # fullscreen at all.
                 return glfw.create_window(fs_w, fs_h, "Fullscreen", mon, None)
 
             # Windowed mode is a stable 4:3 viewport. Non-4:3 source
@@ -1390,11 +1375,12 @@ def display_init(state: DisplayState, *, log_backend=True):
             _hide_cursor_reliable(window)
 
     # Fullscreen toggling (only if window already exists):
-    # - Wayland/macOS use resize + decoration changes on borderless windows.
-    # - X11 uses set_window_monitor for proper fullscreen.
+    # - Wayland uses resize + decoration changes on a borderless window.
+    # - X11 and macOS use set_window_monitor for proper fullscreen, as main
+    #   did (a borderless window on macOS sits under the menu bar).
     if window is not None:
-        if is_wayland or _is_macos():
-            # Wayland/macOS: resize the existing borderless window and toggle
+        if is_wayland:
+            # Wayland: resize the existing borderless window and toggle
             # decoration instead of changing monitor attachment.
             current_w, current_h = glfw.get_window_size(window)
             if state.fullscreen:
@@ -1414,12 +1400,10 @@ def display_init(state: DisplayState, *, log_backend=True):
                 # Only resize if size changed
                 if current_w != fs_w or current_h != fs_h:
                     glfw.set_window_size(window, fs_w, fs_h)
-                    # Wayland does not support set_window_pos(); macOS was
-                    # positioned when its borderless window was created.
+                    # Wayland does not support set_window_pos().
                     _hide_cursor_reliable(window)
                 # Ensure borderless
                 glfw.set_window_attrib(window, glfw.DECORATED, glfw.FALSE)
-                _position_macos_fullscreen(window, mon)
                 _hide_cursor_reliable(window)
             else:
                 # Windowed mode: restore decoration and use a stable 4:3
@@ -1430,7 +1414,7 @@ def display_init(state: DisplayState, *, log_backend=True):
                     glfw.set_window_size(window, win_w, win_h)
                     _hide_cursor_reliable(window)
         else:
-            # X11: Use set_window_monitor for proper fullscreen.
+            # X11 and macOS: set_window_monitor for proper fullscreen.
             # On Linux X11, set_window_monitor with current resolution does NOT change display resolution
             # This is safe for low-end Linux systems - window goes fullscreen at current resolution
             current_monitor = glfw.get_window_monitor(window)

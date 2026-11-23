@@ -106,6 +106,7 @@ LOCAL_ASCII_RANDOM_TRANSITION = (2.0, 8.0)  # Random driver: each change takes a
 LOCAL_ASCII_HOLD = (6.0, 20.0)   # Random driver: each size stays at least / at most this long (s) after its change lands.
 LOCAL_ASCII_CROSSFADE = True     # Mid-change, cross-fade the two neighbouring grid sizes instead of stepping row by row.
 LOCAL_ASCII_LINE_SPACING = 1.05  # As the web viewer's default.
+LOCAL_ASCII_SHAPE = 'picture'    # Grid shape: 'picture' (whole image, as large as the window allows), 'window' (fills it, image cropped), 'grid' (browser's 3:2, letterboxed).
 LOCAL_ASCII_GLOW = 0.0           # --ascii-glow: neighbouring cells' colour under small letters (0 off, 1 full).
 LOCAL_ASCII_GLOW_FROM = 32       # Glow starts when cells are this many pixels high...
 LOCAL_ASCII_GLOW_FULL = 8        # ...and is at full strength from this height down.
