@@ -14,6 +14,7 @@ tzdata  # IANA timezone database fallback for zoneinfo (notably Windows)
 pyautogui
 pynput
 setproctitle
+psutil  # Status page (lightweight_monitor). Debian also gets it as python3-psutil; macOS, Fedora and Arch only through pip.
 numpy>=1.24
 scipy>=1.10
 Pillow>=9.5
