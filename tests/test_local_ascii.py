@@ -169,10 +169,16 @@ class RandomTransitionTests(unittest.TestCase):
         self.step(2.0)
         self.assertEqual(self.zoom.rows, 80.0)
 
-    def test_next_pick_is_timed_from_when_the_change_lands(self):
+    def test_a_new_pick_mid_change_carries_on_from_where_the_size_is(self):
         self.picks.append(80)
         self.step(0)
-        self.assertEqual(self.zoom._random['last_time'], self.wall[0] + 4.0)
+        self.step(2.0)                         # halfway: 40 * 2 ** .5
+        here = self.zoom.rows
+        self.picks.append(20)
+        self.step(0)
+        self.assertEqual(self.zoom._move[0], here)
+        self.step(4.0)
+        self.assertEqual(self.zoom.rows, 20.0)
 
     def test_hand_control_drops_the_slow_change(self):
         self.picks.append(80)
@@ -209,9 +215,9 @@ class RandomTransitionTests(unittest.TestCase):
         self.assertEqual(zoom.layers(), [(dimensions(50, DEFAULT, MASTER), 1.0)])
 
     def test_range_is_drawn_from(self):
-        with settings(LOCAL_ASCII_RANDOM_TRANSITION=(2.0, 8.0)):
+        with settings(LOCAL_ASCII_RANDOM_TRANSITION=(0.5, 3.0)):
             zoom = Zoom(COARSE, DEFAULT, MASTER)
-        self.assertEqual(zoom.transition, (2.0, 8.0))
+        self.assertEqual(zoom.transition, (0.5, 3.0))
 
 
 class RandomDriverTests(unittest.TestCase):

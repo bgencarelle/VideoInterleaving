@@ -102,8 +102,8 @@ LOCAL_ASCII_ROWS = (None, None)  # Allowed row range (min, max); None = 10 / the
 LOCAL_ASCII_HOME_ROWS = None     # Size at rest and after reset; None = ASCII_HEIGHT.
 LOCAL_ASCII_ZOOM = 'random'      # 'random': folder-selector-style driver; 'manual': wheel and keys only.
 LOCAL_ASCII_WALK_RATE = 0        # Mouse/keys: rows per second toward a new size; 0 jumps straight there, as the browser does.
-LOCAL_ASCII_RANDOM_TRANSITION = (2.0, 8.0)  # Random driver: each change takes a random time in this range (s), eased; (0, 0) jumps.
-LOCAL_ASCII_HOLD = (6.0, 20.0)   # Random driver: each size stays at least / at most this long (s) after its change lands.
+LOCAL_ASCII_RANDOM_TRANSITION = (0.5, 3.0)  # Random driver: each change takes a random time in this range (s), drawn per change, eased; (0, 0) jumps.
+LOCAL_ASCII_HOLD = (2.0, 20.0)   # Random driver: at least / at most this long (s) between changes, counted from each pick as the folder selector does.
 LOCAL_ASCII_CROSSFADE = False    # True: mid-change, cross-fade the two neighbouring grid sizes (smoother, but less text-mode). False: step a whole grid at a time.
 LOCAL_ASCII_LINE_SPACING = 1.05  # As the web viewer's default.
 LOCAL_ASCII_SHAPE = 'picture'    # Grid shape: 'picture' (whole image, as large as the window allows), 'window' (fills it, image cropped), 'grid' (browser's 3:2, letterboxed).

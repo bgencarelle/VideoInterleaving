@@ -62,15 +62,18 @@ Two drivers set it:
   held long enough; the rest itself does not pull it home), and picks when
   the index lands on its own modulus
   (offset from the main and float triggers), from a shuffled deck of the
-  allowed sizes. Each size is held at least and at most `LOCAL_ASCII_HOLD`
-  (default 6-20 s) after its change lands. MIDI clock holds the home size.
+  allowed sizes. Picks come at least and at most `LOCAL_ASCII_HOLD`
+  (default 2-20 s) apart, counted from each pick as the folder selector
+  counts. In a simulated 20 minutes against the real folder selector the
+  size changed typically every 4.6 s (2-19 s), the folders every 2.7-3.7 s
+  (their count includes rest-zone resets). MIDI clock holds the home size.
 
 Each random change takes its own random time from
-`LOCAL_ASCII_RANDOM_TRANSITION` (default 2-8 s), eases in and out
+`LOCAL_ASCII_RANDOM_TRANSITION` (default 0.5-3 s), eases in and out
 (smootherstep), and moves proportionally, as a wheel zoom does: equal times
 give equal ratios, so 10 -> 20 rows takes as long as 40 -> 80, and the
-coarse end does not jump while the fine end crawls. The next random pick is
-timed from when it lands, so a slow change is never cut short.
+coarse end does not jump while the fine end crawls. A pick that comes
+before a change has landed carries on from wherever the size is.
 `LOCAL_ASCII_WALK_RATE` (default 0, instant, as the browser) can make wheel
 and key changes walk instead.
 
@@ -114,8 +117,8 @@ Example: `--mode asciilocal --ascii-glow 0.6 --ascii-strokes 0.5`.
 | `LOCAL_ASCII_HOME_ROWS` | None | Size at rest and after reset; None = `ASCII_HEIGHT` |
 | `LOCAL_ASCII_ZOOM` | `'random'` | `'random'` or `'manual'` |
 | `LOCAL_ASCII_WALK_RATE` | 0 | Mouse/keys: rows per second toward a new size; 0 instant, as the browser |
-| `LOCAL_ASCII_RANDOM_TRANSITION` | `(2.0, 8.0)` | Random driver: seconds each change takes, drawn per change, eased; `(0, 0)` jumps |
-| `LOCAL_ASCII_HOLD` | `(6.0, 20.0)` | Random driver: seconds each size stays, at least / at most, after its change lands |
+| `LOCAL_ASCII_RANDOM_TRANSITION` | `(0.5, 3.0)` | Random driver: seconds each change takes, drawn per change, eased; `(0, 0)` jumps |
+| `LOCAL_ASCII_HOLD` | `(2.0, 20.0)` | Random driver: seconds between changes, at least / at most, counted from each pick |
 | `LOCAL_ASCII_CROSSFADE` | False | Cross-fade neighbouring grid sizes mid-change instead of stepping |
 | `LOCAL_ASCII_LINE_SPACING` | 1.05 | As the web viewer |
 | `LOCAL_ASCII_GLOW` | 0 | `--ascii-glow`: neighbouring cells' colour under small letters |

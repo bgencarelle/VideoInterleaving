@@ -74,7 +74,7 @@ class Zoom:
     (LOCAL_ASCII_WALK_RATE > 0 walks instead). Each random change takes a
     time drawn from LOCAL_ASCII_RANDOM_TRANSITION, eases in and out
     (smootherstep) and moves proportionally, as a wheel zoom does; the next
-    random pick is timed from when it lands. Touching the wheel or keys takes over from the random driver; ``0``
+    random pick is timed from this one, as the folder selector's are. Touching the wheel or keys takes over from the random driver; ``0``
     hands it back.
     """
 
@@ -91,9 +91,9 @@ class Zoom:
         self.target = self.home
         self.driver = 'random' if _setting('LOCAL_ASCII_ZOOM', 'random') == 'random' else 'manual'
         self.walk_rate = float(_setting('LOCAL_ASCII_WALK_RATE', 0))
-        low_s, high_s = _setting('LOCAL_ASCII_RANDOM_TRANSITION', (2.0, 8.0))
+        low_s, high_s = _setting('LOCAL_ASCII_RANDOM_TRANSITION', (0.5, 3.0))
         self.transition = (max(0.0, float(low_s)), max(0.0, float(low_s), float(high_s)))
-        hold_min, hold_max = _setting('LOCAL_ASCII_HOLD', (6.0, 20.0))
+        hold_min, hold_max = _setting('LOCAL_ASCII_HOLD', (2.0, 20.0))
         self.hold = (max(0.0, float(hold_min)), max(0.0, float(hold_min), float(hold_max)))
         self.crossfade = bool(_setting('LOCAL_ASCII_CROSSFADE', False))
         self.cols_for = None               # picture/window shape: rows -> cols in proportion
@@ -159,9 +159,9 @@ class Zoom:
                 self.target = picked
                 seconds = self._rng.uniform(*self.transition)
                 self._move = (self.rows, now, seconds)
-                # Time the next pick from when this change lands, so a slow
-                # change is not cut short by the next one.
-                self._random['last_time'] = time.time() + seconds
+                # The hold counts from this pick, as the folder selector's
+                # intervals do; a pick that comes before a change has landed
+                # carries on from wherever the size is.
         before = self.grid(), self.rows
         if self._move is not None:
             start, began, seconds = self._move
@@ -195,8 +195,8 @@ def update_zoom_selection(index, zoom, state):
     enough), then periodic picks when the index lands on a modulus
     built from a random multiplier -- offset from the main (3) and float (7)
     triggers so the three do not always fire together -- held at least
-    LOCAL_ASCII_HOLD[0] and at most [1] seconds after a change lands, with
-    jitter. Picks come from a pre-shuffled deck of
+    LOCAL_ASCII_HOLD[0] and at most [1] seconds apart, with jitter, counted
+    from the previous pick as the folder selector counts. Picks come from a pre-shuffled deck of
     the allowed row counts, so every size comes up before any repeats.
     Returns the new target, or None to keep the current one. The folders'
     rest does not pull the size back home: it comes round once per pass,
@@ -220,7 +220,7 @@ def update_zoom_selection(index, zoom, state):
 
     rand_mult = state['rand_mult']
     jitter = rng.uniform(-rand_mult / LOCAL_CONTROLFPS, rand_mult / LOCAL_CONTROLFPS)
-    hold_min, hold_max = getattr(zoom, 'hold', (6.0, 20.0))
+    hold_min, hold_max = getattr(zoom, 'hold', (2.0, 20.0))
     min_interval = max(hold_min, hold_min + jitter)
     max_interval = max(min_interval, hold_max + jitter)
     elapsed = now - state['last_time']
