@@ -151,6 +151,13 @@ def configure_runtime():
     )
 
     parser.add_argument(
+        "--ascii-display",
+        action="store_true",
+        help="--mode local only: show the picture as ASCII glyphs in the window "
+             "(zoom: mouse wheel, +/-, 0 resets; LOCAL_ASCII_* in settings.py)"
+    )
+
+    parser.add_argument(
         "--dir",
         help="Path to image source folder (overrides settings.py)"
     )
@@ -611,15 +618,21 @@ def configure_runtime():
     # Options that only mean anything in one mode; say so rather than silently
     # ignoring them. The whole point of a knob is that turning it does
     # something, and a flag accepted in the wrong mode does nothing quietly.
-    if args.mode not in ("ascii", "asciiweb"):
+    if args.ascii_display:
+        if args.mode == "local":
+            settings.LOCAL_ASCII = True
+        else:
+            print("⚠️  --ascii-display ignored: it applies to --mode local. "
+                  "Each mode in VideoInterleaving runs standalone.")
+    if args.mode not in ("ascii", "asciiweb") and not (args.mode == "local" and args.ascii_display):
         _ascii_used = [f for f, v in (("--ascii-contrast", args.ascii_contrast),
                                       ("--ascii-brightness", args.ascii_brightness),
                                       ("--ascii-gamma", args.ascii_gamma))
                        if v is not None]
         if _ascii_used:
             print(f"⚠️  {', '.join(_ascii_used)} ignored: these apply to "
-                  f"--mode ascii and asciiweb. Each mode in VideoInterleaving "
-                  f"runs standalone.")
+                  f"--mode ascii, asciiweb, and local with --ascii-display. "
+                  f"Each mode in VideoInterleaving runs standalone.")
 
     # Scope options only mean anything in scope mode; say so rather than
     # silently ignoring them.

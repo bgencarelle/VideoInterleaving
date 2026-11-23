@@ -92,6 +92,17 @@ ASCII_HEIGHT = 40
 ASCII_WEB_MAX_SIZE = (120, 80)  # Live web master; terminal scales remain separate.
 ASCII_WEB_SOURCE_SIZE = None  # Enabled only in asciiweb; baked packages keep their own grid.
 ASCII_SOURCE_IMAGE_ASPECT_RATIO = 1.333333333
+
+# --- Local ASCII display (--mode local --ascii-display) ---
+LOCAL_ASCII = False              # Set by --ascii-display.
+LOCAL_ASCII_MULTIPLIER = 1       # Local master = ASCII_WEB_MAX_SIZE x this (2 -> 240x160). Sampled on this machine only.
+LOCAL_ASCII_MULTIPLY = 'fine'    # 'fine': only the finest end grows; 'all': coarsest and default sizes scale too.
+LOCAL_ASCII_ROWS = (None, None)  # Allowed row range (min, max); None = 10 / the master's rows.
+LOCAL_ASCII_HOME_ROWS = None     # Size at rest and after reset; None = ASCII_HEIGHT.
+LOCAL_ASCII_ZOOM = 'random'      # 'random': folder-selector-style driver; 'manual': wheel and keys only.
+LOCAL_ASCII_WALK_RATE = 30       # Rows per second toward a new size; 0 jumps straight there.
+LOCAL_ASCII_LINE_SPACING = 1.05  # As the web viewer's default.
+LOCAL_ASCII_FONT = 'static/fonts/schoolbook-mono/InterleaveSchoolbookMono-Black.woff2'  # weight 900, as on the web
 JPEG_QUALITY = 60# Image quality (lower = fewer bytes per frame on slow links)
 HEADLESS_RES = (320, 400)   # Resolution for the virtual screen (web frame size)
 

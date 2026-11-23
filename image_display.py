@@ -501,6 +501,19 @@ def run_display(clock_source=CLOCK_MODE):
         print(f'[ASCII] Direct source-layer grids: {grid_description}; '
               f'colour blur={settings.ASCII_COLOR_BLUR}; no post-grid resize; '
               f'truecolour={settings.ASCII_TRUECOLOR}; tint brightness={settings.ASCII_COLOR_BRIGHTNESS}')
+    # Local ASCII (--mode local --ascii-display): the window shows the ASCII
+    # picture as glyphs instead of the images themselves.
+    local_ascii = None
+    if getattr(settings, 'LOCAL_ASCII', False):
+        if is_headless or not has_gl or renderer.using_legacy_gl():
+            print("⚠️  [ASCII-LOCAL] Needs a local window with OpenGL 3.3 / GLES 3; "
+                  "showing the images instead")
+        else:
+            from local_ascii import LocalAsciiDisplay
+            local_ascii = LocalAsciiDisplay(renderer.ctx)
+            local_ascii.attach(window)
+    local_ascii_window = window
+
     if has_gl and not isinstance(res0[0], str):
         main_texture = upload_layer(res0[0])
         float_texture = upload_layer(res0[1])
@@ -604,6 +617,9 @@ def run_display(clock_source=CLOCK_MODE):
                 window = display_init(state)
                 if window is not None:
                     _hide_cursor_reliable(window)
+                if local_ascii is not None and window is not local_ascii_window:
+                    local_ascii.attach(window)
+                    local_ascii_window = window
 
             prev = index
             index, _ = update_index(png_paths_len, PINGPONG)
@@ -708,9 +724,18 @@ def run_display(clock_source=CLOCK_MODE):
                 submit(pool, next_idx)
 
             # Render (GL)
+            if local_ascii is not None:
+                local_ascii.update(index)
             render_now = has_gl and (first_render or is_local_frame_source or successful_display or
-                                    view_dirty or renderer._quad_dirty)
-            if render_now and ascii_grid_capture is None:
+                                    view_dirty or renderer._quad_dirty or
+                                    (local_ascii is not None and local_ascii.dirty))
+            if render_now and local_ascii is not None:
+                framebuffer_size = glfw.get_framebuffer_size(window)
+                if successful_display or first_render or local_ascii.glyphs is None:
+                    local_ascii.capture(main_texture, float_texture, BACKGROUND_COLOR,
+                                        cur_m_sbs, cur_f_sbs, framebuffer_size)
+                local_ascii.draw(framebuffer_size, BACKGROUND_COLOR)
+            elif render_now and ascii_grid_capture is None:
                 if is_headless: window.use()
                 renderer.overlay_images_single_pass(
                     main_texture, float_texture, BACKGROUND_COLOR,
@@ -884,6 +909,8 @@ def run_display(clock_source=CLOCK_MODE):
             if not is_headless and has_gl and glfw and glfw.window_should_close(window):
                 state.run_mode = False
 
+        if local_ascii is not None:
+            local_ascii.close()
         if not is_headless and has_gl and glfw:
             glfw.terminate()
         if ascii_grid_capture is not None:

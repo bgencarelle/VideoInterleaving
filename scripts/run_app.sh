@@ -104,6 +104,10 @@ parse_args() {
                     args="$args --mode local --dir ${SBS_DIR:-images_sbs}"
                     mode_specified=true
                     ;;
+                --local-ascii)
+                    args="$args --mode local --ascii-display --dir ${SBS_DIR:-images_sbs}"
+                    mode_specified=true
+                    ;;
                 --scope)
                     # --device null: no sound card is used or required. The
                     # samples are generated for browsers to render on their

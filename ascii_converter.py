@@ -91,15 +91,21 @@ def _build_colored_rows(ansi_ids, char_array, max_rows, max_cols):
     return rows
 
 
-def to_ascii(frame, *, width=None, height=None, sampled=False):
+def grade_cells(frame, *, width=None, height=None, sampled=False):
+    """Grade a frame and choose each cell's character, without encoding it.
+
+    Returns ``(indices, colours, rows, cols)``: ``indices`` picks from CHARS
+    per cell and ``colours`` is the RGB tint per cell (uint8), or ``None`` when
+    ASCII_COLOR is off. This is exactly the work ``to_ascii`` does before it
+    writes text, so a local glyph display and the terminal/web output choose
+    the same characters and colours from the same grid.
     """
-    Converts a frame to ASCII using a 'Cover' (Zoom/Crop) scaling method.
-    Optimized to crop the image pixels *before* color grading for efficiency.
-    With sampled=True, input is an exact character grid already sampled from
-    the source layers: only grading, glyph selection and ANSI encoding run.
-    """
-    if frame is None:
-        return ""
+    indices, colours, _, _, max_rows, max_cols = _grade(
+        frame, width=width, height=height, sampled=sampled)
+    return indices, colours, max_rows, max_cols
+
+
+def _grade(frame, *, width=None, height=None, sampled=False):
 
     # --- 1. GET CONSTRAINTS ---
     max_cols = width if width is not None else getattr(settings, 'ASCII_WIDTH', 90)
@@ -165,8 +171,8 @@ def to_ascii(frame, *, width=None, height=None, sampled=False):
     _refresh_gamma_lut()          # no-op unless ASCII_GAMMA actually moved
     gray = cv2.LUT(gray, GAMMA_LUT)
     indices = ((255 - gray) / 255 * (len(CHARS) - 1)).astype(int)
-    char_array = CHARS[indices]
 
+    color_source = None
     if getattr(settings, 'ASCII_COLOR', False):
         # Optional: blur color channels to create longer same-color runs.
         # Characters (detail) stay sharp — only the color tinting is softened.
@@ -175,7 +181,23 @@ def to_ascii(frame, *, width=None, height=None, sampled=False):
         color_source = color_tint if color_tint is not None else frame_boosted
         if color_blur > 0:
             color_source = cv2.GaussianBlur(color_source, (color_blur, color_blur), 0)
+    return indices, color_source, truecolor, None, max_rows, max_cols
 
+
+def to_ascii(frame, *, width=None, height=None, sampled=False):
+    """
+    Converts a frame to ASCII using a 'Cover' (Zoom/Crop) scaling method.
+    Optimized to crop the image pixels *before* color grading for efficiency.
+    With sampled=True, input is an exact character grid already sampled from
+    the source layers: only grading, glyph selection and ANSI encoding run.
+    """
+    if frame is None:
+        return ""
+    indices, color_source, truecolor, _, max_rows, max_cols = _grade(
+        frame, width=width, height=height, sampled=sampled)
+    char_array = CHARS[indices]
+
+    if color_source is not None:
         if truecolor:
             from ascii_encoding import encode_rgb_rows
             return encode_rgb_rows(color_source, char_array) + RESET_CODE
