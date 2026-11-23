@@ -12,6 +12,15 @@ from ascii_color_sharing import ColorSharingEngine
 from ascii_encoding import encode_rgb_rows
 
 
+def setUpModule():
+    # The native colour-sharing library is built, not committed. Without it
+    # these tests cannot run at all: say so instead of failing every test.
+    from ascii_color_sharing import library_path
+    if not library_path().is_file():
+        raise unittest.SkipTest('colour sharing not built: run '
+                                '.venv/bin/python utilities/build_ascii_color_sharing.py')
+
+
 def reference(rgb, lab, tolerance, edge):
     """Unpruned prototype algorithm, deliberately independent of the C code."""
     out = rgb.copy()

@@ -19,6 +19,8 @@ from utilities.bake_ascii_rgb import bake, pack_sample
 
 class RgbBakeTests(unittest.TestCase):
     def setUp(self):
+        # tmp/ is gitignored, so a fresh checkout does not have it.
+        Path('tmp').mkdir(exist_ok=True)
         self.temp = tempfile.TemporaryDirectory(dir='tmp', prefix='rgb_web_test_')
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)

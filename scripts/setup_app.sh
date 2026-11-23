@@ -345,13 +345,13 @@ get_packages_for_platform() {
             pkg_list="python3 python3-pip python3-devel python3-tkinter gcc gcc-c++ make cmake pkgconfig \
 libwebp-devel libjpeg-turbo-devel SDL2-devel alsa-lib-devel portaudio python3-opencv \
 mesa-libGL-devel mesa-libGLU-devel mesa-libEGL-devel mesa-libGLES-devel \
-libglvnd-devel glfw-devel mesa-utils \
+libglvnd-devel glfw-devel mesa-utils python3-rtmidi \
 chrony ninja-build bind-utils certbot python3-certbot-nginx"
             ;;
         arch)
             # Arch Linux equivalents
             pkg_list="python python-pip tk base-devel cmake pkg-config ninja \
-libwebp libjpeg-turbo sdl2 alsa-lib mesa glu glfw portaudio python-opencv ffmpeg \
+libwebp libjpeg-turbo sdl2 alsa-lib mesa glu glfw portaudio python-opencv ffmpeg python-rtmidi \
 chrony bind-tools certbot certbot-nginx"
             ;;
         macos)

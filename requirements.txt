@@ -5,6 +5,10 @@
 moderngl  # Full-app renderer; also checked by setup on macOS
 #webp
 mido
+# Live MIDI ports for mido (MIDI clock). Linux gets it from the system package
+# (python3-rtmidi / python-rtmidi, see setup_app.sh), which avoids compiling
+# it on boards with no prebuilt wheel; macOS and Windows have wheels.
+python-rtmidi; sys_platform != "linux"
 glfw  # Python bindings; libglfw3 and Mesa runtime are installed via system-requirements.txt
 PyTurboJPEG==1.8.2
 SimpleWebsocketServer
@@ -15,6 +19,7 @@ pyautogui
 pynput
 setproctitle
 psutil  # Status page (lightweight_monitor). Debian also gets it as python3-psutil; macOS, Fedora and Arch only through pip.
+pytest  # Test runner for tests/ and modem_tests/
 numpy>=1.24
 scipy>=1.10
 Pillow>=9.5

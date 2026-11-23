@@ -260,8 +260,9 @@ def _font():
 def build_atlas(chars):
     """One white-on-transparent tile per palette entry, in palette order.
 
-    Tiles are the font's natural monospace cell (advance x line height); the
-    draw stretches them to the cell, as the browser scales its text. Returns
+    Tiles are the font's widest advance ('W') by its line height, each
+    letter centred across it; the draw stretches them to the cell, as the
+    browser scales its text. Returns
     the atlas and the tile size; tiles sit ATLAS_GUTTER pixels apart.
     """
     from PIL import Image, ImageDraw
@@ -277,7 +278,10 @@ def build_atlas(chars):
     image = Image.new('L', (pitch_w * ATLAS_COLUMNS, pitch_h * rows), 0)
     draw = ImageDraw.Draw(image)
     for i, ch in enumerate(chars):
-        x = (i % ATLAS_COLUMNS) * pitch_w + ATLAS_GUTTER
+        # Centred in the cell: a proportional font's narrow letters (i, l, j)
+        # would otherwise sit at the left with a gap to the right. A
+        # monospaced font's advance is the cell, so nothing moves.
+        x = (i % ATLAS_COLUMNS) * pitch_w + ATLAS_GUTTER + (tile_w - font.getlength(ch)) / 2
         y = (i // ATLAS_COLUMNS) * pitch_h + ATLAS_GUTTER
         draw.text((x, y + ascent), ch, fill=255, font=font, anchor='ls')
     return np.asarray(image, np.uint8), (tile_w, tile_h), (pitch_w, pitch_h)

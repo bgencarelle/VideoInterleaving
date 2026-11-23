@@ -125,7 +125,7 @@ Example: `--mode asciilocal --ascii-glow 0.6 --ascii-strokes 0.5`.
 | `LOCAL_ASCII_GLOW_FROM` | 32 | Cell height (pixels) where the glow starts |
 | `LOCAL_ASCII_GLOW_FULL` | 8 | Cell height (pixels) from which it is at full strength |
 | `LOCAL_ASCII_STROKES` | 0 | `--ascii-strokes`: keep small letters bright |
-| `LOCAL_ASCII_FONT` | `CenturySchoolbookBold.ttf` | Path to any TTF/OTF/WOFF2 Pillow can open, from the repo root or absolute |
+| `LOCAL_ASCII_FONT` | `static/fonts/century-schoolbook/CenturySchoolbookBold.ttf` | Path to any TTF/OTF/WOFF2 Pillow can open, from the repo root or absolute |
 
 The range is a look decision: set it by eye on the display it runs on.
 

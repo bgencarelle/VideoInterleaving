@@ -69,28 +69,6 @@ def _build_colored_rows(ansi_ids, char_array, max_rows, max_cols):
     return rows
 
 
-
-def _build_colored_rows(ansi_ids, char_array, max_rows, max_cols):
-    """
-    Build output rows with run-length color encoding.
-    Only emits a color escape when the color changes from the previous character.
-    """
-    rows = []
-    for r in range(max_rows):
-        parts = []
-        last_id = -1
-        id_row = ansi_ids[r]
-        ch_row = char_array[r]
-        for c in range(max_cols):
-            cid = id_row[c]
-            if cid != last_id:
-                parts.append(ANSI_LUT[cid])
-                last_id = cid
-            parts.append(ch_row[c])
-        rows.append("".join(parts))
-    return rows
-
-
 def grade_cells(frame, *, width=None, height=None, sampled=False):
     """Grade a frame and choose each cell's character, without encoding it.
 

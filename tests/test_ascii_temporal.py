@@ -7,6 +7,15 @@ from ascii_temporal import TemporalRunPlanner, TemporalTerminalEncoder
 from tests.test_ascii_delta import picture, apply
 
 
+def setUpModule():
+    # The native colour-sharing library is built, not committed. Without it
+    # these tests cannot run at all: say so instead of failing every test.
+    from ascii_color_sharing import library_path
+    if not library_path().is_file():
+        raise unittest.SkipTest('colour sharing not built: run '
+                                '.venv/bin/python utilities/build_ascii_color_sharing.py')
+
+
 class TemporalTests(unittest.TestCase):
     def test_current_reference_bounds_do_not_accumulate(self):
         planner = TemporalRunPlanner(tolerance=1)
