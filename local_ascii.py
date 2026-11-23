@@ -314,11 +314,23 @@ uniform vec2 atlas_px;
 uniform float atlas_columns;
 out vec2 uv;
 out vec3 tint;
+// Rotation (R key / --rotation): the picture is laid out on a canvas of
+// size viewport, then turned onto the screen a quarter at a time,
+// counter-clockwise as the image itself turns in local mode.
+uniform float quarter;
+vec2 on_screen(vec2 p) {
+    vec2 screen = viewport;
+    vec2 s = p;
+    if (quarter == 1.0) { s = vec2(p.y, viewport.x - p.x); screen = viewport.yx; }
+    else if (quarter == 2.0) { s = viewport - p; }
+    else if (quarter == 3.0) { s = vec2(viewport.y - p.y, p.x); screen = viewport.yx; }
+    return s / screen * vec2(2.0, -2.0) + vec2(-1.0, 1.0);
+}
 void main() {
     vec2 at = origin + vec2(float(gl_InstanceID % columns) * cell.x,
                             float(gl_InstanceID / columns) * row_step);
     vec2 pixel = at + corner * cell;
-    gl_Position = vec4(pixel / viewport * vec2(2.0, -2.0) + vec2(-1.0, 1.0), 0.0, 1.0);
+    gl_Position = vec4(on_screen(pixel), 0.0, 1.0);
     vec2 t = vec2(mod(glyph, atlas_columns), floor(glyph / atlas_columns));
     uv = (t * pitch_px + gutter_px + corner * tile_px) / atlas_px;
     tint = colour;
@@ -331,10 +343,22 @@ uniform vec2 viewport;
 uniform vec2 origin;
 uniform vec2 area;
 out vec2 at;
+// Rotation (R key / --rotation): the picture is laid out on a canvas of
+// size viewport, then turned onto the screen a quarter at a time,
+// counter-clockwise as the image itself turns in local mode.
+uniform float quarter;
+vec2 on_screen(vec2 p) {
+    vec2 screen = viewport;
+    vec2 s = p;
+    if (quarter == 1.0) { s = vec2(p.y, viewport.x - p.x); screen = viewport.yx; }
+    else if (quarter == 2.0) { s = viewport - p; }
+    else if (quarter == 3.0) { s = vec2(viewport.y - p.y, p.x); screen = viewport.yx; }
+    return s / screen * vec2(2.0, -2.0) + vec2(-1.0, 1.0);
+}
 void main() {
     at = corner * area;
     vec2 pixel = origin + at;
-    gl_Position = vec4(pixel / viewport * vec2(2.0, -2.0) + vec2(-1.0, 1.0), 0.0, 1.0);
+    gl_Position = vec4(on_screen(pixel), 0.0, 1.0);
 }
 """
 
@@ -488,8 +512,16 @@ class LocalAsciiDisplay:
             if self._fit_key(glfw.get_framebuffer_size(self.window)) != self._framebuffer:
                 self.dirty = True          # resized, fullscreen toggled or new picture shape: refit
 
+    @staticmethod
+    def _canvas(framebuffer_size):
+        """Canvas the picture is laid out on, and quarter turns onto the
+        screen: the window turned by the rotation (R key / --rotation)."""
+        width, height = framebuffer_size
+        quarter = int(round(getattr(renderer, '_rotation_angle', 0) or 0)) % 360 // 90
+        return (height, width, quarter) if quarter % 2 else (width, height, quarter)
+
     def _fit_key(self, framebuffer_size):
-        key = tuple(framebuffer_size)
+        key = self._canvas(framebuffer_size)
         return key + tuple(renderer._image_size) if self.shape == 'picture' else key
 
     def _area(self, width, height, aspect):
@@ -501,7 +533,7 @@ class LocalAsciiDisplay:
     def fit(self, framebuffer_size):
         """Shape the master grid to the picture or the window. True when it
         was rebuilt (the picture must then be captured again)."""
-        width, height = framebuffer_size
+        width, height, _ = self._canvas(framebuffer_size)
         if not self.fill or width <= 0 or height <= 0:
             return False
         key = self._fit_key(framebuffer_size)
@@ -575,6 +607,7 @@ class LocalAsciiDisplay:
         self.dirty = False
         if self.glyphs is None or width <= 0 or height <= 0:
             return
+        width, height, quarter = self._canvas(framebuffer_size)
         master_w, master_h = self.master
         # Fit the picture inside the window, then space rows like the
         # browser: line_spacing apart, fitted to the picture height. The
@@ -615,12 +648,13 @@ class LocalAsciiDisplay:
                     strength = glow_strength(g_cell_h, self.glow, self.glow_from, self.glow_full)
                     if strength > 0:
                         self._draw_glow(g_glyphs, g_colours, (width, height), (area_w, area_h),
-                                        g_cell_h, strength)
+                                        g_cell_h, strength, quarter)
                 data = np.empty(rows * cols, self.instance_dtype)
                 data['glyph'] = glyphs.ravel()
                 data['colour'] = colours.reshape(-1, 3)
                 self.instances.write(data.tobytes())
                 self.program['viewport'].value = (float(width), float(height))
+                self.program['quarter'].value = float(quarter)
                 self.program['origin'].value = origin
                 self.program['cell'].value = (area_w / cols, cell_h)
                 self.program['row_step'].value = cell_h * self.line_spacing
@@ -631,7 +665,7 @@ class LocalAsciiDisplay:
         finally:
             self.ctx.disable(moderngl.BLEND)
 
-    def _draw_glow(self, glyphs, colours, viewport, area, cell_h, strength):
+    def _draw_glow(self, glyphs, colours, viewport, area, cell_h, strength, quarter=0):
         """Under the letters: each cell's colour at its own brightness (what
         its letter's ink stands for), blended across neighbouring cells."""
         import moderngl
@@ -650,6 +684,7 @@ class LocalAsciiDisplay:
         width, height = viewport
         area_w, area_h = area
         p['viewport'].value = (float(width), float(height))
+        p['quarter'].value = float(quarter)
         p['origin'].value = ((width - area_w) / 2, (height - area_h) / 2)
         p['area'].value = (float(area_w), float(area_h))
         p['rows'].value = float(rows)

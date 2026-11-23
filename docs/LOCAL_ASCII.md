@@ -45,7 +45,10 @@ columns follow, at every zoom size:
   default, the master at the fine end; the grid is letterboxed in the
   window and the image in the grid.
 
-The grid is reshaped when the window changes (fullscreen toggle, resize).
+The grid is reshaped when the window changes (fullscreen toggle, resize,
+rotation). Rotation (`R`, `--rotation`) turns the whole ASCII picture,
+letters included, as local mode turns the image; mirroring (`M`) mirrors the
+sampled picture.
 
 Two drivers set it:
 
