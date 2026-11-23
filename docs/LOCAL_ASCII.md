@@ -52,6 +52,25 @@ short.
 The finest grid can be set per run: `--mode asciilocal --ascii-grid 200x120`
 (at least 15x10). Zoom then ranges from 15x10 up to it.
 
+## Small letters
+
+Small letters cover little of their cells, so the eye averages them with the
+black between them and the picture goes dark. Two arguments counter it, both
+off by default:
+
+- `--ascii-glow F` (0-1): under the letters, each cell's colour at its own
+  brightness, blended across neighbouring cells (a texture one texel per
+  cell, filtered). It starts when cells drop below `LOCAL_ASCII_GLOW_FROM`
+  pixels high and is at full strength from `LOCAL_ASCII_GLOW_FULL` down, so
+  large letters look as before.
+- `--ascii-strokes F` (0-1): the atlas's smaller mip levels keep their
+  brightest pixels instead of averaging thin strokes to grey (0 averages as
+  before; 1 keeps each 2x2 block as bright as its brightest pixel). It acts
+  only where letters are drawn smaller than the atlas, more the smaller they
+  get; at the very smallest sizes 1 turns letters into solid blocks.
+
+Example: `--mode asciilocal --ascii-glow 0.6 --ascii-strokes 0.5`.
+
 ## Settings (settings.py)
 
 | Setting | Default | Meaning |
@@ -65,6 +84,10 @@ The finest grid can be set per run: `--mode asciilocal --ascii-grid 200x120`
 | `LOCAL_ASCII_WALK_RATE` | 30 | Mouse/keys: rows per second toward a new size |
 | `LOCAL_ASCII_RANDOM_TRANSITION` | `(2.0, 8.0)` | Random driver: seconds each change takes, drawn per change, eased; `(0, 0)` jumps |
 | `LOCAL_ASCII_LINE_SPACING` | 1.05 | As the web viewer |
+| `LOCAL_ASCII_GLOW` | 0 | `--ascii-glow`: neighbouring cells' colour under small letters |
+| `LOCAL_ASCII_GLOW_FROM` | 32 | Cell height (pixels) where the glow starts |
+| `LOCAL_ASCII_GLOW_FULL` | 8 | Cell height (pixels) from which it is at full strength |
+| `LOCAL_ASCII_STROKES` | 0 | `--ascii-strokes`: keep small letters bright |
 | `LOCAL_ASCII_FONT` | Schoolbook Mono Black | Any font Pillow can open |
 
 The range is a look decision: set it by eye on the display it runs on.

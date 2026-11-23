@@ -30,6 +30,7 @@ import settings
 ATLAS_FONT_PX = 96        # glyphs are drawn once, large, and mipmapped down
 ATLAS_COLUMNS = 8
 ATLAS_GUTTER = 8          # empty pixels around each tile: small mip levels must not bleed
+ATLAS_ALIGN = 64          # tile slots are a multiple of this, so mip levels 1-6 never mix tiles
 
 
 def _setting(name, default):
@@ -217,7 +218,10 @@ def build_atlas(chars):
     ascent, descent = font.getmetrics()
     tile_w = max(1, int(math.ceil(font.getlength('W'))))
     tile_h = ascent + descent
-    pitch_w, pitch_h = tile_w + 2 * ATLAS_GUTTER, tile_h + 2 * ATLAS_GUTTER
+    # Slots padded to ATLAS_ALIGN: every 2x2 reduction down to 1/64 then stays
+    # inside one tile, whatever filter builds the levels.
+    pitch_w = -(-(tile_w + 2 * ATLAS_GUTTER) // ATLAS_ALIGN) * ATLAS_ALIGN
+    pitch_h = -(-(tile_h + 2 * ATLAS_GUTTER) // ATLAS_ALIGN) * ATLAS_ALIGN
     rows = int(math.ceil(len(chars) / ATLAS_COLUMNS))
     image = Image.new('L', (pitch_w * ATLAS_COLUMNS, pitch_h * rows), 0)
     draw = ImageDraw.Draw(image)
@@ -225,7 +229,37 @@ def build_atlas(chars):
         x = (i % ATLAS_COLUMNS) * pitch_w + ATLAS_GUTTER
         y = (i // ATLAS_COLUMNS) * pitch_h + ATLAS_GUTTER
         draw.text((x, y + ascent), ch, fill=255, font=font, anchor='ls')
-    return np.asarray(image, np.uint8), (tile_w, tile_h)
+    return np.asarray(image, np.uint8), (tile_w, tile_h), (pitch_w, pitch_h)
+
+
+def mip_levels(atlas, strokes):
+    """Mip levels 1.. for the atlas, each from the one above it.
+
+    Each 2x2 block becomes ``mean + strokes * (max - mean)``: 0 is the usual
+    average, where thin strokes fade to grey as letters shrink; 1 keeps every
+    block as bright as its brightest pixel, so small letters keep their ink.
+    Only levels below full size change, so it acts only where letters are
+    drawn smaller than the atlas -- the smaller, the more.
+    """
+    levels = []
+    level = atlas.astype(np.float32)
+    while min(level.shape) > 1:
+        h, w = level.shape[0] // 2, level.shape[1] // 2
+        blocks = level[:2 * h, :2 * w].reshape(h, 2, w, 2)
+        mean, peak = blocks.mean(axis=(1, 3)), blocks.max(axis=(1, 3))
+        level = mean + strokes * (peak - mean)
+        levels.append(np.clip(level + .5, 0, 255).astype(np.uint8))
+    return levels
+
+
+def glow_strength(cell_h, glow, start, full):
+    """Glow under the letters for a cell this many pixels high: none from
+    ``start`` up, rising to ``glow`` at ``full`` and below."""
+    if glow <= 0 or cell_h >= start:
+        return 0.0
+    if cell_h <= full or start <= full:
+        return float(glow)
+    return float(glow) * (start - cell_h) / (start - full)
 
 
 VERTEX = """
@@ -252,6 +286,38 @@ void main() {
     vec2 t = vec2(mod(glyph, atlas_columns), floor(glyph / atlas_columns));
     uv = (t * pitch_px + gutter_px + corner * tile_px) / atlas_px;
     tint = colour;
+}
+"""
+
+GLOW_VERTEX = """
+in vec2 corner;
+uniform vec2 viewport;
+uniform vec2 origin;
+uniform vec2 area;
+out vec2 at;
+void main() {
+    at = corner * area;
+    vec2 pixel = origin + at;
+    gl_Position = vec4(pixel / viewport * vec2(2.0, -2.0) + vec2(-1.0, 1.0), 0.0, 1.0);
+}
+"""
+
+# The shown grid's colours, one texel per cell, filtered linearly: between
+# the letters each pixel gets a blend of the cells around it. Texel centres
+# sit on the cell centres (rows are line_spacing apart, as the letters are).
+GLOW_FRAGMENT = """
+uniform sampler2D cells;
+uniform vec2 area;          // picture size, pixels
+uniform float rows;
+uniform float cell_h;
+uniform float row_step;
+uniform float strength;
+in vec2 at;
+out vec4 result;
+void main() {
+    vec2 uv = vec2(at.x / area.x,
+                   (at.y - 0.5 * cell_h + 0.5 * row_step) / (row_step * rows));
+    result = vec4(texture(cells, uv).rgb, strength);
 }
 """
 
@@ -290,18 +356,21 @@ class LocalAsciiDisplay:
         self.line_spacing = float(_setting('LOCAL_ASCII_LINE_SPACING', 1.05))
         self.target = ctx.simple_framebuffer(self.master, components=3)
 
-        atlas, self.tile_px = build_atlas(list(ascii_converter.CHARS))
+        atlas, self.tile_px, pitch = build_atlas(list(ascii_converter.CHARS))
         h, w = atlas.shape
         self.atlas = ctx.texture((w, h), 1, np.ascontiguousarray(atlas).tobytes())
         self.atlas.build_mipmaps()
+        self.strokes = min(1.0, max(0.0, float(_setting('LOCAL_ASCII_STROKES', 0.0))))
+        if self.strokes > 0:
+            for level, image in enumerate(mip_levels(atlas, self.strokes), 1):
+                self.atlas.write(np.ascontiguousarray(image).tobytes(), level=level, alignment=1)
         self.atlas.filter = (moderngl.LINEAR_MIPMAP_LINEAR, moderngl.LINEAR)
         self.atlas.repeat_x = self.atlas.repeat_y = False
 
         header = "#version 300 es\nprecision mediump float;\n" if ctx.version_code < 330 else "#version 330 core\n"
         self.program = ctx.program(vertex_shader=header + VERTEX, fragment_shader=header + FRAGMENT)
         self.program['tile_px'].value = tuple(float(v) for v in self.tile_px)
-        self.program['pitch_px'].value = (self.tile_px[0] + 2.0 * ATLAS_GUTTER,
-                                          self.tile_px[1] + 2.0 * ATLAS_GUTTER)
+        self.program['pitch_px'].value = (float(pitch[0]), float(pitch[1]))
         self.program['gutter_px'].value = float(ATLAS_GUTTER)
         self.program['atlas_px'].value = (float(w), float(h))
         self.program['atlas_columns'].value = float(ATLAS_COLUMNS)
@@ -314,13 +383,26 @@ class LocalAsciiDisplay:
             (self.corners, '2f', 'corner'),
             (self.instances, '1f 3f1 1x/i', 'glyph', 'colour'),
         ])
+        # Glow: the shown grid's colours as a tiny texture under the letters.
+        self.glow = max(0.0, float(_setting('LOCAL_ASCII_GLOW', 0.0)))
+        self.glow_from = float(_setting('LOCAL_ASCII_GLOW_FROM', 32))
+        self.glow_full = float(_setting('LOCAL_ASCII_GLOW_FULL', 8))
+        self.glow_program = self.glow_vao = None
+        self.glow_cells = None
+        if self.glow > 0:
+            self.glow_program = ctx.program(vertex_shader=header + GLOW_VERTEX,
+                                            fragment_shader=header + GLOW_FRAGMENT)
+            self.glow_program['cells'].value = 1
+            self.glow_vao = ctx.vertex_array(self.glow_program, [(self.corners, '2f', 'corner')])
         self.glyphs = None
         self.colours = None
         self.dirty = True
         print(f"[ASCII-LOCAL] Master grid {self.master[0]}x{self.master[1]}; "
               f"rows {self.zoom.low}-{self.zoom.high}, home {self.zoom.home}; "
               f"zoom: {self.zoom.driver}, random changes "
-              f"{self.zoom.transition[0]:g}-{self.zoom.transition[1]:g} s")
+              f"{self.zoom.transition[0]:g}-{self.zoom.transition[1]:g} s; "
+              f"glow {self.glow:g} (cells under {self.glow_from:g}-{self.glow_full:g} px), "
+              f"strokes {self.strokes:g}")
 
     # Input -------------------------------------------------------------------
     def attach(self, window):
@@ -388,8 +470,10 @@ class LocalAsciiDisplay:
         ys = np.minimum(master_h - 1, ((np.arange(rows) + .5) * master_h / rows).astype(int))
         xs = np.minimum(master_w - 1, ((np.arange(cols) + .5) * master_w / cols).astype(int))
         data = np.empty(rows * cols, self.instance_dtype)
-        data['glyph'] = self.glyphs[np.ix_(ys, xs)].ravel()
-        data['colour'] = self.colours[np.ix_(ys, xs)].reshape(-1, 3)
+        glyphs = self.glyphs[np.ix_(ys, xs)]
+        colours = self.colours[np.ix_(ys, xs)]
+        data['glyph'] = glyphs.ravel()
+        data['colour'] = colours.reshape(-1, 3)
         self.instances.write(data.tobytes())
 
         # Fit the picture (the sampled cell proportions) inside the window,
@@ -412,13 +496,45 @@ class LocalAsciiDisplay:
         self.ctx.enable(moderngl.BLEND)
         self.ctx.blend_func = moderngl.SRC_ALPHA, moderngl.ONE_MINUS_SRC_ALPHA
         try:
+            strength = glow_strength(cell_h, self.glow, self.glow_from, self.glow_full)
+            if strength > 0:
+                self._draw_glow(glyphs, colours, (width, height), (area_w, area_h),
+                                cell_h, strength)
             self.vao.render(mode=moderngl.TRIANGLE_STRIP, instances=rows * cols)
         finally:
             self.ctx.disable(moderngl.BLEND)
 
+    def _draw_glow(self, glyphs, colours, viewport, area, cell_h, strength):
+        """Under the letters: each cell's colour at its own brightness (what
+        its letter's ink stands for), blended across neighbouring cells."""
+        import moderngl
+        rows, cols = glyphs.shape
+        level = 1.0 - glyphs / max(1, len(ascii_converter.CHARS) - 1)
+        cells = np.clip(colours * level[..., None] + .5, 0, 255).astype(np.uint8)
+        if self.glow_cells is None or self.glow_cells.size != (cols, rows):
+            if self.glow_cells is not None:
+                self.glow_cells.release()
+            self.glow_cells = self.ctx.texture((cols, rows), 3, alignment=1)
+            self.glow_cells.filter = (moderngl.LINEAR, moderngl.LINEAR)
+            self.glow_cells.repeat_x = self.glow_cells.repeat_y = False
+        self.glow_cells.write(np.ascontiguousarray(cells).tobytes(), alignment=1)
+        self.glow_cells.use(1)
+        p = self.glow_program
+        width, height = viewport
+        area_w, area_h = area
+        p['viewport'].value = (float(width), float(height))
+        p['origin'].value = ((width - area_w) / 2, (height - area_h) / 2)
+        p['area'].value = (float(area_w), float(area_h))
+        p['rows'].value = float(rows)
+        p['cell_h'].value = float(cell_h)
+        p['row_step'].value = float(cell_h * self.line_spacing)
+        p['strength'].value = float(strength)
+        self.glow_vao.render(mode=moderngl.TRIANGLE_STRIP)
+
     def close(self):
         for resource in (self.vao, self.instances, self.corners, self.program,
-                         self.atlas, self.target):
+                         self.atlas, self.target, self.glow_vao, self.glow_program,
+                         self.glow_cells):
             try:
                 resource.release()
             except Exception:

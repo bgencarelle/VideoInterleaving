@@ -6,7 +6,9 @@ import unittest
 from unittest import mock
 
 import local_ascii
-from local_ascii import Zoom, dimensions, update_zoom_selection
+import numpy as np
+
+from local_ascii import Zoom, dimensions, glow_strength, mip_levels, update_zoom_selection
 
 COARSE, DEFAULT, MASTER = (15, 10), (60, 40), (120, 80)
 
@@ -28,6 +30,26 @@ class DimensionsTests(unittest.TestCase):
     def test_multiplied_master_extends_the_fine_end(self):
         self.assertEqual(dimensions(160, DEFAULT, (240, 160)), (240, 160))
         self.assertEqual(dimensions(40, DEFAULT, (240, 160)), (60, 40))
+
+
+class SmallLetterTests(unittest.TestCase):
+    def test_glow_ramps_in_as_cells_shrink(self):
+        self.assertEqual(glow_strength(40, .6, 32, 8), 0.0)
+        self.assertEqual(glow_strength(32, .6, 32, 8), 0.0)
+        self.assertAlmostEqual(glow_strength(20, .6, 32, 8), .3)
+        self.assertEqual(glow_strength(8, .6, 32, 8), .6)
+        self.assertEqual(glow_strength(3, .6, 32, 8), .6)
+        self.assertEqual(glow_strength(3, 0, 32, 8), 0.0)
+
+    def test_strokes_keep_thin_lines_bright(self):
+        atlas = np.zeros((8, 8), np.uint8)
+        atlas[:, 3] = 255                      # a one-pixel stroke
+        averaged = mip_levels(atlas, 0.0)
+        kept = mip_levels(atlas, 1.0)
+        self.assertEqual(averaged[0].max(), 128)
+        self.assertEqual(kept[0].max(), 255)
+        self.assertEqual(kept[-1].shape, (1, 1))
+        self.assertEqual(kept[-1][0, 0], 255)
 
 
 def settings(**values):

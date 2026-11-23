@@ -158,6 +158,23 @@ def configure_runtime():
     )
 
     parser.add_argument(
+        "--ascii-glow",
+        type=float,
+        metavar="F",
+        help="--mode asciilocal: fill between small letters with the "
+             "neighbouring cells' colour, 0-1 (default 0, off). Starts below "
+             "LOCAL_ASCII_GLOW_FROM px cells, full at LOCAL_ASCII_GLOW_FULL"
+    )
+
+    parser.add_argument(
+        "--ascii-strokes",
+        type=float,
+        metavar="F",
+        help="--mode asciilocal: keep small letters bright, 0-1 (default 0: "
+             "averaged as before; 1: as bright as their brightest pixel)"
+    )
+
+    parser.add_argument(
         "--dir",
         help="Path to image source folder (overrides settings.py)"
     )
@@ -625,6 +642,17 @@ def configure_runtime():
     # Options that only mean anything in one mode; say so rather than silently
     # ignoring them. The whole point of a knob is that turning it does
     # something, and a flag accepted in the wrong mode does nothing quietly.
+    for flag, value, name in (("--ascii-glow", args.ascii_glow, "LOCAL_ASCII_GLOW"),
+                              ("--ascii-strokes", args.ascii_strokes, "LOCAL_ASCII_STROKES")):
+        if value is None:
+            continue
+        if not settings.LOCAL_ASCII:
+            print(f"⚠️  {flag} ignored: it applies to --mode asciilocal. "
+                  f"Each mode in VideoInterleaving runs standalone.")
+        elif not (math.isfinite(value) and 0.0 <= value <= 1.0):
+            parser.error(f"{flag} takes a number from 0 to 1")
+        else:
+            setattr(settings, name, value)
     if args.ascii_grid is not None:
         if not settings.LOCAL_ASCII:
             print("⚠️  --ascii-grid ignored: it applies to --mode asciilocal. "
