@@ -170,12 +170,42 @@ class CommandLineTests(unittest.TestCase):
         self.configure("--no-mirror")
         self.assertEqual(settings.INITIAL_MIRROR, 0)
 
+    def test_image_only_scope_gui_flag_opens_the_gui_without_controls(self):
+        self.configure("--image-only")
+        self.assertTrue(settings.SCOPE_GUI)
+        self.assertTrue(settings.SCOPE_GUI_IMAGE_ONLY)
+        self.assertFalse(settings.SCOPE_GUI_FULLSCREEN)
+
+    def test_fullscreen_scope_gui_flag_starts_image_only_fullscreen(self):
+        self.configure("--fullscreen")
+        self.assertTrue(settings.SCOPE_GUI)
+        self.assertTrue(settings.SCOPE_GUI_IMAGE_ONLY)
+        self.assertTrue(settings.SCOPE_GUI_FULLSCREEN)
+
+    def test_image_only_cannot_be_combined_with_disabled_scope_gui(self):
+        with contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit) as err:
+                self.configure("--no-scope-gui", "--image-only")
+        self.assertEqual(err.exception.code, 2)
+
     def test_omitting_the_flags_leaves_the_constants_alone(self):
         settings.INITIAL_ROTATION = 90
         settings.INITIAL_MIRROR = 1
         self.configure()
         self.assertEqual(settings.INITIAL_ROTATION, 90)
         self.assertEqual(settings.INITIAL_MIRROR, 1)
+
+    def test_scope_cli_selects_live_images_and_high_portaudio_channels(self):
+        self.configure("--scope-source", "images", "--scope-channels", "18,19")
+        self.assertEqual(settings.SCOPE_SOURCE, "images")
+        self.assertEqual(settings.SCOPE_CHANNELS, (18, 19))
+        self.assertEqual(settings.SCOPE_RENDER_MODE, "raster")
+
+    def test_runtime_images_accept_vector_and_fusion_without_a_bake(self):
+        for mode in ("vector", "fusion"):
+            with self.subTest(mode=mode):
+                self.configure("--scope-source", "images", "--scope-mode", mode)
+                self.assertEqual(settings.SCOPE_RENDER_MODE, mode)
 
     def test_a_non_quarter_turn_is_rejected_at_the_boundary(self):
         with contextlib.redirect_stderr(io.StringIO()):

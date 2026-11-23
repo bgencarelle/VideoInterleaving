@@ -61,6 +61,9 @@ def _is_wayland_session() -> bool:
 
 
 def _session_label() -> str:
+    # XQuartz may set DISPLAY on macOS, but GLFW still uses native Cocoa.
+    if _is_macos():
+        return "macos"
     if _is_wayland_session():
         return "wayland"
     if os.environ.get("DISPLAY"):
@@ -70,6 +73,18 @@ def _session_label() -> str:
 
 def _is_macos() -> bool:
     return sys.platform == 'darwin'
+
+
+def _position_macos_fullscreen(window, monitor) -> None:
+    """Align a borderless macOS window with its monitor after resizing it."""
+    if not _is_macos() or glfw is None or monitor is None:
+        return
+    try:
+        x, y = glfw.get_monitor_pos(monitor)
+        glfw.set_window_pos(window, x, y)
+    except Exception:
+        pass
+
 
 class DisplayState:
     def __init__(self, image_size: tuple[int, int] = (640, 480)) -> None:
@@ -816,6 +831,10 @@ def _log_backend_usage():
     try:
         # Read existing data if any
         if _BACKEND_USAGE_LOG.exists():
+            # Diagnostics must not make a renderer startup consume movie-sized
+            # RAM. Preserve oversized history untouched rather than parsing it.
+            if _BACKEND_USAGE_LOG.stat().st_size > 1024 * 1024:
+                return
             with open(_BACKEND_USAGE_LOG, 'r') as f:
                 existing = json.load(f)
                 # Merge with current session data
@@ -824,10 +843,14 @@ def _log_backend_usage():
                         existing[key] = _BACKEND_USAGE_DATA[key]
                     elif isinstance(existing[key], list) and isinstance(_BACKEND_USAGE_DATA[key], list):
                         existing[key].extend(_BACKEND_USAGE_DATA[key])
-                _BACKEND_USAGE_DATA = existing
+                # Keep the per-session state separate: assigning merged history
+                # back here doubles that history at the next context creation.
+                data = existing
+        else:
+            data = _BACKEND_USAGE_DATA
         # Write updated data
         with open(_BACKEND_USAGE_LOG, 'w') as f:
-            json.dump(_BACKEND_USAGE_DATA, f, indent=2)
+            json.dump(data, f, indent=2)
     except Exception as e:
         # Don't fail if logging fails
         pass
@@ -902,7 +925,7 @@ def _move_wlrctl_offscreen_once(window_obj):
         pass
 
 
-def display_init(state: DisplayState):
+def display_init(state: DisplayState, *, log_backend=True):
     global window, ctx
 
     is_wayland = _is_wayland_session()
@@ -931,8 +954,10 @@ def display_init(state: DisplayState):
     # --- PATH A: SERVER / HEADLESS MODE ---
     is_server = settings.SERVER_MODE
     is_ascii = getattr(settings, 'ASCII_MODE', False)
+    is_local_frame_output = (
+        getattr(settings, 'LOCAL_FRAME_PORT', None) is not None)
 
-    if is_server or is_ascii:
+    if is_server or is_ascii or is_local_frame_output:
         use_gl = getattr(settings, "HEADLESS_USE_GL", False)
 
         if not use_gl:
@@ -943,8 +968,15 @@ def display_init(state: DisplayState):
         if is_ascii:
             w = getattr(settings, 'ASCII_WIDTH', 120)
             h = getattr(settings, 'ASCII_HEIGHT', 60)
+            if getattr(settings, 'ASCII_WEB_SOURCE_SIZE', None):
+                w, h = settings.ASCII_WEB_SOURCE_SIZE
             width = w if w % 2 == 0 else w + 1
             height = h if h % 2 == 0 else h + 1
+        elif is_local_frame_output and not is_server:
+            width, height = map(int, state.image_size)
+            if width < 1 or height < 1:
+                raise ValueError("local frame render target must be non-empty")
+            print(f"[DISPLAY] Local sender offscreen target: {width}x{height}")
         else:
             # Always use HEADLESS_RES from settings - do not calculate from image size
             headless_res = getattr(settings, "HEADLESS_RES", (640, 480))
@@ -974,7 +1006,8 @@ def display_init(state: DisplayState):
             )
             renderer.set_viewport_size(width, height)
             print(f"[DISPLAY] Headless legacy GL ready: {width}x{height}")
-            _log_backend_usage()
+            if log_backend:
+                _log_backend_usage()
             return legacy_window
 
         # --- BACKEND WATERFALL STRATEGY ---
@@ -1051,7 +1084,8 @@ def display_init(state: DisplayState):
                 )
                 renderer.set_viewport_size(width, height)
                 print(f"[DISPLAY] Headless legacy GL ready: {width}x{height}")
-                _log_backend_usage()
+                if log_backend:
+                    _log_backend_usage()
                 return legacy_window
 
         if is_ascii:
@@ -1081,7 +1115,8 @@ def display_init(state: DisplayState):
                 finally:
                     glfw.terminate()
             hw._cleanup = _cleanup_hidden
-        _log_backend_usage()
+        if log_backend:
+            _log_backend_usage()
         return hw
 
     # --- PATH B: LOCAL WINDOWED MODE ---
@@ -1116,8 +1151,9 @@ def display_init(state: DisplayState):
             glfw.set_window_attrib(window, glfw.DECORATED, glfw.FALSE)
         else:
             glfw.set_window_attrib(window, glfw.DECORATED, glfw.TRUE)
-            win_w = 400
-            win_h = int(win_w / (eff_w / eff_h)) if eff_h > 0 else 300
+            # Keep windowed mode at a stable 4:3 size; the renderer
+            # letterboxes source images whose aspect differs.
+            win_w, win_h = 400, 300
             current_w, current_h = glfw.get_window_size(window)
             if current_w != win_w or current_h != win_h:
                 glfw.set_window_size(window, win_w, win_h)
@@ -1172,26 +1208,35 @@ def display_init(state: DisplayState):
                 # Additional hints to prevent fullscreen loss on monitor disconnect
                 glfw.window_hint(glfw.RESIZABLE, glfw.FALSE)  # Prevent window resizing
                 glfw.window_hint(glfw.FLOATING, glfw.FALSE)  # Keep window managed
-                # Try actual fullscreen first (even on Wayland)
-                # Fall back to borderless window if fullscreen fails
+                # Wayland: ask the compositor for real fullscreen first, as
+                # main did. A plain screen-sized window is composited every
+                # frame instead of going straight to the display, which on
+                # weak GPUs (Cherry Trail tablet under labwc) dropped the
+                # loop from ~52 to ~30 fps with ~8 missed images a second;
+                # compositors also decorate it. The borderless window stays
+                # as the fallback.
                 if is_wayland:
                     try:
-                        # Attempt actual fullscreen on Wayland
                         win = glfw.create_window(fs_w, fs_h, "Fullscreen", mon, None)
                         if win:
                             return win
                     except Exception as e:
                         print(f"[DISPLAY] Wayland fullscreen failed: {e}, falling back to borderless window")
-                    # Fallback: borderless fullscreen-sized window
+                    glfw.window_hint(glfw.DECORATED, glfw.FALSE)
+                    return glfw.create_window(fs_w, fs_h, "Fullscreen", None, None)
+                # macOS: borderless fullscreen-sized window, positioned on
+                # the monitor; monitor-attached fullscreen is for X11 only.
+                if _is_macos():
                     glfw.window_hint(glfw.DECORATED, glfw.FALSE)
                     win = glfw.create_window(fs_w, fs_h, "Fullscreen", None, None)
+                    if win:
+                        _position_macos_fullscreen(win, mon)
                     return win
                 return glfw.create_window(fs_w, fs_h, "Fullscreen", mon, None)
 
-            aspect = eff_w / eff_h
-            win_w = 400
-            win_h = int(win_w / aspect)
-            return glfw.create_window(win_w, win_h, "Windowed Mode", None, None)
+            # Windowed mode is a stable 4:3 viewport. Non-4:3 source
+            # images are fitted and letterboxed by the renderer.
+            return glfw.create_window(400, 300, "Windowed Mode", None, None)
 
         # Version-first probing (no hardware assumptions):
         # - Prefer desktop OpenGL 3.3 (ModernGL path)
@@ -1330,7 +1375,8 @@ def display_init(state: DisplayState):
             renderer.initialize(ctx)
             print("[DISPLAY] Renderer backend: moderngl")
 
-        _log_backend_usage()
+        if log_backend:
+            _log_backend_usage()
 
         if GAMMA_CORRECTION_ENABLED or ENABLE_SRGB_FRAMEBUFFER:
             try:
@@ -1344,12 +1390,12 @@ def display_init(state: DisplayState):
             _hide_cursor_reliable(window)
 
     # Fullscreen toggling (only if window already exists):
-    # - On Wayland, avoid set_window_monitor (can trigger compositor/device resets).
-    #   Instead, resize the existing window and toggle decoration.
-    # - On other platforms, use set_window_monitor for proper fullscreen.
+    # - Wayland/macOS use resize + decoration changes on borderless windows.
+    # - X11 uses set_window_monitor for proper fullscreen.
     if window is not None:
-        if is_wayland:
-            # Wayland: Resize existing window and toggle decoration
+        if is_wayland or _is_macos():
+            # Wayland/macOS: resize the existing borderless window and toggle
+            # decoration instead of changing monitor attachment.
             current_w, current_h = glfw.get_window_size(window)
             if state.fullscreen:
                 mon = glfw.get_primary_monitor()
@@ -1368,22 +1414,23 @@ def display_init(state: DisplayState):
                 # Only resize if size changed
                 if current_w != fs_w or current_h != fs_h:
                     glfw.set_window_size(window, fs_w, fs_h)
-                    # Note: Wayland doesn't support set_window_pos(), so we skip it
+                    # Wayland does not support set_window_pos(); macOS was
+                    # positioned when its borderless window was created.
                     _hide_cursor_reliable(window)
                 # Ensure borderless
                 glfw.set_window_attrib(window, glfw.DECORATED, glfw.FALSE)
+                _position_macos_fullscreen(window, mon)
                 _hide_cursor_reliable(window)
             else:
-                # Windowed mode: restore decoration and resize
+                # Windowed mode: restore decoration and use a stable 4:3
+                # viewport; non-4:3 source images are letterboxed.
                 glfw.set_window_attrib(window, glfw.DECORATED, glfw.TRUE)
-                # Resize to windowed size based on image aspect
-                win_w = 400
-                win_h = int(win_w / (eff_w / eff_h)) if eff_h > 0 else 300
+                win_w, win_h = 400, 300
                 if current_w != win_w or current_h != win_h:
                     glfw.set_window_size(window, win_w, win_h)
                     _hide_cursor_reliable(window)
         else:
-            # Non-Wayland (X11): Use set_window_monitor for proper fullscreen
+            # X11: Use set_window_monitor for proper fullscreen.
             # On Linux X11, set_window_monitor with current resolution does NOT change display resolution
             # This is safe for low-end Linux systems - window goes fullscreen at current resolution
             current_monitor = glfw.get_window_monitor(window)
@@ -1412,11 +1459,18 @@ def display_init(state: DisplayState):
                     _hide_cursor_reliable(window)
             else:
                 if current_monitor is not None:
-                    # Restore to a small window; actual sizing will be re-derived below via framebuffer size.
                     glfw.set_window_monitor(window, None, 100, 100, 400, 300, 0)
-                    _hide_cursor_reliable(window)
+                    glfw.poll_events()
+
+                current_w, current_h = glfw.get_window_size(window)
+                if current_w != 400 or current_h != 300:
+                    glfw.set_window_size(window, 400, 300)
+                    glfw.poll_events()
+                _hide_cursor_reliable(window)
 
     fb_w, fb_h = glfw.get_framebuffer_size(window)
+    if fb_w <= 0 or fb_h <= 0:
+        fb_w, fb_h = glfw.get_window_size(window)
     if renderer.using_legacy_gl():
         glViewport(0, 0, fb_w, fb_h)
     else:
@@ -1429,9 +1483,12 @@ def display_init(state: DisplayState):
         offset_x = (fb_w - (eff_w * scale)) / 2.0
         offset_y = (fb_h - (eff_h * scale)) / 2.0
     else:
-        scale = fb_w / eff_w
-        offset_x = 0
-        offset_y = 0
+        # Fit both axes in the 4:3 window and center any letterbox space.
+        scale_x = fb_w / eff_w
+        scale_y = fb_h / eff_h
+        scale = min(scale_x, scale_y)
+        offset_x = (fb_w - (eff_w * scale)) / 2.0
+        offset_y = (fb_h - (eff_h * scale)) / 2.0
 
     renderer.set_transform_parameters(
         scale, offset_x, offset_y, state.image_size,

@@ -1,90 +1,108 @@
-"""V3 transport: countable preamble, edge-capture acquisition, corrected level.
+"""V7 pulse acquisition compatibility module.
 
-This is the only transport. It owns the preamble and the way the receiver finds
-the packet; `core.decode_packet` demodulates once the timing is known.
+The V7 wire uses the established edge-counted preamble.  This module retains
+only that acquisition path and its pulse geometry; legacy V1-V6 packet
+encoders, OFDM decoders, and receiver state machines are intentionally gone.
 """
+import math
+
 import numpy as np
-from functools import lru_cache
-from scipy.signal import correlate
-from .audio_common import (pcm, pair, device, wav_blocks, wav_rate, wire_notice,
-                           InputLevel, sounddevice)
-from .core import (REFERENCE_RATE, N, CP, SYMBOL, SYNC_LEN, GUARD, HEADER_GAIN,
-                         IMAGE_GAIN, HEADER_SLOTS, HEADER_FORMAT, HEADER_BYTES,
-                         Layout, SourceCoder, Decoded, coefficient_slots,
-                         phases, pack_header, pack_folders, decode_packet,
-                         default_allocation, resample_packet, _sample_at,
-                         _body_walk, _decode_tables, FOLDER_LIMIT,
-                         band_limited, emit_length, emit_ratio,
-                         PROFILE_CODES, profile_code, profile_name)
+from numba import njit
 
-# --------------------------------------------------------------------------
-# Preamble
-# --------------------------------------------------------------------------
+from .v7_core import _sample_at
 
-HALF = 8                   # samples per half-bit: '1' -> 3 kHz, '0' -> 1.5 kHz
+SYNC_LEN = 288
+HALF = 8
 PREAMBLE_BITS = (0, 0, 0, 0, 0, 0, 1, 0, 0, 1, 0, 1, 1, 1, 0, 0)
-PREAMBLE_AMPLITUDE = .55
+ADAPTIVE_MONO_MODE = 2
+ADAPTIVE_STEREO_MODE = 4  # reuses the retired MONO_500 wire identity
+ADAPTIVE_NESTED_MODE = ADAPTIVE_MONO_MODE  # compatibility alias
+PREAMBLE_AMPLITUDE = 0.55
+SHORT, LONG = HALF, 2 * HALF
+EDGE_HYSTERESIS = 0.2
+# The header's peak as it reaches the detector: the sender sends it near
+# full scale and the live leveler restores it to this (v7_live_input).
+# The Schmitt band is EDGE_HYSTERESIS of it.
+HEADER_ARRIVAL_PEAK = 10**(-1/20)
 
-SHORT, LONG = HALF, 2*HALF
-RELOCK_AFTER = 4           # unverified packets before a detected preset is abandoned
-EDGE_HYSTERESIS = .12      # Schmitt threshold, relative to preamble amplitude
+# Six coded-profile IDs use constant-weight biphase words. ID 4's former
+# MONO_500 meaning is retired and reused for adaptive nested stereo. Every
+# word keeps the same first/last edge and the same edge count, so pulse timing
+# geometry is unchanged; the interval pattern carries the profile ID.  ID 1 is
+# the historical V7 word (Fold-500), preserving its existing pulse signature.
+# Words have minimum Hamming distance six after short/long interval parsing.
+PROFILE_PREAMBLE_BITS = {
+    0: (0, 1, 1, 1, 0, 1, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0),  # Fold-off / aspect-fold-500
+    1: PREAMBLE_BITS,                                        # Fold-500
+    ADAPTIVE_MONO_MODE: (0, 1, 0, 0, 1, 0, 0, 0, 0, 0, 1, 1, 0, 0, 1, 0),  # adaptive nested mono
+    3: (0, 1, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1, 0),  # Mono-off / aspect-mono-500
+    ADAPTIVE_STEREO_MODE: (0, 1, 0, 0, 0, 1, 1, 0, 0, 0, 0, 0, 0, 1, 1, 0),  # adaptive nested stereo; retired MONO_500 ID
+    5: (0, 0, 1, 0, 0, 0, 1, 1, 0, 1, 1, 0, 0, 0, 0, 0),  # Mono-1000
+}
 
 
 def _biphase(bits=PREAMBLE_BITS, half=HALF, amplitude=PREAMBLE_AMPLITUDE):
-    """Biphase-mark: a transition every bit, plus a mid-bit one for a '1'."""
-    level, out = 1., []
+    """Build the countable biphase-mark acquisition preamble."""
+    level, out = 1.0, []
     for bit in bits:
         level = -level
-        out += [level]*half
+        out += [level] * half
         if bit:
             level = -level
-        out += [level]*half
+        out += [level] * half
     wave = np.asarray(out, float)
-    return wave*(amplitude/np.max(np.abs(wave)))
+    return wave * (amplitude / np.max(np.abs(wave)))
 
-
-V3_PRESETS = {
-    'wide-v3': Layout(top_bin=54, image_symbols=15, name='wide-v3',
-                      progressive=True, orthogonal_training=True),
-    'wide-v3-fast': Layout(top_bin=54, image_symbols=15, name='wide-v3-fast',
-                           progressive=True, orthogonal_training=True,
-                           header_split=True),
-    'tape-v3': Layout(top_bin=27, image_symbols=35, name='tape-v3',
-                      progressive=True, orthogonal_training=True),
-    'lean-v3': Layout(top_bin=54, image_symbols=11, name='lean-v3',
-                      progressive=True, orthogonal_training=True,
-                      spread_carriers=True),
-    'mid-v3': Layout(top_bin=39, image_symbols=21, name='mid-v3',
-                     progressive=True, orthogonal_training=True,
-                     spread_carriers=True),
-    'mid-v3-fast': Layout(top_bin=39, image_symbols=21, name='mid-v3-fast',
-                          progressive=True, orthogonal_training=True,
-                          spread_carriers=True, header_split=True),
-    'lean-v3-tape': Layout(top_bin=54, image_symbols=11, name='lean-v3-tape',
-                           progressive=True, orthogonal_training=True),
-    'lean-v3-dense': Layout(top_bin=54, image_symbols=11, name='lean-v3-dense',
-                            progressive=True, orthogonal_training=True,
-                            spread_carriers=True, dense_header=True),
-    'mid-14k': Layout(top_bin=34, image_symbols=21, name='mid-14k',
-                      progressive=True, orthogonal_training=True,
-                      spread_carriers=True, dense_header=True),
-    'lean-14k': Layout(top_bin=34, image_symbols=11, name='lean-14k',
-                       progressive=True, orthogonal_training=True,
-                       spread_carriers=True, dense_header=True),
-    'hires-v3': Layout(top_bin=54, image_symbols=12, name='hires-v3',
-                       progressive=True, orthogonal_training=True,
-                       spread_carriers=True, dense_header=True),
-}
-ALL_PRESETS = dict(V3_PRESETS)
 
 PREAMBLE = _biphase()
-PREAMBLE_ENERGY = float(np.einsum('i,i->', PREAMBLE, PREAMBLE, optimize=False))
 NOMINAL_EDGES = np.flatnonzero(np.diff(np.signbit(PREAMBLE)))
 NOMINAL_SPAN = float(NOMINAL_EDGES[-1] - NOMINAL_EDGES[0])
-MAGIC = b'V3'
+NOMINAL_GAPS = np.diff(NOMINAL_EDGES).astype(float)
+REVERSED_PREAMBLE = PREAMBLE[::-1].copy()
+REVERSED_EDGES = np.flatnonzero(np.diff(np.signbit(REVERSED_PREAMBLE)))
+REVERSED_SPAN = float(REVERSED_EDGES[-1] - REVERSED_EDGES[0])
+REVERSED_GAPS = np.diff(REVERSED_EDGES).astype(float)
+MIN_RUN = len(NOMINAL_GAPS) - 4
 
 
-def edge_intervals(samples, hysteresis=EDGE_HYSTERESIS*PREAMBLE_AMPLITUDE):
+def profile_preamble(profile_code):
+    """Return the read-only Schmitt-coded synchronization word for a profile."""
+    try:
+        return _PROFILE_PREAMBLES[int(profile_code)]
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError(f'unknown pulse profile code {profile_code!r}') from exc
+
+
+_PROFILE_CODES = np.asarray(tuple(PROFILE_PREAMBLE_BITS), dtype=np.int64)
+_PROFILE_PREAMBLES = {
+    code: _biphase(bits) for code, bits in PROFILE_PREAMBLE_BITS.items()
+}
+for _wave in _PROFILE_PREAMBLES.values():
+    _wave.setflags(write=False)
+
+_PROFILE_EDGES = np.asarray([
+    np.flatnonzero(np.diff(np.signbit(_PROFILE_PREAMBLES[int(code)])))
+    for code in _PROFILE_CODES], dtype=np.int64)
+_PROFILE_REVERSED_EDGES = np.asarray([
+    np.flatnonzero(np.diff(np.signbit(_PROFILE_PREAMBLES[int(code)][::-1])))
+    for code in _PROFILE_CODES], dtype=np.int64)
+if (not np.all(_PROFILE_EDGES.shape == (len(_PROFILE_CODES), len(NOMINAL_EDGES))) or
+        not np.all(_PROFILE_REVERSED_EDGES.shape == _PROFILE_EDGES.shape) or
+        not np.all(_PROFILE_EDGES[:, -1]-_PROFILE_EDGES[:, 0] == NOMINAL_SPAN) or
+        not np.all(_PROFILE_REVERSED_EDGES[:, -1]-
+                   _PROFILE_REVERSED_EDGES[:, 0] == NOMINAL_SPAN)):
+    raise RuntimeError('pulse profile words must preserve the timing geometry')
+_PROFILE_GAPS = np.diff(_PROFILE_EDGES, axis=1).astype(np.float64)
+_PROFILE_REVERSED_GAPS = np.diff(_PROFILE_REVERSED_EDGES, axis=1).astype(np.float64)
+_PROFILE_NOMINAL = _PROFILE_EDGES.astype(np.float64)+.5
+_PROFILE_REVERSED_NOMINAL = _PROFILE_REVERSED_EDGES.astype(np.float64)+.5
+for _array in (_PROFILE_CODES, _PROFILE_EDGES, _PROFILE_REVERSED_EDGES,
+               _PROFILE_GAPS, _PROFILE_REVERSED_GAPS, _PROFILE_NOMINAL,
+               _PROFILE_REVERSED_NOMINAL):
+    _array.setflags(write=False)
+
+
+def edge_intervals(samples, hysteresis=EDGE_HYSTERESIS * HEADER_ARRIVAL_PEAK):
     state = np.where(samples > hysteresis, 1,
                      np.where(samples < -hysteresis, -1, 0))
     live = np.flatnonzero(state)
@@ -94,28 +112,24 @@ def edge_intervals(samples, hysteresis=EDGE_HYSTERESIS*PREAMBLE_AMPLITUDE):
     return live[changes + 1]
 
 
-NOMINAL_GAPS = np.diff(NOMINAL_EDGES).astype(float)
-MIN_RUN = len(NOMINAL_GAPS) - 4
-
-
-def _runs(gaps, tolerance=.28):
+def _runs(gaps, tolerance=0.28):
     out = []
     start = 0
     n = len(gaps)
     while start < n:
-        unit = float(np.min(gaps[start:start+MIN_RUN])) if start < n else 0.
+        unit = float(np.min(gaps[start:start + MIN_RUN])) if start < n else 0.0
         if unit <= 0:
             start += 1
             continue
         end = start
         while end < n:
-            g = gaps[end]
-            near_short = abs(g-unit) <= tolerance*unit
-            near_long = abs(g-2*unit) <= tolerance*2*unit
+            gap = gaps[end]
+            near_short = abs(gap - unit) <= tolerance * unit
+            near_long = abs(gap - 2 * unit) <= tolerance * 2 * unit
             if not (near_short or near_long):
                 break
             end += 1
-        if end-start >= MIN_RUN:
+        if end - start >= MIN_RUN:
             out.append((start, end, unit))
             start = end
         else:
@@ -123,522 +137,367 @@ def _runs(gaps, tolerance=.28):
     return out
 
 
-def measure_speed(samples, min_scale=.5, max_scale=4.0):
-    at = edge_intervals(samples)
-    if len(at) < MIN_RUN+1:
+@njit(cache=True, fastmath=False)
+def _pulse_word_kernel(samples, hysteresis, profile_gaps,
+                       profile_reversed_gaps, nominal_span, min_scale,
+                       max_scale, match_both, requested_direction,
+                       positions, starts,
+                       profile_ids, fit_profiles):
+    """Schmitt edges, their interpolated zero crossings, and the start of
+    every edge run whose spacing matches a coded preamble.
+
+    Same rules as measure_pulses_numpy: an edge is the first sample of a new
+    Schmitt state; its time is the last sign change before that sample,
+    interpolated linearly. Profile words share their edge count and span; the
+    short/long interval pattern is decoded by matching those edge counts.
+    """
+    count = samples.shape[0]
+    edges = 0
+    state = 0
+    last_crossing = -1
+    previous_negative = False
+    for i in range(count):
+        value = samples[i]
+        negative = math.copysign(1.0, value) < 0
+        if i >= 1 and negative != previous_negative:
+            last_crossing = i-1
+        previous_negative = negative
+        now = 1 if value > hysteresis else (-1 if value < -hysteresis else 0)
+        if now == 0:
+            continue
+        if state != 0 and now != state:
+            left = last_crossing
+            denominator = samples[left]-samples[left+1]
+            if denominator == 0.0:
+                # Opposite signed zeros can mark a sign-bit transition inside
+                # a dropout. Its only finite sample-time estimate is the
+                # midpoint; the subsequent word matcher rejects the spurious
+                # edge unless the surrounding pulse intervals also fit.
+                positions[edges] = left+.5
+            else:
+                positions[edges] = left+samples[left]/denominator
+            edges += 1
+        state = now
+    width = profile_gaps.shape[1]+1
+    valid = 0
+    for j in range(edges-width+1):
+        scale = (positions[j+width-1]-positions[j])/nominal_span
+        if scale < .98*min_scale or scale > 1.02*max_scale:
+            continue
+        match_count = 0
+        matched_profile = -1
+        matched_direction = 0
+        best_profile = -1
+        best_direction = 0
+        best_score = 1e30
+        for profile in range(profile_gaps.shape[0]):
+            for orientation in range(2 if match_both else 1):
+                direction = 1 if orientation == 0 else -1
+                if (requested_direction != 0 and
+                        direction != requested_direction):
+                    continue
+                gaps = (profile_gaps[profile] if direction > 0 else
+                        profile_reversed_gaps[profile])
+                score = 0.0
+                matched = True
+                for g in range(width-1):
+                    observed = positions[j+g+1]-positions[j+g]
+                    expected = gaps[g]*scale
+                    tolerance = max(1.2, .45*expected)
+                    error = abs(observed-expected)
+                    if error > tolerance:
+                        matched = False
+                        break
+                    normalized = error/tolerance
+                    score += normalized*normalized
+                if matched:
+                    match_count += 1
+                    if match_count == 1:
+                        matched_profile = profile
+                        matched_direction = direction
+                    else:
+                        if (matched_profile >= 0 and
+                                profile != matched_profile):
+                            matched_profile = -2
+                        if direction != matched_direction:
+                            matched_direction = 0
+                    if score < best_score:
+                        best_score = score
+                        best_profile = profile
+                        best_direction = direction
+                    elif (profile != best_profile or
+                          direction != best_direction):
+                        # Keep timing from the best template, but fail closed
+                        # on a profile/direction match that is not unique.
+                        pass
+        if match_count:
+            # Signed, one-based edge indices leave zero for an ambiguous
+            # direction. Multiple matching IDs get profile_id=-1.
+            starts[valid] = (best_direction*(j+1)
+                             if matched_direction != 0 else 0)
+            if matched_profile >= 0 and matched_direction != 0:
+                profile_ids[valid] = best_profile
+            else:
+                profile_ids[valid] = -1
+            fit_profiles[valid] = best_profile
+            valid += 1
+    return edges, valid
+
+
+def _measure_pulse_profiles(samples, min_scale, max_scale, match_both,
+                            requested_direction=0):
+    """Compiled edge matcher; return earliest fitted hit plus profile ID."""
+    samples = np.asarray(samples)
+    if samples.ndim != 1 or samples.dtype not in (np.float32, np.float64):
+        samples = np.asarray(samples, dtype=np.float32).reshape(-1)
+    positions = np.empty(len(samples))
+    starts = np.empty(len(samples), np.int64)
+    profile_ids = np.empty(len(samples), np.int64)
+    fit_profiles = np.empty(len(samples), np.int64)
+    edges, valid = _pulse_word_kernel(
+        samples, np.float64(EDGE_HYSTERESIS*HEADER_ARRIVAL_PEAK),
+        _PROFILE_GAPS, _PROFILE_REVERSED_GAPS, NOMINAL_SPAN,
+        float(min_scale), float(max_scale), bool(match_both),
+        int(requested_direction), positions,
+        starts, profile_ids, fit_profiles)
+    if edges < len(NOMINAL_EDGES) or not valid:
         return None
-    gaps = np.diff(at).astype(float)
-    for start, end, unit in _runs(gaps):
-        run = gaps[start:end]
-        short = run[run < 1.5*unit]
-        long = run[run >= 1.5*unit]
-        if len(short) < 4 or len(long) < 2:
+    first = {1: None, -1: None}
+    count = len(NOMINAL_EDGES)
+    for candidate in range(valid):
+        signed_start = int(starts[candidate])
+        if signed_start == 0:
             continue
-        unit = float(np.mean(short))
-        if not 1.7 <= float(np.mean(long))/max(unit, 1e-9) <= 2.3:
+        direction = 1 if signed_start > 0 else -1
+        if first[direction] is not None:
             continue
-        span = float(at[end] - at[start])
-        scale = span/NOMINAL_SPAN
-        if not .98*min_scale <= scale <= 1.02*max_scale:
-            continue
-        if abs(unit/SHORT - scale) > .15*scale:
-            continue
-        position = float(at[start]) - NOMINAL_EDGES[0]*scale
-        agreement = 1.0 - min(1.0, float(np.std(short))/max(unit, 1e-9))
-        return position, scale, agreement
-    return None
+        profile = int(fit_profiles[candidate])
+        index = abs(signed_start)-1
+        nominal = (_PROFILE_NOMINAL[profile] if direction > 0 else
+                   _PROFILE_REVERSED_NOMINAL[profile])
+        hit = _fit_pulse_words(
+            samples, (positions[index:index+count],), nominal)
+        if hit is not None:
+            profile_index = int(profile_ids[candidate])
+            profile_code = (int(_PROFILE_CODES[profile_index])
+                            if profile_index >= 0 else None)
+            first[direction] = (*hit, direction, profile_code)
+        if first[1] is not None and first[-1] is not None:
+            break
+    forward, reverse = first[1], first[-1]
+    if not match_both:
+        return forward
+    if forward is not None and reverse is not None:
+        if _opposite_words_overlap(forward, reverse):
+            return _stronger_of_overlapping(forward, reverse)
+    candidates = [hit for hit in (forward, reverse) if hit is not None]
+    return min(candidates, key=lambda hit: hit[0]) if candidates else None
 
 
-def measure_pulses(samples, min_scale=.5, max_scale=4.0):
+def measure_pulses(samples, min_scale=0.5, max_scale=4.0):
+    """Acquire one pulse word as ``(position, scale, confidence)``.
+
+    This is the designated V7 timing path: edge/pulse counted, not FFT
+    correlated.  The returned scale is relative to the reference preamble.
+    Edge finding and word matching run compiled; measure_pulses_numpy is the
+    reference implementation.
+    """
+    hit = _measure_pulse_profiles(samples, min_scale, max_scale, False)
+    return hit[:3] if hit is not None else None
+
+
+def measure_pulses_profile(samples, min_scale=0.5, max_scale=4.0):
+    """Acquire a forward pulse word and return ``(position, scale, conf, id)``."""
+    hit = _measure_pulse_profiles(samples, min_scale, max_scale, False)
+    return hit if hit is None else (hit[0], hit[1], hit[2], hit[4])
+
+
+# Opposite-direction words closer than one preamble length overlap: they read
+# the same stretch of signal both ways, so neither orientation is trusted. Two
+# genuine opposite words can sit closer than a whole packet in one case only: a
+# reversed packet followed by a forward one (a reverse-to-forward turn on a
+# packet boundary, as in a sampler's ping-pong loop). The reversed preamble
+# then ends 16 samples before the boundary and the forward one starts 16 after
+# it, so their template starts are exactly SYNC_LEN apart. Testing against
+# SYNC_LEN itself made that pair a coin toss on scale-fit noise of a few
+# hundredths of a sample. One preamble length leaves half a lead-in (32
+# samples at 1x) of margin on each side.
+OPPOSITE_WORD_SPACING = len(PREAMBLE)
+
+
+def _opposite_words_overlap(first, second):
+    """True if two ``(position, scale, ...)`` hits of opposite direction are
+    closer than one preamble at the smaller of their scales."""
+    return abs(first[0]-second[0]) < OPPOSITE_WORD_SPACING*min(first[1],
+                                                               second[1])
+
+
+# Overlapping opposite words are both distrusted only when they fit about
+# equally well. A clean preamble fits at about 0.99; the edges of a preamble
+# together with the picture data right after it can also read as a reversed
+# word, at a clearly lower fit (0.73 seen on adaptive stereo, ID 4). Dropping
+# both then lost every header of the stream.
+OPPOSITE_CONFIDENCE_MARGIN = .15
+
+
+def _stronger_of_overlapping(first, second):
+    """Of two overlapping opposite hits ``(position, scale, confidence,
+    ...)``, the one that fits clearly better, or None when neither does."""
+    if abs(first[2]-second[2]) < OPPOSITE_CONFIDENCE_MARGIN:
+        return None
+    return first if first[2] > second[2] else second
+
+
+def measure_pulses_both(samples, min_scale=0.5, max_scale=4.0,
+                        direction='auto'):
+    """Acquire the earliest unambiguous pulse word in either direction.
+
+    Returns ``(template_start, scale, confidence, direction)``, with direction
+    ``+1`` for the ordinary word and ``-1`` for its reversed gap pattern.
+    Schmitt edges are extracted once; both gap templates are tested against
+    that same edge list. A candidate matching both patterns is discarded.
+    """
+    hit = measure_pulses_profile_both(
+        samples, min_scale, max_scale, direction=direction)
+    return None if hit is None else hit[:4]
+
+
+def measure_pulses_profile_both(samples, min_scale=0.5, max_scale=4.0,
+                                direction='auto'):
+    """Acquire either direction and return ``(pos, scale, conf, dir, id)``."""
+    if direction not in ('auto', 'forward', 'reverse'):
+        raise ValueError(f'unknown pulse direction {direction!r}')
+    requested = {'auto': 0, 'forward': 1, 'reverse': -1}[direction]
+    return _measure_pulse_profiles(
+        samples, min_scale, max_scale, True,
+        requested_direction=requested)
+
+
+def measure_pulses_numpy(samples, min_scale=0.5, max_scale=4.0):
+    """Reference edge/word search for measure_pulses."""
     samples = np.asarray(samples)
     edges = edge_intervals(samples)
     count = len(NOMINAL_EDGES)
     if len(edges) < count:
         return None
     crossings = np.flatnonzero(np.diff(np.signbit(samples)))
-    left = crossings[np.searchsorted(crossings, edges-1, side='right')-1]
+    left = crossings[np.searchsorted(crossings, edges - 1, side='right') - 1]
+    values = samples[left]
+    positions = left + values / (values - samples[left + 1])
+    words = np.lib.stride_tricks.sliding_window_view(positions, count)
+    scales = (words[:, -1] - words[:, 0]) / NOMINAL_SPAN
+    valid = (scales >= 0.98 * min_scale) & (scales <= 1.02 * max_scale)
+    expected = NOMINAL_GAPS[None, :] * scales[:, None]
+    valid &= np.all(
+        np.abs(np.diff(words, axis=1) - expected)
+        <= np.maximum(1.2, 0.45 * expected), axis=1)
+    return _fit_pulse_words(samples, words[valid], _FIT_NOMINAL)
+
+
+def warmup_pulse_kernels():
+    """Compile both acquisition signatures before a live input is opened."""
+    silence = np.zeros(2048, dtype=np.float32)
+    measure_pulses(silence)
+    measure_pulses_both(silence)
+
+
+def measure_pulses_both_numpy(samples, min_scale=0.5, max_scale=4.0,
+                              direction='auto'):
+    """Reference implementation for bidirectional pulse acquisition."""
+    if direction not in ('auto', 'forward', 'reverse'):
+        raise ValueError(f'unknown pulse direction {direction!r}')
+    samples = np.asarray(samples)
+    edges = edge_intervals(samples)
+    count = len(NOMINAL_EDGES)
+    if len(edges) < count:
+        return None
+    crossings = np.flatnonzero(np.diff(np.signbit(samples)))
+    crossing_indexes = np.searchsorted(crossings, edges-1, side='right')-1
+    crossing_indexes = np.clip(crossing_indexes, 0, max(len(samples)-2, 0))
+    left = crossings[crossing_indexes]
     values = samples[left]
     positions = left + values/(values-samples[left+1])
     words = np.lib.stride_tricks.sliding_window_view(positions, count)
     scales = (words[:, -1]-words[:, 0])/NOMINAL_SPAN
-    valid = (scales >= .98*min_scale) & (scales <= 1.02*max_scale)
-    expected = NOMINAL_GAPS[None, :]*scales[:, None]
-    valid &= np.all(np.abs(np.diff(words, axis=1) - expected) <=
-                    np.maximum(1.2, 0.45 * expected), axis=1)
-    nominal = NOMINAL_EDGES.astype(float)+.5
-    centered = nominal-nominal.mean()
-    for word in words[valid]:
-        if (word[-1]-word[0])/NOMINAL_SPAN < .999:
+    allowed = (scales >= .98*min_scale) & (scales <= 1.02*max_scale)
+    observed = np.diff(words, axis=1)
+    forward = allowed & np.all(
+        np.abs(observed-NOMINAL_GAPS[None, :]*scales[:, None]) <=
+        np.maximum(1.2, .45*NOMINAL_GAPS[None, :]*scales[:, None]), axis=1)
+    reverse = allowed & np.all(
+        np.abs(observed-REVERSED_GAPS[None, :]*scales[:, None]) <=
+        np.maximum(1.2, .45*REVERSED_GAPS[None, :]*scales[:, None]), axis=1)
+    candidates = []
+    for way, mask, nominal in (
+            (1, forward & ~reverse, _FIT_NOMINAL),
+            (-1, reverse & ~forward, _FIT_REVERSED_NOMINAL)):
+        if direction == 'forward' and way != 1:
+            continue
+        if direction == 'reverse' and way != -1:
+            continue
+        hit = _fit_pulse_words(samples, words[mask], nominal)
+        if hit is not None:
+            candidates.append((*hit, way))
+    if len(candidates) == 2 and _opposite_words_overlap(*candidates):
+        return _stronger_of_overlapping(*candidates)
+    return min(candidates, key=lambda hit: hit[0]) if candidates else None
+
+
+@njit(cache=True, fastmath=False)
+def _fit_pulse_word(word, nominal):
+    """Least-squares scale/position of one edge word and its confidence."""
+    count = word.shape[0]
+    word_mean = 0.0
+    nominal_mean = 0.0
+    for i in range(count):
+        word_mean += word[i]
+        nominal_mean += nominal[i]
+    word_mean /= count
+    nominal_mean /= count
+    cross = 0.0
+    spread = 0.0
+    for i in range(count):
+        centered = nominal[i]-nominal_mean
+        cross += (word[i]-word_mean)*centered
+        spread += centered*centered
+    scale = cross/spread
+    position = word_mean-scale*nominal_mean
+    sq = 0.0
+    for i in range(count):
+        error = word[i]-position-scale*nominal[i]
+        sq += error*error
+    residual = math.sqrt(sq/count)
+    return position, scale, max(0.0, 1-residual/(SHORT*scale))
+
+
+_FIT_NOMINAL = NOMINAL_EDGES.astype(float) + 0.5
+_FIT_REVERSED_NOMINAL = REVERSED_EDGES.astype(float) + 0.5
+
+
+def _fit_pulse_words(samples, words, nominal):
+    """Refine and fit candidate edge words; first confident fit wins.
+
+    A word from slowed playback (span below nominal) is first refined on the
+    signal with 16-tap reads; the fit itself runs compiled.
+    """
+    for word in words:
+        if (word[-1] - word[0]) / NOMINAL_SPAN < 0.999:
             refined = word.copy()
             mono = samples[:, None]
             for _ in range(3):
-                probes = np.concatenate([refined, refined-.05, refined+.05])
+                probes = np.concatenate([refined, refined - 0.05, refined + 0.05])
                 amplitudes = _sample_at(mono, probes, taps=16)[:, 0]
                 center, minus, plus = np.split(amplitudes, 3)
-                derivative = (plus-minus)/.1
-                delta = np.divide(center, derivative, out=np.zeros_like(center),
-                                  where=np.abs(derivative) > 1e-6)
-                refined = np.clip(refined-np.clip(delta, -.25, .25), word-.5, word+.5)
+                derivative = (plus - minus) / 0.1
+                delta = np.divide(
+                    center, derivative, out=np.zeros_like(center),
+                    where=np.abs(derivative) > 1e-6)
+                refined = np.clip(
+                    refined - np.clip(delta, -0.25, 0.25),
+                    word - 0.5, word + 0.5)
             word = refined
-        scale = float(np.dot(word-word.mean(), centered)/np.dot(centered, centered))
-        position = float(word.mean()-scale*nominal.mean())
-        residual = float(np.sqrt(np.mean((word-position-scale*nominal)**2)))
-        confidence = max(0., 1 - residual / (SHORT * scale))
+        position, scale, confidence = _fit_pulse_word(
+            np.ascontiguousarray(word, dtype=np.float64), nominal)
         if confidence >= 0.45:
-            return position, scale, confidence
+            return float(position), float(scale), float(confidence)
     return None
-
-
-def preamble_correlation(x, limit=None, template=None, energy=None):
-    if template is None:
-        template, energy = PREAMBLE, PREAMBLE_ENERGY
-    x = np.asarray(x, float)
-    n = len(x) - len(template) + 1
-    if limit is not None:
-        n = max(0, min(n, limit))
-    if n <= 0:
-        return np.empty(0)
-    peak = float(np.max(np.abs(x)))
-    if peak == 0:
-        return np.zeros(n)
-    x = x/peak
-    cumulative = np.empty(len(x)+1)
-    cumulative[0] = 0.
-    np.cumsum(x*x, out=cumulative[1:])
-    window = cumulative[len(template):] - cumulative[:-len(template)]
-    floor = 64*np.finfo(float).eps*float(np.max(window))
-    corr = correlate(x[:n+len(template)-1], template, mode='valid', method='auto')
-    score = np.zeros(n)
-    ok = window[:n] > floor
-    score[ok] = np.abs(corr[ok])/np.sqrt(window[:n][ok]*energy)
-    return np.minimum(score, 1.0)
-
-
-@lru_cache(maxsize=64)
-def _scaled_preamble(scale):
-    if scale == 1.0:
-        return PREAMBLE
-    length = int(round(len(PREAMBLE)*scale))
-    return np.interp(np.arange(length)/scale, np.arange(len(PREAMBLE)), PREAMBLE)
-
-
-def _fit_preamble(samples, at, scale, reach=.02, iterations=5, fast=True):
-    radius = 12
-    left = max(0, int(at)-radius)
-    right = min(len(samples), int(at + len(PREAMBLE)*scale) + radius)
-    local = samples[left:right]
-    if len(local) < len(PREAMBLE)//2:
-        return float(at), float(scale), 0.
-    best = (0., float(at-left), float(scale))
-    for s in (np.linspace(scale*(1-reach), scale*(1+reach), 7) if reach else ()):
-        template = _scaled_preamble(float(s))
-        energy = float(np.einsum('i,i->', template, template, optimize=False))
-        for c in range(local.shape[1]):
-            scores = preamble_correlation(local[:, c], 2*radius+1, template, energy)
-            if len(scores):
-                p = int(np.argmax(scores))
-                if scores[p] > best[0]:
-                    best = (float(scores[p]), float(p), float(s))
-    _, position, s = best
-    reference = PREAMBLE
-    energy = PREAMBLE_ENERGY
-    for _ in range(iterations):
-        z = resample_packet(local, s-1, len(PREAMBLE), offset=position, fast=fast)
-        scores = (abs(np.einsum('i,ic->c', reference, z, optimize=False)) /
-                  np.sqrt(energy*np.maximum((z*z).sum(0), 1e-20)))
-        c = int(np.argmax(scores))
-        z = z[:, c].astype(float)
-        gain = float(np.einsum('i,i->', reference, z, optimize=False))/energy
-        derivative = (resample_packet(local, s-1, len(PREAMBLE), offset=position+.05, fast=fast)[:, c]
-                      - resample_packet(local, s-1, len(PREAMBLE), offset=position-.05, fast=fast)[:, c])/.1
-        j = np.stack([derivative, derivative*np.arange(len(PREAMBLE))/1000], axis=1)
-        j -= reference[:, None]*np.einsum('i,ij->j', reference, j, optimize=False)[None, :]/energy
-        gram = np.einsum('ni,nj->ij', j, j, optimize=False) + np.eye(2)*1e-12
-        step = np.linalg.solve(gram, np.einsum('ni,n->i', j, z-gain*reference, optimize=False))
-        step = np.clip(step, [-1., -s*2], [1., s*2])
-        position = max(0, position-step[0])
-        s -= step[1]/1000
-        if np.max(abs(step)) < 1e-4:
-            break
-    z = resample_packet(local, s-1, len(PREAMBLE), offset=position, fast=fast)
-    scores = (abs(np.einsum('i,ic->c', reference, z, optimize=False)) /
-              np.sqrt(energy*np.maximum((z*z).sum(0), 1e-20)))
-    return float(left+position), float(s), float(scores.max())
-
-
-# --------------------------------------------------------------------------
-# Encode
-# --------------------------------------------------------------------------
-
-def encode(values, layout, coder, absolute, index, count, stamp_ms=0, flags=0,
-           headroom=.95, profile=0):
-    expected = getattr(coder, 'source_count', coder.count)
-    if len(values) != expected or not np.isfinite(values).all():
-        raise ValueError('Expected one finite value per source coefficient')
-    if coder.count > layout.capacity:
-        raise ValueError(f'{coder.count} coefficients exceed capacity {layout.capacity}')
-    carriers = layout.carriers
-    data = np.searchsorted(carriers, layout.data_bins)
-    pilots = np.searchsorted(carriers, layout.pilots)
-    header = np.searchsorted(carriers, layout.header_bins)
-    grid = np.zeros((layout.symbols, len(carriers), 2), complex)
-    if layout.orthogonal_training:
-        tone = phases(layout)
-        lock0 = tone[0, :, 0]*np.conj(tone[0, :, 1])
-        lock1 = tone[1, :, 0]*np.conj(tone[1, :, 1])
-        grid[0, :, 0], grid[0, :, 1] = 1, lock0
-        grid[1, :, 0], grid[1, :, 1] = 1, -lock1
-    else:
-        grid[0, :, 0] = 1
-        grid[1, :, 1] = 1
-
-    raw = pack_header(flags, layout.top_bin, absolute, index, count, stamp_ms,
-                      magic=layout.wire_magic,
-                      profile=profile)
-    bits = np.unpackbits(np.frombuffer(raw, np.uint8)).reshape(HEADER_SLOTS, 2)
-    qpsk = ((bits[:, 0]*2.-1) + 1j*(bits[:, 1]*2.-1))/np.sqrt(2)
-    if layout.header_split:
-        room = layout.header_symbols*layout.header_lanes
-        spread = np.resize(qpsk, room).reshape(layout.header_symbols,
-                                               len(header), 2)
-        for s in range(layout.header_symbols):
-            grid[2+s, header, 0] = spread[s, :, 0]*HEADER_GAIN
-            grid[2+s, header, 1] = spread[s, :, 1]*HEADER_GAIN
-    else:
-        room = layout.header_symbols*len(header)
-        spread = np.resize(qpsk, room).reshape(layout.header_symbols, len(header))
-        for s in range(layout.header_symbols):
-            grid[2+s, header, 0] = spread[s]*HEADER_GAIN
-            grid[2+s, header, 1] = spread[s]*HEADER_GAIN
-
-    sent = np.zeros(layout.capacity)
-    sent[coefficient_slots(layout, tuple(coder.shapes))] = coder.forward(values)
-    head = layout.header_capacity
-    if head:
-        spare = np.searchsorted(carriers, layout.spare_bins)
-        early = sent[:head].reshape(layout.header_symbols, len(spare), 2, 2)
-        grid[2:2+layout.header_symbols, spare, :] = \
-            (early[..., 0] + 1j*early[..., 1])*IMAGE_GAIN
-    block = sent[head:].reshape(layout.image_symbols, len(data), 2, 2)
-    grid[2+layout.header_symbols:, data, :] = (block[..., 0] + 1j*block[..., 1])*IMAGE_GAIN
-    grid[2:, pilots, :] = 1
-
-    spectrum = np.zeros((layout.symbols, N//2+1, 2), complex)
-    spectrum[:, carriers, :] = grid*phases(layout)
-    wave = np.fft.irfft(spectrum, n=N, axis=1)
-    wave = np.concatenate([wave[:, -CP:], wave], axis=1).reshape(-1, 2)
-
-    out = np.zeros((layout.frame, 2), np.float32)
-    out[16:16+len(PREAMBLE), 0] = PREAMBLE
-    out[16:16+len(PREAMBLE), 1] = PREAMBLE
-    out[SYNC_LEN:layout.packet] = wave
-    peak = float(np.max(np.abs(out)))
-    if peak > 0:
-        out *= headroom/peak
-    return out
-
-
-# --------------------------------------------------------------------------
-# Receive
-# --------------------------------------------------------------------------
-
-class Receiver:
-    def __init__(self, layout, coder, threshold=.4, rate_window=None,
-                 min_speed=.25, max_speed=2.0, recovery=False, fast=True,
-                 pulse_only=True, input_rate=None, coders=None, candidates=None):
-        if not (0 < min_speed <= 1 <= max_speed and min_speed >= .25 and max_speed <= 2):
-            raise ValueError('Supported speed range: .25 <= min_speed <= 1 <= max_speed <= 2')
-        if input_rate is not None and not (np.isfinite(input_rate) and input_rate > 0):
-            raise ValueError('Input rate must be a positive number of hertz, or None')
-        if coder.count > layout.capacity:
-            raise ValueError('Source coder exceeds layout capacity')
-        self.layout, self.coder, self.threshold = layout, coder, threshold
-        self.coders = dict(coders) if coders else None
-        self._start = (layout, coder, self.coders)
-        self.candidates = sorted(candidates or [], key=lambda c: c[0].packet)
-        for cand, cand_coder, _ in self.candidates:
-            if cand_coder.count > cand.capacity:
-                raise ValueError(f'Coder exceeds {cand.name} capacity')
-        self.detected = None
-        self.recovery = bool(recovery)
-        self.fast = bool(fast)
-        self.pulse_only = bool(pulse_only)
-        self.min_speed, self.max_speed = min_speed, max_speed
-        self.input_rate = None if input_rate is None else float(input_rate)
-        self.clock = 1. if input_rate is None else float(input_rate)/REFERENCE_RATE
-        self.min_scale = self.clock/max_speed
-        self.max_scale = self.clock/min_speed
-        self.keep = int(np.ceil(len(PREAMBLE)*1.2*self.max_scale)) + 64
-        self.reset()
-
-    def reset(self, preserve_timing=False):
-        rate_error = self.rate_error if preserve_timing else 0.
-        confidence = self.confidence if preserve_timing else 0.
-        if not hasattr(self, '_storage'):
-            self._storage = np.empty((32768, 2), np.float32)
-        self._write_end = 0
-        self.buffer = self._storage[:0]
-        self.offset = 0
-        self.rate_error, self.confidence = rate_error, confidence
-        self.pending = None
-        self._tried = 0
-        self._since_lock = 0
-        self.search_after = SYNC_LEN
-        self.acquire_ms = 0.
-        self.acquisition_path = 'edge'
-        self.predicted = None
-        self.waiting = False
-        self.misses = 0
-        self.fallback_every = 1
-        self.edge_hits = 0
-        self.correlation_hits = 0
-        self.locked_packets = 0
-
-    def _acquire(self):
-        if self.pulse_only:
-            return self._acquire_pulses()
-        window = self.buffer[:max(1024, 2*self.keep)]
-        self.waiting = False
-        if not np.any(window):
-            return None
-        if self.predicted is not None and self.confidence:
-            at = self.predicted - self.offset
-            need = at + len(PREAMBLE)*(1+self.rate_error) + 24
-            if 0 <= at and need <= len(self.buffer):
-                fit = _fit_preamble(self.buffer, at, 1+self.rate_error, reach=0,
-                                    iterations=2, fast=self.fast)
-                if fit[2] >= max(self.threshold, .5):
-                    self.acquisition_path = 'coast'
-                    self.locked_packets += 1
-                    self.misses = 0
-                    self.fallback_every = 1
-                    return fit
-            elif 0 <= at:
-                self.waiting = True
-                return None
-            self.predicted = None
-        for channel in range(window.shape[1]):
-            measured = measure_speed(window[:, channel], self.min_scale, self.max_scale)
-            if measured is None:
-                continue
-            position, scale, _ = measured
-            fit = _fit_preamble(window, position, scale, reach=0,
-                                iterations=3, fast=self.fast)
-            if fit[2] >= self.threshold:
-                self.acquisition_path = 'edge'
-                self.edge_hits += 1
-                self.misses = 0
-                self.fallback_every = 1
-                return fit
-        self.misses += 1
-        if self.misses % self.fallback_every:
-            return None
-        found = self._correlate(window)
-        if found is None:
-            self.fallback_every = min(self.fallback_every*2, 64)
-        return found
-
-    def _acquire_pulses(self):
-        self.waiting = False
-        if self.predicted is not None and self.confidence:
-            at = self.predicted-self.offset
-            left = max(0, int(at)-24)
-            right = int(at+len(PREAMBLE)*(1+self.rate_error))+24
-            if at >= 0 and right > len(self.buffer):
-                self.waiting = True
-                return None
-            if at >= 0:
-                for channel in range(2):
-                    measured = measure_pulses(self.buffer[left:right, channel],
-                                              self.min_scale, self.max_scale)
-                    if measured is not None:
-                        position, scale, confidence = measured
-                        self.acquisition_path = 'coast'
-                        self.locked_packets += 1
-                        return position+left, scale, confidence
-            self.predicted = None
-        window = self.buffer[:max(1024, 2*self.keep)]
-        for channel in range(2):
-            measured = measure_pulses(window[:, channel], self.min_scale, self.max_scale)
-            if measured is not None:
-                self.acquisition_path = 'edge'
-                self.edge_hits += 1
-                return measured
-        return None
-
-    def _correlate(self, window):
-        scales = np.geomspace(self.min_scale, self.max_scale,
-                              max(2, int(np.ceil(np.log(self.max_scale/self.min_scale)/.09))+1))
-        best = None
-        for scale in scales:
-            template = _scaled_preamble(float(scale))
-            energy = float(np.einsum('i,i->', template, template, optimize=False))
-            for channel in range(window.shape[1]):
-                scores = preamble_correlation(window[:, channel], None, template, energy)
-                if not len(scores):
-                    continue
-                at = int(np.argmax(scores))
-                if best is None or scores[at] > best[0]:
-                    best = (float(scores[at]), at, float(scale))
-        if best is None or best[0] < max(self.threshold, .5):
-            return None
-        fit = _fit_preamble(window, best[1], best[2], reach=.05, iterations=6,
-                            fast=self.fast)
-        if fit[2] >= self.threshold:
-            self.acquisition_path = 'correlation'
-            self.correlation_hits += 1
-            self.misses = 0
-            self.fallback_every = 1
-            return fit
-        return None
-
-    def feed(self, block):
-        block = np.asarray(block, np.float32)
-        if block.ndim != 2 or block.shape[1] != 2 or not np.isfinite(block).all():
-            raise ValueError('Receiver requires finite stereo samples')
-
-        out = []
-        step = min(1024, self.keep) if self.pulse_only else 256
-        for start in range(0, len(block), step):
-            self._append(block[start:start + step])
-            out.extend(self._drain())
-        return out
-
-    def _append(self, block):
-        count = len(self.buffer)
-        need = count + len(block)
-        if self._write_end + len(block) > len(self._storage):
-            if need > len(self._storage):
-                storage = np.empty((max(need, 2*len(self._storage)), 2), np.float32)
-                storage[:count] = self.buffer
-                self._storage = storage
-            else:
-                self._storage[:count] = self.buffer.copy()
-            self._write_end = count
-        begin = self._write_end - count
-        self._storage[self._write_end:self._write_end+len(block)] = block
-        self._write_end += len(block)
-        self.buffer = self._storage[begin:self._write_end]
-
-    def flush(self):
-        return self._drain(final=True)
-
-    def _demodulate(self, begin, scale, layout, coder, coders):
-        """One decode attempt at a given layout. Returns (result, taps)."""
-        taps = 0
-        if scale == 1 and begin == int(begin) and begin >= 0:
-            packet = self.buffer[int(begin):int(begin)+layout.packet]
-            body = packet[SYNC_LEN:].reshape(layout.symbols, SYMBOL, 2)[:, CP-4:CP-4+N]
-        else:
-            highest = layout.top_bin/N/scale
-            taps = 32 if highest > .44 else 8
-            body = _sample_at(self.buffer, begin+_body_walk(layout)*scale, taps=taps)
-            body = body.reshape(layout.symbols, N, 2)
-
-        return decode_packet(None, layout, coder, body=body, coders=coders), taps
-
-    def _identify(self, begin, scale, final=False):
-        if not self.candidates or self.detected is not None:
-            result, taps = self._demodulate(begin, scale, self.layout,
-                                            self.coder, self.coders)
-            return result, taps, False
-        room = len(self.buffer)-begin
-        for index in range(self._tried, len(self.candidates)):
-            layout, coder, coders = self.candidates[index]
-            if (layout.packet-1)*scale+1 > room:
-                break
-            self._tried = index+1
-            result, taps = self._demodulate(begin, scale, layout, coder, coders)
-            if result.identity == 'verified_header':
-                self.layout, self.coder, self.coders = layout, coder, coders
-                self.detected = layout.name
-                return result, taps, False
-        if self._tried < len(self.candidates) and not final:
-            return None, 0, True
-        result, taps = self._demodulate(begin, scale, self.layout,
-                                        self.coder, self.coders)
-        return result, taps, False
-
-    def _drain(self, final=False):
-        import time
-        out = []
-        while True:
-            if self.pending is None:
-                if len(self.buffer) < self.search_after and not final:
-                    break
-                if len(self.buffer) < len(PREAMBLE)//2:
-                    break
-                started = time.perf_counter()
-                self.waiting = False
-                acquired = self._acquire()
-                self.acquire_ms += (time.perf_counter()-started)*1000
-                if acquired is None:
-                    if self.waiting:
-                        break
-                    self.search_after = len(self.buffer)+256
-                    if len(self.buffer) > self.keep:
-                        self._drop(len(self.buffer)-self.keep)
-                    break
-                at, scale, score = acquired
-                self.search_after = SYNC_LEN
-                self.pending = (at-16*scale, scale, score)
-                self._tried = 0
-            begin, scale, score = self.pending
-            searching = self.candidates and self.detected is None
-            want = (self.candidates[0][0].packet if searching
-                    else self.layout.packet)
-            end = begin + (want-1)*scale + 1
-            if len(self.buffer) < end - (2 if final else 0):
-                break
-            started = time.perf_counter()
-            result, taps, wait = self._identify(begin, scale, final)
-            if wait:
-                break
-            if self.detected is not None:
-                if result.identity == 'verified_header':
-                    self._since_lock = 0
-                else:
-                    self._since_lock += 1
-                    if self._since_lock >= RELOCK_AFTER:
-                        self.layout, self.coder, self.coders = self._start
-                        self.detected = None
-                        self._tried = 0
-                        self._since_lock = 0
-            result.rate_error = scale-1
-            result.rate_confidence = score
-            result.extra.update(sync_score=score, at=self.offset+begin,
-                                input_path='v3', acquisition_path=self.acquisition_path,
-                                timing_method='pulse' if self.pulse_only else 'waveform',
-                                timing_scale=scale, complete=True,
-                                top_bin_cycles_per_sample=self.layout.top_bin/N/scale,
-                                playback_speed=self.clock/scale,
-                                preset=self.layout.name, resample_taps=taps,
-                                decode_ms=(time.perf_counter()-started)*1000,
-                                acquire_ms=self.acquire_ms)
-            if self.input_rate is not None:
-                result.extra.update(
-                    input_rate=self.input_rate,
-                    input_nyquist_hz=self.input_rate/2,
-                    input_top_hz=result.extra['top_bin_cycles_per_sample']*self.input_rate,
-                    frame_seconds=self.layout.frame*scale/self.input_rate)
-            result.extra['receive_cpu_ms'] = result.extra['decode_ms']+self.acquire_ms
-            self.pending = None
-            if result.values is not None:
-                self.rate_error, self.confidence = scale-1, score
-                self.predicted = (self.offset + begin
-                                  + (self.layout.frame + 16)*scale)
-                out.append(result)
-                self.acquire_ms = 0.
-                self._drop(max(1, int(np.floor(begin+self.layout.packet*scale))))
-            else:
-                self.confidence = 0.
-                self.rate_error = 0.
-                self.predicted = None
-                self._drop(max(1, int(begin+16*scale+1)))
-        return out
-
-    def _drop(self, n):
-        n = max(1, min(int(n), len(self.buffer)))
-        self.buffer = self.buffer[n:]
-        self.offset += n
-        self.search_after = max(SYNC_LEN, self.search_after-n)

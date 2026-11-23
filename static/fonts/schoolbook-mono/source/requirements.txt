@@ -1,0 +1,5 @@
+# Build-only tools; never imported by the application.
+fonttools==4.67.0
+brotli==1.2.0
+zopfli==0.4.3
+skia-pathops==0.9.2

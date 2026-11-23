@@ -1,0 +1,135 @@
+import tempfile
+import unittest
+from contextlib import redirect_stdout
+from hashlib import sha256
+from io import StringIO
+from pathlib import Path
+
+from tools.v7_nested_gui_patch import (DEFAULT_TABLE_PATH, launcher_prefix,
+                                      resolve_table_path, wrap_sender)
+from tools.v7_send_gui import OutputDevice, SenderGui, build_command
+from tools import v7_live
+from tools.v7_receiver_gui import ReceiverGui, _receive_parser
+from tools.v7_adaptive_pipeline import SERPENTINE_STEP_FACTOR, EXACT_INVERSE
+
+
+class MatchedNestedGuiPatchTests(unittest.TestCase):
+    class SoundDeviceStub:
+        @staticmethod
+        def check_output_settings(**_kwargs):
+            return None
+
+    def test_disabled_sender_command_is_unchanged(self):
+        command = ['python', '/repo/tools/v7_live.py', 'send']
+        self.assertIs(wrap_sender(command, '', False), command)
+
+    def test_requires_an_existing_explicit_table(self):
+        with self.assertRaisesRegex(ValueError, 'Matched nested table not found'):
+            launcher_prefix('tmp/nonexistent-v7-table.npz', True,
+                            'adaptive-stereo-nested')
+
+    def test_matched_profile_flags_and_chroma_selection(self):
+        command = ['python', '/repo/tools/v7_live.py', 'send',
+                   '--profile', 'adaptive-stereo-nested']
+        with tempfile.TemporaryDirectory() as folder:
+            tables = Path(folder)/'matched.npz'
+            tables.touch()
+            stereo = wrap_sender(command, tables, True, 'adaptive-stereo-nested')
+            mono = wrap_sender(command, tables, True, 'adaptive-mono-nested')
+
+        self.assertTrue(stereo[1].endswith('v7_nested_experiment.py'))
+        for command in (stereo, mono):
+            self.assertIn('--mapping', command)
+            self.assertIn('serpentine', command)
+            self.assertIn('--adaptive-guest-range', command)
+            self.assertIn('--step-factor', command)
+            self.assertEqual(command[command.index('--step-factor') + 1],
+                             str(SERPENTINE_STEP_FACTOR))
+            self.assertEqual('--exact-inverse' in command, EXACT_INVERSE)
+        self.assertIn('--chroma-detail', stereo)
+        self.assertNotIn('--chroma-detail', mono)
+
+    def test_default_table_is_the_bundled_validated_candidate(self):
+        self.assertEqual(str(DEFAULT_TABLE_PATH),
+                         'test_modem_v7/experimental_tables/chroma50.npz')
+        self.assertTrue(resolve_table_path().is_file())
+
+    def test_adaptive_codec_registration_is_scoped_to_its_table(self):
+        v7_live._ensure_test_modem_path()
+        import nested_fold
+        from tools.v7_nested_gui_patch import install_receiver
+        default_path = Path(nested_fold.TABLES).resolve()
+        legacy_before = nested_fold.table('mono', '1:1', default_path)
+        legacy_stereo_before = nested_fold.table('slices', '1:1', default_path)
+        output = StringIO()
+        with redirect_stdout(output):
+            table, _ = install_receiver(v7_live, DEFAULT_TABLE_PATH)
+        diagnostic = output.getvalue()
+        self.assertIn(f'selected_tables={table}', diagnostic)
+        self.assertIn(f'table_sha256={sha256(table.read_bytes()).hexdigest()}',
+                      diagnostic)
+        self.assertIn(f'default_tables={default_path}', diagnostic)
+        legacy = nested_fold.table('mono', '1:1', default_path)
+        adaptive = nested_fold.table('mono', '1:1', table)
+        legacy_stereo = nested_fold.table('slices', '1:1', default_path)
+        adaptive_stereo = nested_fold.table('slices', '1:1', table)
+        self.assertEqual(Path(nested_fold.TABLES).resolve(), default_path)
+        self.assertIs(legacy, legacy_before)
+        self.assertIs(legacy_stereo, legacy_stereo_before)
+        # The adaptive tables run on the stock serpentine nested fold (level
+        # per picture by trial decode); no separate codec is installed, but
+        # they stay distinct tables.
+        self.assertIsNot(legacy, adaptive)
+        self.assertIsNot(legacy_stereo, adaptive_stereo)
+        self.assertEqual((adaptive.rows, adaptive.cols), (120, 100))
+        self.assertEqual((legacy.rows, legacy.cols), (96, 80))
+
+    def test_rejects_non_nested_sender_profile(self):
+        with self.assertRaisesRegex(ValueError, 'requires a nested wire profile'):
+            launcher_prefix(DEFAULT_TABLE_PATH, True, 'aspect-fold-500')
+
+    def test_sender_gui_builds_ready_candidate_command(self):
+        device = OutputDevice(0, 'pulse', 32, 44100, 'ALSA')
+        gui = SenderGui((device,))
+        gui._assign('profile', 'adaptive-stereo-nested')
+        gui.settings.update(device=0, source='test', luma_adjust=True)
+        command = build_command(gui.settings, (device,), self.SoundDeviceStub(),
+                                python='python')
+        self.assertNotIn('--luma-adjust', command)
+        self.assertIn('--chroma-detail', command)
+        self.assertNotIn('--modem-channels', command)
+        self.assertNotIn('--rate', command)
+        self.assertEqual(command[1], str(Path(__file__).resolve().parents[1]/
+                                         'tools'/'v7_nested_experiment.py'))
+        self.assertIn(str(resolve_table_path()), command)
+
+    def test_receiver_gui_builds_matching_candidate_options(self):
+        root_parser, receive_parser = _receive_parser(v7_live)
+        gui = ReceiverGui(v7_live, root_parser, receive_parser,
+                          (('pulse · 25 in · 96 kHz', 0),))
+        gui._field('device').value = 0
+        self.assertNotIn('Matched nested test patch · opt-in',
+                         [field.label for field in gui.fields])
+        arguments = gui._build_arguments()
+        self.assertEqual(arguments.adaptive_nested_table,
+                         str(resolve_table_path()))
+        self.assertEqual(arguments.nested_test_tables,
+                         str(resolve_table_path()))
+
+    def test_stale_saved_stock_table_path_does_not_replace_selected_gui_table(self):
+        root_parser, receive_parser = _receive_parser(v7_live)
+        with tempfile.TemporaryDirectory() as folder:
+            preferences = Path(folder)/'receiver.json'
+            preferences.write_text(
+                '{"nested_test_tables": "test_modem_v7/nested_tables.npz"}')
+            gui = ReceiverGui(
+                v7_live, root_parser, receive_parser,
+                (('pulse · 25 in · 96 kHz', 0),), preference_path=preferences)
+            gui._field('device').value = 0
+            arguments = gui._build_arguments()
+        self.assertEqual(arguments.adaptive_nested_table,
+                         str(resolve_table_path()))
+
+
+if __name__ == '__main__':
+    unittest.main()

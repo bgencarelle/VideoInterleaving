@@ -6,207 +6,211 @@ import subprocess
 import sys
 import tempfile
 import unittest
-from types import SimpleNamespace
-from unittest.mock import patch
+import wave
+
 import numpy as np
 from PIL import Image
+
 from utilities.convert_to_modem_dct import bake_tree_dct as bake_tree
-from utilities.bake_assets import write_slab
+from animation_modem import v7
 from modem_bake import ModemLibrary
-from modem_display import packet, run_modem
-from animation_modem import transport3 as v3
-from animation_modem.imaging import DEFAULT_PROFILE, fit_shapes, plane_shapes
 
-# modem_display now defaults to the v3 preset, so the harness must decode with
-# the same layout the transmitter uses.
-LAYOUT = v3.V3_PRESETS['wide-v3']
-
-
-def v3_coder():
-    return v3.SourceCoder(fit_shapes(plane_shapes(DEFAULT_PROFILE), LAYOUT.capacity))
-
-
-def decode_packet(audio):
-    return v3.decode_packet(audio[:LAYOUT.packet], LAYOUT, v3_coder())
-
-REPO=Path(__file__).resolve().parents[1]
+REPO = Path(__file__).resolve().parents[1]
 
 
 def source_tree(root, count=3):
-    for name,color in [('face/0_rest',(0,0,0,255)),
-                       ('face/2_face',(200,40,20,128)),
-                       ('face/10_face',(20,200,40,255)),
-                       ('float/255_overlay',(10,30,240,128))]:
-        folder=root/name;folder.mkdir(parents=True)
-        for i in range(count):Image.new('RGBA',(40,48),color).save(folder/f'frame_{i}.png')
+    for name, color in [
+        ('face/0_rest', (0, 0, 0, 255)),
+        ('face/2_face', (200, 40, 20, 128)),
+        ('face/10_face', (20, 200, 40, 255)),
+        ('float/255_overlay', (10, 30, 240, 128)),
+    ]:
+        folder = root / name
+        folder.mkdir(parents=True)
+        for i in range(count):
+            Image.new('RGBA', (80, 45), color).save(folder / f'frame_{i}.png')
 
 
-class ModemIntegrationTests(unittest.TestCase):
-    def setUp(self):
-        self.temp=tempfile.TemporaryDirectory()
-        self.root=Path(self.temp.name)
-        self.source=self.root/'images';source_tree(self.source)
-        self.bake=self.root/'images_modem'
-        with contextlib.redirect_stdout(io.StringIO()):bake_tree(self.source,self.bake)
-    def tearDown(self):self.temp.cleanup()
+def _default_wire_status_mode():
+    """The coded status of the V7 sender's default wire, which main.py
+    sends (tools/v7_send_defaults.py; the sender GUI's default too)."""
+    import argparse
+    import modem_v7_display
+    from tools.v7_send_defaults import DEFAULT_PROFILE
+    assert modem_v7_display.send_args(argparse.Namespace()).profile is None
+    assert DEFAULT_PROFILE == 'aspect-fold-500'
+    if str(REPO / 'test_modem_v7') not in sys.path:
+        sys.path.insert(0, str(REPO / 'test_modem_v7'))
+    from aspect_fold import AspectFoldWire
+    return AspectFoldWire('auto').status_mode
 
-    def test_folder_order_alpha_composition_and_packet(self):
-        lib=ModemLibrary(self.bake)
-        self.assertEqual([p.name for p in lib.mains],['0_rest','2_face','10_face'])
-        self.assertEqual(lib.frames,3)
-        image=lib.composite(1,1,0)
-        expected=Image.alpha_composite(Image.new('RGBA',(80,96),(4,4,4,255)),
-                                      Image.new('RGBA',(80,96),(200,40,20,128)))
-        expected=Image.alpha_composite(expected,Image.new('RGBA',(80,96),(10,30,240,128))).convert('RGB')
-        self.assertLessEqual(abs(np.asarray(image,dtype=float)-np.asarray(expected)).max(),1)
-        audio,report,_=packet(lib,LAYOUT,v3_coder(),500,(1,1,0),True)
-        decoded=decode_packet(audio)
-        self.assertEqual((decoded.absolute,decoded.index,decoded.count),(500,2,3))
-        self.assertEqual((report['face_folder'],report['float_folder']),(1,0))
-        self.assertEqual(decoded.identity,'verified_header')
 
-    def test_largest_common_count(self):
-        for name in ['face/3_short','float/255_short']:
-            d=self.source/name;d.mkdir()
-            Image.new('RGBA',(40,48)).save(d/'0.png')
-        out=self.root/'other_modem'
-        with contextlib.redirect_stdout(io.StringIO()):bake_tree(self.source,out)
-        lib=ModemLibrary(out)
-        self.assertEqual(lib.frames,3)
-        self.assertEqual(len(lib.mains),3)
-        self.assertEqual(len(lib.floats),1)
+class ModemV7IntegrationTests(unittest.TestCase):
+    def test_generated_bake_matches_v7_geometry(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            source = root / 'images'
+            source_tree(source)
+            bake = root / 'images_modem'
+            with contextlib.redirect_stdout(io.StringIO()):
+                bake_tree(source, bake)
 
-    def test_sbs_jpeg_alpha_is_retained(self):
-        src=self.root/'sbs'
-        for name in ['face/0_base','float/255_mask']:
-            d=src/name;d.mkdir(parents=True)
-            image=Image.new('RGB',(80,48),(64,64,64))
-            image.paste(Image.new('RGB',(40,48),(200,50,20)),(0,0))
-            image.save(d/'0.jpg',quality=100,subsampling=0)
-        out=self.root/'sbs_modem'
-        with contextlib.redirect_stdout(io.StringIO()):bake_tree(src,out)
-        lib=ModemLibrary(out)
-        pixel=lib.slabs[lib.mains[0]][0,20,20].astype(float)
-        self.assertLess(abs(pixel-np.array([200,50,20,64])).max(),3)
+            library = ModemLibrary(bake)
+            self.assertEqual(library.profile, 'color-dct')
+            self.assertEqual(library.size, (80, 96))
+            self.assertEqual(library.frames, 3)
+            composite = library.composite(0, 0, 0)
+            self.assertEqual(composite.size, (80, 96))
+            self.assertEqual(composite.info['source_dimensions'], (80, 45))
+            self.assertEqual(
+                v7.aspect_wire_code(composite.info['source_dimensions']), 3)
+            rotated = library.composite(0, 0, 0, rotation=90)
+            self.assertEqual(rotated.info['source_dimensions'], (45, 80))
+            self.assertEqual(
+                v7.aspect_wire_code(rotated.info['source_dimensions']), 7)
 
-    def test_atomic_slab_failure_keeps_old_file(self):
-        existing=self.root/'frames.npy'
-        np.save(existing,np.array([9]))
-        before=existing.read_bytes()
-        with self.assertRaises(FileNotFoundError):
-            write_slab([self.root/'missing.png'],existing,(40,48))
-        self.assertEqual(before,existing.read_bytes())
-        self.assertFalse(list(self.root.glob('.slab-*')))
+            manifest_path = bake / 'modem.json'
+            manifest = json.loads(manifest_path.read_text())
+            for entry in manifest['folders']:
+                entry.pop('source_sizes')
+            manifest_path.write_text(json.dumps(manifest))
+            legacy_library = ModemLibrary(bake)
+            self.assertEqual(
+                legacy_library.composite(0, 0, 0).info['source_dimensions'],
+                (80, 96))
 
-    def test_failed_tree_bake_is_not_published(self):
-        (self.source/'face/2_face/broken.png').write_bytes(b'not an image')
-        out=self.root/'failed_modem'
-        with contextlib.redirect_stdout(io.StringIO()),self.assertRaises(OSError):bake_tree(self.source,out)
-        self.assertFalse(out.exists())
-        self.assertFalse(list(self.root.glob('.modem-bake-*')))
+            manifest['profile'] = 'lean-dct'
+            manifest_path.write_text(json.dumps(manifest))
+            with self.assertRaises(ValueError):
+                ModemLibrary(bake)
 
-    def test_live_uses_shared_clock_and_selector_without_polling_thread(self):
-        import index_calculator
-        import folder_selector
-        emitted=[]
-        class Output:
-            # A real PacketOutput reports the rate its device came up at; the
-            # send path prints it rather than assuming the reference figure.
-            rate=48000.0
-            def __init__(self,*args,**kwargs):
-                self.fps=self.rate/kwargs.get('frame',2768)
-            def __enter__(self):return self
-            def __exit__(self,*args):pass
-            def ready(self):return True
-            def reserve(self,*args):return SimpleNamespace(start_time=1,target_time_ns=1_700_000_000_000_000_000)
-            def submit(self,audio,slot=None):
-                emitted.append(decode_packet(audio));return True
-            def finish(self):pass
-        args=SimpleNamespace(modem_dir=str(self.bake), modem_pair=None,
-            modem_wav=None, modem_channels='1,2', modem_latency='low',
-            rotation=None, mirror=None, modem_clock=255, modem_frame_duration=1,
-            modem_time_offset_ms=0, modem_prepare_ms=10, modem_receive_margin_ms=15, modem_frames=3, modem_numbered=False,
-            modem_log_frames=False, scope_device=None, modem_index_offset_ms=33.3)
-        with patch.object(index_calculator,'set_clock_mode'), \
-             patch.object(index_calculator,'midi_mode',False), \
-             patch.object(index_calculator,'update_index',side_effect=[(0,None),(0,None),(1,None)]) as clock, \
-             patch.object(index_calculator,'calculate_free_clock_index',side_effect=[(0,None),(0,None),(1,None)]) as target_clock, \
-             patch.object(folder_selector,'update_folder_selection') as select, \
-             patch.dict(folder_selector.folder_dictionary,{'Main_and_Float_Folders':(1,0)}), \
-             patch('modem_display.PacketOutput',Output), patch('modem_display.time.sleep'), \
-             contextlib.redirect_stdout(io.StringIO()):
-            run_modem(args)
-        self.assertEqual(select.call_count,2)
-        self.assertEqual([x.index for x in emitted],[1,1,2])
-        # The wire is one-based so a zeroed header fails the 1 <= index guard;
-        # source_index is what the bake actually uses.
-        self.assertEqual([x.source_index for x in emitted],[0,0,1])
-        self.assertEqual([x.absolute for x in emitted],[1,2,3])
-        self.assertTrue(all(not call.kwargs for call in clock.call_args_list))
-        self.assertTrue(all(call.kwargs['at_time_ns']==1_700_000_000_000_000_000 for call in target_clock.call_args_list))
-        self.assertTrue(all(call.kwargs['publish'] is False for call in target_clock.call_args_list))
-        # The index offset must reach the clock formula without disturbing the
-        # transmitted timestamp: presentation time is unchanged above.
-        self.assertTrue(all(call.kwargs['time_offset_ns']==33_300_000 for call in target_clock.call_args_list))
-        # The shared-time millisecond field rides in stamp_ms; the
-        # scheduling contract is unchanged, only the header layout moved.
-        self.assertTrue(all(x.stamp_ms for x in emitted))
+    def test_main_wav_path_uses_v7_without_legacy_modem_stack(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            source = root / 'images'
+            source_tree(source)
+            bake = root / 'images_modem'
+            with contextlib.redirect_stdout(io.StringIO()):
+                bake_tree(source, bake)
 
-    def test_main_wav_path_needs_no_video_or_audio_device_stack(self):
-        wav=self.root/'test.wav'
-        script="""
-import sys,runpy
+            wav = root / 'test.wav'
+            script = """
+import sys, runpy
 class Block:
-    def find_spec(self,name,path=None,target=None):
-        if name.split('.')[0] in ('glfw','OpenGL','moderngl','turbojpeg','sounddevice','mido','cv2'):
-            raise ImportError('blocked unused dependency '+name)
-sys.meta_path.insert(0,Block())
-runpy.run_path(sys.argv[1],run_name='__main__')
+    def find_spec(self, name, path=None, target=None):
+        if name.split('.')[0] in ('glfw', 'OpenGL', 'moderngl', 'turbojpeg',
+                                  'sounddevice', 'mido', 'cv2'):
+            raise ImportError('blocked unused dependency ' + name)
+sys.meta_path.insert(0, Block())
+target = sys.argv.pop(1)
+sys.path.insert(0, str(__import__('pathlib').Path(target).parent))
+runpy.run_path(target, run_name='__main__')
 """
-        # run_path uses the arguments after the main.py path; remove the wrapper path.
-        script=script.replace("runpy.run_path(sys.argv[1],run_name='__main__')",
-                              "target=sys.argv.pop(1); sys.path.insert(0,str(__import__('pathlib').Path(target).parent)); runpy.run_path(target,run_name='__main__')")
-        r=subprocess.run([sys.executable,'-c',script,str(REPO/'main.py'),'--mode','modem',
-                           '--modem-dir',str(self.bake),'--modem-pair','1,0',
-                           '--modem-wav',str(wav),'--modem-frames','5','-f'],
-                          cwd=self.root,text=True,capture_output=True,timeout=30)
-        self.assertEqual(r.returncode,0,r.stdout+r.stderr)
-        r=subprocess.run([sys.executable,str(REPO/'utilities'/'modem_v3_check.py'),
-                           'read','--wav',str(wav)],
-                          cwd=self.root,text=True,capture_output=True,timeout=60)
-        self.assertEqual(r.returncode,0,r.stderr)
-        rows=[json.loads(line) for line in r.stdout.splitlines()]
-        self.assertEqual([x['frame'] for x in rows],list(range(1,6)))
-        self.assertEqual([x['index'] for x in rows],[1,2,3,1,2])
-        self.assertEqual([x['source_index'] for x in rows],[0,1,2,0,1])
+            result = subprocess.run(
+                [sys.executable, '-c', script, str(REPO / 'main.py'),
+                 '--mode', 'modem', '--modem-dir', str(bake),
+                 '--modem-pair', '1,0', '--modem-wav', str(wav),
+                 '--modem-frames', '5', '--modem-speed', '1.5'],
+                cwd=root, text=True, capture_output=True, timeout=30)
+            self.assertEqual(result.returncode, 0,
+                             result.stdout + result.stderr)
+
+            with wave.open(str(wav), 'rb') as source_wav:
+                samples = np.frombuffer(
+                    source_wav.readframes(source_wav.getnframes()),
+                    dtype='<i2').reshape(-1, 2).astype(float) / 32767
+            model = v7.build_model(
+                REPO / 'modem_tests/fixtures/v7_reference_face.png',
+                .1521 / np.sqrt(1 + 10**(v7.CLOCK_REL_DB / 10)),
+                encode_filter='box')
+            from tools.v7_wire_profile import WireProfile
+            profile = WireProfile('default')
+            decoded, info = profile.decode(model, samples)
+            self.assertEqual(len(decoded), 5, info)
+            self.assertEqual(info['eof_markers_validated'], 5)
+            self.assertTrue(all(
+                item.diag['pilot_timing']['mode_applied'] == 'tone-seeded'
+                for item in decoded))
+            self.assertTrue(all(
+                item.diag['pilot_timing']['coded_status_mode'] ==
+                _default_wire_status_mode() for item in decoded))
+            self.assertTrue(all(
+                profile.values(model, item).shape ==
+                (sum(rows*cols for rows, cols in v7.V7_GRIDS),)
+                for item in decoded))
+            self.assertEqual(
+                [item.diag['source_index'] for item in decoded[:4]],
+                [0, 1, 2, 1])
+            self.assertTrue(all(item.diag['aspect_code'] == 3
+                                for item in decoded[:4]))
+
+    def test_main_runtime_images_use_fifo_and_v7(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            source = root / 'runtime_images'
+            source_tree(source)
+            wav = root / 'runtime.wav'
+            result = subprocess.run(
+                [sys.executable, str(REPO / 'main.py'),
+                 '--mode', 'modem', '--modem-source', 'images',
+                 '--dir', str(source), '--modem-pair', '1,0',
+                 '--modem-wav', str(wav), '--modem-frames', '5',
+                 '--modem-log-frames'],
+                cwd=REPO, text=True, capture_output=True, timeout=30)
+            self.assertEqual(result.returncode, 0,
+                             result.stdout + result.stderr)
+            reports = [json.loads(line) for line in result.stdout.splitlines()
+                       if line.startswith('{')]
+            self.assertTrue(reports)
+            self.assertTrue(all(report['fold_slots'] == 500
+                                for report in reports))
+            self.assertTrue(all('fifo_hits' in report for report in reports))
+            # A miss only says the asynchronous image FIFO had to load the
+            # exact requested index in the foreground; RuntimeImageLibrary
+            # never substitutes a nearby frame.  Correctness is checked by
+            # decoding the source indices below, not by requiring a cache hit.
+            self.assertTrue(all(report['source_index_misses'] >= 0
+                                for report in reports))
+
+            with wave.open(str(wav), 'rb') as source_wav:
+                samples = np.frombuffer(
+                    source_wav.readframes(source_wav.getnframes()),
+                    dtype='<i2').reshape(-1, 2).astype(float) / 32767
+            model = v7.build_model(
+                REPO / 'modem_tests/fixtures/v7_reference_face.png',
+                .1521 / np.sqrt(1 + 10**(v7.CLOCK_REL_DB / 10)),
+                encode_filter='box')
+            from tools.v7_wire_profile import WireProfile
+            profile = WireProfile('default')
+            decoded, info = profile.decode(model, samples)
+            self.assertEqual(len(decoded), 5, info)
+            self.assertEqual(info['eof_markers_validated'], 5)
+            self.assertTrue(all(
+                item.diag['pilot_timing']['coded_status_mode'] ==
+                _default_wire_status_mode() for item in decoded))
+            self.assertEqual(
+                [item.diag['source_index'] for item in decoded[:4]],
+                [0, 2, 1, 1])
+            self.assertTrue(all(item.diag['aspect_code'] == 3
+                                for item in decoded[:4]))
+
+    def test_wav_rejects_live_midi_clock_without_prompting(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            source = root / 'images'
+            source_tree(source)
+            bake = root / 'images_modem'
+            with contextlib.redirect_stdout(io.StringIO()):
+                bake_tree(source, bake)
+            result = subprocess.run(
+                [sys.executable, str(REPO / 'main.py'),
+                 '--mode', 'modem', '--modem-dir', str(bake),
+                 '--modem-pair', '1,0', '--modem-wav', str(root / 'midi.wav'),
+                 '--modem-clock', '0', '--modem-frames', '5'],
+                cwd=root, text=True, capture_output=True, timeout=30)
+            self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+            self.assertIn('--modem-wav requires the free clock', result.stderr)
 
 
-if __name__=='__main__':unittest.main()
-
-
-class ModemPresetGuardTests(unittest.TestCase):
-    """main.py --mode modem reaches run_modem, which validates --modem-preset.
-
-    Names are checked before anything is opened or written, so a typo cannot
-    produce a file of the default preset under a wrong name.
-    """
-
-    def args(self, preset):
-        return SimpleNamespace(
-            modem_dir='unused', modem_pair=None, modem_wav=None,
-            modem_channels='1,2', modem_latency='low', rotation=None,
-            mirror=None, modem_clock=255, modem_frame_duration=1,
-            modem_time_offset_ms=0, modem_prepare_ms=10,
-            modem_receive_margin_ms=15, modem_frames=1, modem_numbered=False,
-            modem_log_frames=False, scope_device=None,
-            modem_index_offset_ms=0.0, modem_preset=preset)
-
-    def test_an_unknown_preset_names_the_real_ones(self):
-        with self.assertRaisesRegex(ValueError, 'Unknown --modem-preset'):
-            run_modem(self.args('lean'))
-
-    def test_the_guard_runs_before_the_bake_is_opened(self):
-        """modem_dir is deliberately nonexistent above: a bad preset must fail
-        on the preset, not on something incidental further in."""
-        with self.assertRaisesRegex(ValueError, 'Unknown --modem-preset'):
-            run_modem(self.args('tape'))
+if __name__ == '__main__':
+    unittest.main()

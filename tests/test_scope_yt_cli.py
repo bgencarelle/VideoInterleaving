@@ -76,6 +76,13 @@ class YtConfigurationTests(unittest.TestCase):
         self.configure("--no-scope-trigger")
         self.assertFalse(settings.SCOPE_TRIGGER)
 
+    def test_x_only_output_selection_reaches_settings(self):
+        self.configure("--scope-x-only")
+        self.assertTrue(settings.SCOPE_X_ONLY)
+        self.assertIn("--scope-x-only", as_flags(dict(x_only=True)))
+        self.configure("--no-scope-x-only")
+        self.assertFalse(settings.SCOPE_X_ONLY)
+
     def test_shape_selection_reaches_settings(self):
         for shape in ("ramp", "step"):
             self.configure("--scope-trigger-shape", shape)
@@ -133,9 +140,12 @@ class YtConfigurationTests(unittest.TestCase):
         settings.SCOPE_RENDER_MODE = "stochastic"
         settings.SCOPE_REALTIME = False
         out = io.StringIO()
-        with contextlib.redirect_stdout(out):
-            with self.assertRaises(BaseException):
-                scope_display.run_scope()   # no images here; it will not finish
+        # An empty isolated bake makes run_scope stop before it opens an audio
+        # device, even when the developer's normal XY bake exists.
+        with patch.object(scope_display, "_xy_root", return_value=self.temp.name):
+            with contextlib.redirect_stdout(out):
+                with self.assertRaises(BaseException):
+                    scope_display.run_scope()
         # The claim: it chose a renderer, saw fixed timing could not apply,
         # said so, and carried on -- rather than calling parser.error().
         self.assertIn("raster only", out.getvalue())

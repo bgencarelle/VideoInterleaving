@@ -1,12 +1,12 @@
+
 # index_calculator.py
 import time
 import datetime
-import math
 import decimal
 from zoneinfo import ZoneInfo
 
 from globals import control_data_dictionary
-from settings import IPS, CLIENT_MODE, VALID_MODES, FROM_BIRTH, CLOCK_MODE, BIRTH_TZ, BIRTH_TIME, TIMEZONE_OFFSETS
+from settings import IPS, INDEX_TIME_OFFSET_MS, CLIENT_MODE, VALID_MODES, FROM_BIRTH, CLOCK_MODE, BIRTH_TZ, BIRTH_TIME, TIMEZONE_OFFSETS
 
 clock_mode = CLOCK_MODE
 midi_mode = False
@@ -42,7 +42,7 @@ set_launch_time(from_birth=FROM_BIRTH)
 
 def set_clock_mode(mode=None):
     global clock_mode, midi_mode
-    if mode and mode in VALID_MODES.values():
+    if mode is not None and mode in VALID_MODES.values():
         clock_mode = mode
     else:
         while True:
@@ -67,7 +67,8 @@ def set_clock_mode(mode=None):
         import midi_control
     print("Clock mode set to", list(VALID_MODES.keys())[list(VALID_MODES.values()).index(clock_mode)])
 
-def calculate_free_clock_index(total_images, pingpong=True, *, time_offset_ns=0, at_time_ns=None, publish=True):
+def calculate_free_clock_index(total_images, pingpong=True, *, time_offset_ns=0,
+                               at_time_ns=None, publish=True):
     """
     Fast, mirrored ping‑pong index:
       0,1,2,...,N-1, N-1,N-2,...,1,0, 0,1,2...
@@ -76,9 +77,11 @@ def calculate_free_clock_index(total_images, pingpong=True, *, time_offset_ns=0,
     for multi-machine setups with chrony-synchronized clocks.
     """
     # Use nanosecond precision with integer arithmetic to avoid floating point errors
-    # Output adapters can select ahead without changing the shared epoch or IPS.
-    # Existing callers retain precisely the same clock behavior (offset zero).
-    current_time_ns = (time.time_ns() if at_time_ns is None else int(at_time_ns)) + int(time_offset_ns)
+    # Keep this phase common across modes. A configured offset is safe for
+    # synchronized displays only when every unit uses the same value.
+    configured_offset_ns = int(round(float(INDEX_TIME_OFFSET_MS)*1_000_000))
+    current_time_ns = ((time.time_ns() if at_time_ns is None else int(at_time_ns))
+                       + int(time_offset_ns) - configured_offset_ns)
     elapsed_ns = current_time_ns - launch_time
     # Calculate index using integer math: (elapsed_ns * IPS) // 1_000_000_000
     raw_index = (elapsed_ns * IPS) // 1_000_000_000
@@ -140,4 +143,5 @@ def update_index(total_images, pingpong=True, *, time_offset_ns=0, at_time_ns=No
         return index, None
     else:
         return calculate_free_clock_index(total_images, pingpong,
-                                          time_offset_ns=time_offset_ns, at_time_ns=at_time_ns)
+                                          time_offset_ns=time_offset_ns,
+                                          at_time_ns=at_time_ns)

@@ -1,1 +1,18 @@
 images_ascii.zip filter=lfs diff=lfs merge=lfs -text
+# Pinned tables are checked byte for byte (SHA-256): never convert line
+# endings (Windows core.autocrlf would turn LF into CRLF and fail the check).
+*.json -text
+*.npz binary
+*.npy binary
+# Windows launchers keep Windows line endings.
+*.cmd text eol=crlf
+# Pinned tables are checked byte for byte (SHA-256): never convert line
+# endings (Windows core.autocrlf would turn LF into CRLF and fail the check).
+*.json -text
+*.npz binary
+*.npy binary
+# Pinned tables are checked byte for byte (SHA-256): never convert line
+# endings (Windows core.autocrlf would turn LF into CRLF and fail the check).
+*.json -text
+*.npz binary
+*.npy binary

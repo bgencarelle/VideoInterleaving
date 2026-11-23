@@ -11,10 +11,7 @@ from dataclasses import dataclass
 import threading
 import numpy as np
 from .audio_common import sounddevice, route
-from .transport3 import ALL_PRESETS
-from .core import band_limited, emit_length
-
-_DEFAULT = ALL_PRESETS['wide-v3']   # layouts pass their own geometry
+from .v7_core import adapt_packet_for_output, emit_length, speed_length
 
 
 def latency(value):
@@ -37,14 +34,25 @@ class Slot:
 
 class PacketOutput:
     def __init__(self, device=None, channels=(0, 1), requested_latency='low',
-                 frame=_DEFAULT.frame, packet=_DEFAULT.packet):
-        # Layouts carry their own geometry -- wide-v3 is 3344 samples, tape-v3
-        # another count -- so the packet size cannot be a module constant.
+                 frame=None, packet=None, speed=1.0, block=None):
+        # V7 supplies its canonical packet geometry explicitly. Keeping it out
+        # of this audio adapter prevents legacy wire layouts from returning.
+        if frame is None or packet is None:
+            raise ValueError('V7 frame and packet lengths are required')
         self.frame = int(frame)
         self.packet = int(packet)
         if not 0 < self.packet <= self.frame:
             raise ValueError('Packet must be positive and fit inside the frame')
         self.channels = channels
+        # Samples per audio callback: small for low latency, larger with the
+        # high-latency buffer so each callback has more time in hand.
+        self.block = int(block if block is not None else
+                         (256 if requested_latency == 'low' else 1024))
+        if not 16 <= self.block <= 16384:
+            raise ValueError('block must be 16 to 16384 samples')
+        self.speed = float(speed)
+        if not np.isfinite(self.speed) or self.speed <= 0:
+            raise ValueError('speed must be finite and positive')
         self.pending = None
         self.pending_start = None
         self.next_start = None
@@ -59,6 +67,9 @@ class PacketOutput:
         self.error = None
         self.lock = threading.Lock()
         self.done = threading.Event()
+        self.ready_event = threading.Event()
+        self.ready_event.set()
+        self.callback_progress = threading.Event()
         self.sd = sounddevice()
         # No samplerate= here on purpose. The packet is a sample array, not a
         # duration, so it plays correctly out of a device running at whatever
@@ -68,8 +79,8 @@ class PacketOutput:
         # our back -- a conversion nobody asked for and nobody could see.
         self.stream = self.sd.OutputStream(
             channels=max(channels)+1, dtype='float32',
-            device=device, blocksize=256, latency=requested_latency,
-            callback=self._callback, finished_callback=self.done.set)
+            device=device, blocksize=self.block, latency=requested_latency,
+            callback=self._callback, finished_callback=self._on_finished)
         # Whatever the device reported once it was open. Everything below that
         # converts samples to seconds uses this, never a constant.
         self.rate = float(self.stream.samplerate)
@@ -78,8 +89,12 @@ class PacketOutput:
         # device turned out to be. Above the reference rate that means
         # resampling so the carriers stay at 375-20250 Hz instead of riding the
         # clock up out of the DAC's passband; at or below it, nothing happens.
-        self.emit_frame = emit_length(self.frame, self.rate)
-        self.emit_packet = emit_length(self.packet, self.rate)
+        self.emit_frame = (emit_length(self.frame, self.rate)
+                           if self.speed == 1 else
+                           speed_length(self.frame, self.rate, self.speed))
+        self.emit_packet = (emit_length(self.packet, self.rate)
+                            if self.speed == 1 else
+                            speed_length(self.packet, self.rate, self.speed))
         self.fps = self.rate/self.emit_frame
 
     def __enter__(self):
@@ -88,7 +103,7 @@ class PacketOutput:
                           'device_rate_hz': self.rate,
                           'frame_rate_fps': round(self.fps, 3),
                           'emit_frame_samples': self.emit_frame,
-                          'pending_frames': 1, 'block_samples': 256}), file=sys.stderr)
+                          'pending_frames': 1, 'block_samples': self.block}), file=sys.stderr)
         self.started = False
         return self
 
@@ -103,6 +118,21 @@ class PacketOutput:
         with self.lock:
             return self.pending is None
 
+    def wait_ready(self):
+        """Block until the audio callback has taken the pending packet."""
+        while True:
+            self.check()
+            with self.lock:
+                if self.pending is None:
+                    return True
+                self.ready_event.clear()
+            self.ready_event.wait()
+
+    def _on_finished(self):
+        self.done.set()
+        self.ready_event.set()
+        self.callback_progress.set()
+
     def reserve(self, prepare_ms=10, receive_margin_ms=15):
         """Reserve a send boundary; map its completion to the shared wall clock.
 
@@ -113,13 +143,26 @@ class PacketOutput:
         if not self.ready():return None
         self.scheduled = True
         if not self.started:
+            initial_clock = float(self.stream.time)
             self.stream.start()
             self.started = True
+            # Some audio servers deliver a few callbacks while their stream
+            # clock is still settling. Wait for it to advance by two blocks so
+            # the first DAC reservation uses the running device clock.
+            clock_ready = initial_clock + 2*self.block/self.rate
+            deadline = time.monotonic() + 5.0
+            while self.stream.time < clock_ready:
+                remaining = deadline-time.monotonic()
+                if remaining <= 0 or not self.callback_progress.wait(remaining):
+                    self.check()
+                    raise RuntimeError('Modem audio clock did not start advancing')
+                self.callback_progress.clear()
+                self.check()
         before = time.time_ns()
         now = self.stream.time
         after = time.time_ns()
         wall_ns = (before + after)//2
-        earliest = now + self.stream.latency + 256/self.rate + prepare_ms/1000
+        earliest = now + self.stream.latency + self.block/self.rate + prepare_ms/1000
         with self.lock:
             start = max(self.next_start or earliest, earliest)
         target = wall_ns + round((start-now + self.emit_packet/self.rate + receive_margin_ms/1000)*1e9)
@@ -130,7 +173,9 @@ class PacketOutput:
         """Take a reference-geometry frame; emit one this device can carry."""
         if np.shape(audio) != (self.frame, 2) or not np.isfinite(audio).all():
             raise ValueError('Expected one finite stereo modem frame')
-        prepared = route(band_limited(audio, self.rate), self.channels)
+        prepared = route(
+            adapt_packet_for_output(audio, self.rate, self.speed),
+            self.channels)
         self.check()
         if slot is not None and self.stream.time + self.stream.latency >= slot.start_time:
             self.deadline_misses += 1
@@ -140,6 +185,7 @@ class PacketOutput:
                 raise RuntimeError('Wait for ready() before submitting another packet')
             self.pending = prepared
             self.pending_start = slot.start_time if slot else None
+            self.ready_event.clear()
             if slot:self.next_start = slot.start_time + self.emit_frame/self.rate
         if not self.started:
             self.stream.start()
@@ -147,6 +193,7 @@ class PacketOutput:
         return True
 
     def _callback(self, outdata, frames, timing, status):
+        self.callback_progress.set()
         outdata.fill(0)
         if status.output_underflow:
             self.underflows += 1
@@ -169,6 +216,7 @@ class PacketOutput:
                                 continue  # Device missed the deadline; never present stale metadata.
                         self.current, self.pending = self.pending, None
                         self.pending_start = None
+                        self.ready_event.set()
                         if self.current is None:
                             eof = self.finishing
                             if not eof and not self.scheduled:self.starvations += 1

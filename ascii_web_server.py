@@ -1,9 +1,24 @@
 import threading
 import socket
-import time
+import gzip
+import ssl
+import json
+from collections import deque
 import settings
 from shared_state import exchange_ascii
-from SimpleWebSocketServer import SimpleWebSocketServer, WebSocket
+
+# SimpleWebSocketServer 0.1.2 evaluates this removed constant while defining
+# its unused SSL server, even when importing only the plain WebSocket server.
+# Supply a modern server-context default for that import only; do not leave
+# a deprecated-protocol alias installed process-wide (Python 3.14+).
+_missing_legacy_tls_default = not hasattr(ssl, 'PROTOCOL_TLSv1_2')
+if _missing_legacy_tls_default:
+    ssl.PROTOCOL_TLSv1_2 = ssl.PROTOCOL_TLS_SERVER
+try:
+    from SimpleWebSocketServer import SimpleWebSocketServer, WebSocket
+finally:
+    if _missing_legacy_tls_default:
+        del ssl.PROTOCOL_TLSv1_2
 from server_config import get_config
 
 # Configuration
@@ -18,7 +33,37 @@ ANSI_HOME = "\033[H"
 
 
 class AsciiWebSocket(WebSocket):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._delivery_lock = threading.Lock()
+        self._controls = deque()
+        self._pending_picture = None
+
+    def sendMessage(self, message):
+        # Control messages may originate outside the socket thread too. Never
+        # let a producer mutate the library's sendq (including a partial head).
+        with self._delivery_lock:
+            self._controls.append(message)
+
+    def queue_picture(self, plain, compressed=None):
+        with self._delivery_lock:
+            self._pending_picture = (plain, compressed)
+
+    def flush_delivery(self):
+        """Socket thread only: preserve controls and finish every started frame."""
+        with self._delivery_lock:
+            while self._controls:
+                super().sendMessage(self._controls.popleft())
+            if self.sendq or self._pending_picture is None:
+                return
+            plain, compressed = self._pending_picture
+            self._pending_picture = None
+        message = (compressed if self.frame_encoding == 'gzip' and
+                   compressed is not None else plain)
+        super().sendMessage(message)
+
     def handleConnected(self):
+        self.frame_encoding = 'text'
         if not _sem.acquire(blocking=False):
             self.close()
             return
@@ -37,6 +82,10 @@ class AsciiWebSocket(WebSocket):
             client_added = True
             sem_acquired = False  # Client added, handleClose will release semaphore
             self.sendMessage(ANSI_CLEAR)
+            width, height = (getattr(settings, 'ASCII_WEB_SOURCE_SIZE', None) or
+                             (getattr(settings, 'ASCII_WIDTH', 60),
+                              getattr(settings, 'ASCII_HEIGHT', 40)))
+            self.sendMessage(json.dumps({'type': 'resize', 'cols': width, 'rows': height}))
         except Exception as e:
             print(f"[WS] Handshake Error: {e}")
             # Cleanup: remove client from list if it was added, and release semaphore
@@ -65,8 +114,13 @@ class AsciiWebSocket(WebSocket):
     def handleMessage(self):
         """Handle incoming WebSocket messages (e.g., dimension change requests)."""
         try:
-            import json
+            if not isinstance(self.data, str) or len(self.data) > 4096:
+                return
             data = json.loads(self.data)
+            if not isinstance(data, dict):
+                return
+            if data.get('type') == 'encoding' and data.get('encoding') == 'gzip':
+                self.frame_encoding = 'gzip'
             if data.get('type') == 'resize':
                 # Client requesting dimension change (optional feature)
                 # For now, we'll let the server control dimensions via HTTP API
@@ -77,23 +131,21 @@ class AsciiWebSocket(WebSocket):
             pass
 
 
+class LatestWebSocketServer(SimpleWebSocketServer):
+    def serveonce(self):
+        # Admission and library writes share one owner. Producers only replace
+        # mailboxes; producers never clear sendq or wait for browser feedback.
+        for client in list(self.connections.values()):
+            client.flush_delivery()
+        super().serveonce()
+
+
 def broadcast_loop():
-    """Pushes frames to all connected WS clients."""
-    # Same rate limit the telnet server applies (ascii_server.py). Without
-    # this the WS clients got every published frame -- roughly double the
-    # intended rate -- and xterm.js re-renders the whole grid per frame, so
-    # the extra work was pure lag on a slow client.
-    min_interval = 1.0 / getattr(settings, 'ASCII_FPS', 15)
-    last_send_time = 0.0
+    """Push each frame published by the ASCII_FPS-paced image producer."""
     while True:
-        # Blocking Wait
         frame_data = exchange_ascii.get_frame()
 
         if not frame_data:
-            continue
-
-        now = time.monotonic()
-        if now - last_send_time < min_interval:
             continue
 
         try:
@@ -102,6 +154,10 @@ def broadcast_loop():
             else:
                 text = frame_data
             payload = ANSI_HOME + text
+            # Encode ONCE per publication, never per viewer or zoom level.
+            compressed = (b'g' + gzip.compress(payload.encode('utf-8'), compresslevel=1, mtime=0)
+                          if any(getattr(client, 'frame_encoding', 'text') == 'gzip'
+                                 for client in list(clients)) else None)
         except Exception:
             continue
 
@@ -109,24 +165,8 @@ def broadcast_loop():
         dead_clients = []
         for client in list(clients):
             try:
-                # --- NEAR-ZERO BUFFERING ---
-                # The library never blocks on a slow client: sendMessage
-                # just appends to client.sendq, and the select loop drains
-                # it once the socket is writable. A tab the browser has
-                # frozen or throttled stops reading, its queue grows without
-                # bound, and when it wakes it replays the entire backlog --
-                # minutes of stale frames. We do not want history on the
-                # screen, we want the current frame: so if a client is still
-                # draining more than a couple of frames, throw the backlog
-                # away and enqueue only this one. A healthy client's queue
-                # empties between broadcasts (the select loop runs every
-                # 0.1s and frames arrive at ~15fps), so it never trips this;
-                # a frozen one caps at three frames.
-                if len(client.sendq) >= 3:
-                    client.sendq.clear()
-
-                # If buffer is empty, send the new frame
-                client.sendMessage(payload)
+                # One replaceable waiting picture; encoded once for all clients.
+                client.queue_picture(payload, compressed)
 
             except (BrokenPipeError, ConnectionResetError, OSError) as e:
                 # Connection error - mark for cleanup
@@ -148,8 +188,6 @@ def broadcast_loop():
                 client.close()
             except Exception as e:
                 print(f"[WS] Error cleaning up dead client: {e}")
-
-        last_send_time = now
 
 
 def broadcast_dimension_change(width, height):
@@ -194,5 +232,7 @@ def start_server():
     t = threading.Thread(target=broadcast_loop, daemon=True, name="WS-Broadcaster")
     t.start()
 
-    server = SimpleWebSocketServer(HOST, port, AsciiWebSocket)
+    # Bound mailbox admission latency without changing the producer's cadence.
+    server = LatestWebSocketServer(HOST, port, AsciiWebSocket,
+                                  selectInterval=0.01)
     server.serveforever()

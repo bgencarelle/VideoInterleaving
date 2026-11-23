@@ -1,0 +1,126 @@
+{
+ "pictures": [
+  "kodim01.png",
+  "kodim03.png",
+  "kodim05.png",
+  "kodim07.png",
+  "kodim09.png",
+  "kodim11.png",
+  "kodim13.png",
+  "kodim15.png",
+  "kodim17.png",
+  "kodim19.png",
+  "kodim21.png",
+  "kodim23.png",
+  "kodim02.png",
+  "kodim04.png",
+  "kodim06.png",
+  "kodim08.png",
+  "kodim10.png",
+  "kodim12.png",
+  "kodim14.png",
+  "kodim16.png",
+  "kodim18.png",
+  "kodim20.png",
+  "kodim22.png",
+  "kodim24.png"
+ ],
+ "design": {
+  "mono": {
+   "linear": 64,
+   "kappa": 20,
+   "noise": 0.02
+  },
+  "slices": {
+   "linear": 600,
+   "kappa": 28,
+   "noise": 0.02
+  }
+ },
+ "tables": {
+  "mono/1:1": {
+   "slots": 1036,
+   "guests_per_channel": 972,
+   "channels": 1,
+   "sha256": "2ba609d69976707ebd7bfd2f390888c5455092b3eb2a68b4c1ab3872f62f5189"
+  },
+  "mono/4:3": {
+   "slots": 1044,
+   "guests_per_channel": 980,
+   "channels": 1,
+   "sha256": "c3c550cf6f87924bab23327e97bad4c338aafa0b3968757726aa7cccd7fdfb37"
+  },
+  "mono/3:2": {
+   "slots": 1045,
+   "guests_per_channel": 981,
+   "channels": 1,
+   "sha256": "849d2a6d18ec01b3bf09d3d32b04c4ac84c47da7f3a8e63c0a3c79803161d75e"
+  },
+  "mono/16:9": {
+   "slots": 1047,
+   "guests_per_channel": 983,
+   "channels": 1,
+   "sha256": "da56ff55736b39341f36c24d1a245a6994a43000f117fb6c0eed9b09b7bb8307"
+  },
+  "mono/3:4": {
+   "slots": 1036,
+   "guests_per_channel": 972,
+   "channels": 1,
+   "sha256": "ee5a09c3082bb5515f4c0518360629b03f42d44be87e8c0778dde2688f8e53de"
+  },
+  "mono/2:3": {
+   "slots": 1032,
+   "guests_per_channel": 968,
+   "channels": 1,
+   "sha256": "7973c3f611b15def6b88a71295b9b500fbffffbec2a11178f23334c8563efc5d"
+  },
+  "mono/9:16": {
+   "slots": 1032,
+   "guests_per_channel": 968,
+   "channels": 1,
+   "sha256": "b9dd33eaddd9889a51d7d954b277d215320184bcf61693d8b0df9485b0c5bc1a"
+  },
+  "slices/1:1": {
+   "slots": 1020,
+   "guests_per_channel": 420,
+   "channels": 2,
+   "sha256": "6cb45487f0001b5fa567684378b1f1160266fa8039a668374821ab4c6c1ac095"
+  },
+  "slices/4:3": {
+   "slots": 1020,
+   "guests_per_channel": 420,
+   "channels": 2,
+   "sha256": "c6ed8502e784ae543a8cc2d049b5fa3ca324ef974e84ac786eebc3733ac81385"
+  },
+  "slices/3:2": {
+   "slots": 1020,
+   "guests_per_channel": 420,
+   "channels": 2,
+   "sha256": "79be759f371a64ede124305c26ba88d591edea39d3e6cac4bfb1e26ae331582a"
+  },
+  "slices/16:9": {
+   "slots": 1020,
+   "guests_per_channel": 420,
+   "channels": 2,
+   "sha256": "a0bf220bba969a66c9a566735291104a93f3bd039356c39460fc3c79560f25dc"
+  },
+  "slices/3:4": {
+   "slots": 1020,
+   "guests_per_channel": 420,
+   "channels": 2,
+   "sha256": "caec4c0508d01419a3c8e357fa89d3318a3655857617c0474ea7cc38b7ab7b9e"
+  },
+  "slices/2:3": {
+   "slots": 1020,
+   "guests_per_channel": 420,
+   "channels": 2,
+   "sha256": "91e771a9f9e44c100c1e86a16a6666f8512a5afb927d3212d9d38fcba21446bd"
+  },
+  "slices/9:16": {
+   "slots": 1020,
+   "guests_per_channel": 420,
+   "channels": 2,
+   "sha256": "329241ea18f7dca70ddf1ab4ecabbb6d46faa023ec8e724c261507c26f60abbc"
+  }
+ }
+}

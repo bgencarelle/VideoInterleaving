@@ -1,0 +1,5618 @@
+#!/usr/bin/env python3
+"""Live V7 local-app/camera/screen/video sender and receiver.
+
+The sender uses the V7 prototype's fixed 48 kHz reference geometry and follows
+the selected DAC's native output clock by default, intended for an explicit
+audio loopback device, normally BlackHole 2ch. Its local-app source launches
+``main.py --mode local`` and receives that process's composited source images
+over a private loopback connection, before fullscreen display scaling.
+
+Examples::
+
+    .venv/bin/python tools/v7_live.py send --source local --device 'BlackHole 2ch'
+    .venv/bin/python tools/v7_live.py send --source camera --device 'BlackHole 2ch'
+    .venv/bin/python tools/v7_live.py send --source screen --device 'BlackHole 2ch'
+    .venv/bin/python tools/v7_live.py send --source video \\
+        --video-source clip.mp4 --device 'BlackHole 2ch'
+    .venv/bin/python tools/v7_live.py send --source video \\
+        --video-source 'rtsp://camera.example/live' --device 'BlackHole 2ch'
+    .venv/bin/python tools/v7_live.py receive --device 'BlackHole 2ch'
+    .venv/bin/python tools/v7_live.py receive --device 'BlackHole 2ch' --force-float32
+    .venv/bin/python tools/v7_live.py gui
+
+The prototype currently emits finite batches. Batch boundaries are therefore a
+known live-experiment limitation; the clock counter continues across batches so
+the receiver can diagnose the behavior rather than silently restarting it.
+"""
+import argparse
+from collections import deque
+import json
+import math
+import os
+import queue
+import sys
+import threading
+import time
+from pathlib import Path
+
+import numpy as np
+from types import SimpleNamespace
+from PIL import Image, ImageEnhance
+
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
+
+from animation_modem.imaging import values_image                         # noqa: E402
+from animation_modem import v7 as P                                       # noqa: E402
+from animation_modem import v7_kernels as K                               # noqa: E402
+from tools.v7_send_defaults import (NESTED_BASE_PROFILES, SENDER_DEFAULTS,  # noqa: E402
+                                    default_kernel_for_profile,
+                                    kernel_profiles)
+from animation_modem.v7_live_input import (DirectionStreak, LiveInput,
+                                           select_packet_hit,
+                                           windowed_rate)                 # noqa: E402
+image_values = P.image_values
+prepare_image = P.prepare_image
+try:
+    from animation_modem.imaging import stabilize_chroma                  # noqa: E402
+except ImportError:
+    from scipy.ndimage import gaussian_filter                             # noqa: E402
+
+    def stabilize_chroma(values, previous, shapes, pilot_error=None,
+                         coverage=None):
+        current = np.asarray(values)
+        if previous is None or len(shapes) < 3 or current.shape != np.shape(previous):
+            return current
+        error = 0.0 if pilot_error is None else max(0.0, float(pilot_error))
+        seen = 1.0 if coverage is None else np.clip(float(coverage), 0.0, 1.0)
+        amount = max((error - .20)/.80, (.85 - seen)/.85, 0.0)
+        amount = float(np.clip(amount*.65, 0.0, .65))
+        if amount <= 0:
+            return current
+        result = current.copy()
+        old = np.asarray(previous)
+        offset = shapes[0][0]*shapes[0][1]
+        for rows, cols in shapes[1:]:
+            count = rows*cols
+            blended = current[offset:offset+count]*(1-amount) + old[offset:offset+count]*amount
+            sigma = min(1.6, .35 + 1.8*amount)
+            result[offset:offset+count] = gaussian_filter(
+                blended.reshape(rows, cols), sigma=sigma, mode='nearest').ravel()
+            offset += count
+        return result
+from tools.v7_display import LatestFrame                                      # noqa: E402
+
+
+FPS = P.PULSE_FPS
+CAMERA_CAPTURE_FPS = 15
+# Retain the pre-low-latency capture cushion: at 96 kHz and 1024-frame input
+# blocks, 32 slots absorb about 341 ms of decoder scheduling stalls.
+INPUT_AUDIO_QUEUE_BLOCKS = 32
+# GUI users often start the receiver before the sender has finished warming up.
+PROFILE_PROBE_TIMEOUT = 2.0
+GUI_PROFILE_PROBE_TIMEOUT = 8.0
+# Start after one packet is ready and allow only one pending encoded batch; the
+# modem packet itself is the unavoidable serialization buffer for each image.
+SENDER_STARTUP_BUFFER_SECONDS = P.PULSE_FRAME / P.RATE
+DEVICE_RECOVERY_POLL_SECONDS = 1/P.PULSE_FPS
+
+
+class SenderDeviceLost(RuntimeError):
+    """The selected transmitter output stopped or changed its sample rate."""
+
+
+def _wait_for_stable_send_device(sd, preferred, identity, stop):
+    from tools.v7_device_recovery import (
+        DEVICE_RATE_FRAME_INTERVAL, DeviceRateDebouncer,
+        query_device_snapshot)
+
+    stable = DeviceRateDebouncer()
+    while not stop.is_set():
+        try:
+            snapshot = query_device_snapshot(
+                sd, preferred, identity, 'output')
+        except Exception:
+            stable.reset()
+        else:
+            index, _info, observed_identity, rate = snapshot
+            if stable.observe(observed_identity, rate):
+                return index, rate
+        stop.wait(DEVICE_RATE_FRAME_INTERVAL)
+    return None
+
+
+def _sender_queue_batches(startup_seconds, output_rate, packet_samples):
+    if startup_seconds <= 0 or output_rate <= 0 or packet_samples <= 0:
+        raise ValueError('startup duration and packet timing must be positive')
+    return max(1, int(math.ceil(startup_seconds*output_rate/packet_samples)))
+ENCODE_TO_FFMPEG_SCALE = {
+    'nearest': 'neighbor',
+    'box': 'area',
+    'lanczos': 'lanczos',
+    'bicubic': 'bicubic',
+}
+DEFAULT_FIXTURE = ROOT / 'modem_tests/fixtures/v7_reference_face.png'
+# The display stays independent of the modem decoder and can consume the latest
+# frame without building a backlog.
+FRAME_BUFFER = LatestFrame()
+# Read-only bridge for an external configuration UI. The receiver does not
+# depend on a GUI; an attached UI may poll the diagnostic callback.
+RECEIVER_GUI_STATUS = {}
+
+
+class LiveToneControls:
+    """Thread-safe brightness/gamma values updated by the sender GUI pipe."""
+
+    def __init__(self, brightness, gamma):
+        self._values = {'brightness': float(brightness), 'gamma': float(gamma)}
+        self._lock = threading.Lock()
+
+    def update(self, line):
+        try:
+            update = json.loads(line)
+        except (TypeError, ValueError):
+            return False
+        if not isinstance(update, dict):
+            return False
+        accepted = {}
+        for key in ('brightness', 'gamma'):
+            if key not in update:
+                continue
+            try:
+                value = float(update[key])
+            except (TypeError, ValueError):
+                continue
+            if np.isfinite(value) and value > 0:
+                accepted[key] = value
+        if not accepted:
+            return False
+        with self._lock:
+            self._values.update(accepted)
+        return True
+
+    def snapshot(self):
+        with self._lock:
+            return dict(self._values)
+
+
+class LiveKernelControls:
+    """The DCT kernel, its parameters and the DCT enhancement values, live.
+
+    The same newline-delimited JSON as LiveToneControls carries
+    {"kernel": "lanczos", "kernel_params": {"width": 0.9}} (the name may be
+    omitted to adjust the current kernel; each kernel remembers its own
+    values while the send runs), {"dct": {"sharpen": "taper",
+    "sharpen_strength": .3, "clarity": 0, "chroma_gain": 1, "preshrink": 4}} and
+    {"kernels": "reload"}, which rescans the kernel folders so an edited or
+    added file can be tried without stopping. Anything invalid is ignored with
+    a notice; the frame loop only ever sees a ready, valid selection.
+    """
+
+    DCT_LIMITS = {'sharpen_strength': (0.0, 1.0), 'clarity': (0.0, 1.0),
+                  'chroma_gain': (1.0, 1.3), 'preshrink': (1.75, 8.0)}
+
+    def __init__(self, registry, name=None, params=None, profile=None):
+        self.registry = registry
+        self.profile = profile
+        self._lock = threading.Lock()
+        self._values = {}
+        self._dct = {}
+        self._notices = []
+        self._name = name or K.REFERENCE
+        self._params = {self._name: dict(params or {})}
+        self._selection = None
+        try:
+            self._select()
+        except K.KernelError as exc:
+            self._notices.append(f'DCT kernel: {exc}')
+            self._name, self._selection = K.REFERENCE, None
+
+    def _select(self):
+        """Make the selection from the current name and values."""
+        self._selection = self.registry.select(
+            self._name, self._params.get(self._name), profile=self.profile)
+
+    def update(self, line):
+        try:
+            update = json.loads(line)
+        except (TypeError, ValueError):
+            return False
+        if not isinstance(update, dict):
+            return False
+        touched = False
+        with self._lock:
+            if update.get('kernels') == 'reload':
+                added, removed = self.registry.scan()
+                self._notices.append(
+                    'DCT kernels rescanned: ' + (', '.join(
+                        [f'+{n}' for n in added] + [f'-{n}' for n in removed])
+                        or 'no change') + ''.join(
+                        f'; skipped {Path(path).name}: {message}'
+                        for path, message in self.registry.errors))
+                touched = True
+            name, values = self._name, update.get('kernel_params')
+            if isinstance(update.get('kernel'), str):
+                name = update['kernel']
+            if (touched or name != self._name or isinstance(values, dict)):
+                candidate = {k: dict(v) for k, v in self._params.items()}
+                if isinstance(values, dict):
+                    candidate.setdefault(name, {}).update(values)
+                try:
+                    selection = self.registry.select(
+                        name, candidate.get(name), profile=self.profile)
+                except K.KernelError as exc:
+                    # A refused change leaves the running kernel as it was
+                    # (unless a rescan just removed it from under us).
+                    self._notices.append(f'DCT kernel: {exc}')
+                    name = self._name
+                    try:
+                        selection = self.registry.select(
+                            name, self._params.get(name), profile=self.profile)
+                    except K.KernelError:
+                        name, selection = K.REFERENCE, None
+                        self._notices.append('DCT kernel: back to reference')
+                else:
+                    self._params = candidate
+                self._name, self._selection = name, selection
+                touched = True
+            dct = update.get('dct')
+            if isinstance(dct, dict):
+                for key, value in dct.items():
+                    if key == 'sharpen' and value in ('off', 'taper', 'usm'):
+                        self._dct[key] = value
+                    elif key in self.DCT_LIMITS:
+                        try:
+                            value = float(value)
+                        except (TypeError, ValueError):
+                            continue
+                        low, high = self.DCT_LIMITS[key]
+                        if np.isfinite(value) and low <= value <= high:
+                            self._dct[key] = value
+                touched = True
+        return touched
+
+    def options(self, base):
+        """``base`` (the sender's dct options) with the live values applied."""
+        with self._lock:
+            merged = dict(base)
+            merged.update(self._dct)
+            merged['kernel'] = self._selection
+        return merged
+
+    def take_notices(self):
+        """Messages for the GUI, plus any kernel that failed on a frame."""
+        with self._lock:
+            notices, self._notices = self._notices, []
+            selection = self._selection
+        if selection is not None:
+            error = selection.kernel.take_error()
+            if error:
+                notices.append(f'DCT kernel bypassed this frame: {error}')
+            slow = selection.kernel.take_slow_warning()
+            if slow:
+                notices.append(slow)
+        return notices
+
+    def listing(self):
+        """What the GUI needs to show: names, errors, current choice."""
+        with self._lock:
+            return {'names': self.registry.names(), 'selected': self._name,
+                    'errors': [[Path(p).name, m]
+                               for p, m in self.registry.errors]}
+
+
+class LiveTransportControls:
+    """Pause/play/seek/restart of a file source, from the sender GUI pipe.
+
+    The same newline-delimited JSON channel as the tone controls carries
+    {"transport": "pause" | "play" | "restart"} and
+    {"transport": "seek", "position": seconds}. Commands apply to the attached
+    tools.v7_capture.FilePlayback; with none attached (camera, screen, test or
+    stream sources) they are ignored.
+    """
+
+    COMMANDS = ('pause', 'play', 'restart', 'seek')
+
+    def __init__(self):
+        self._playback = None
+        self._lock = threading.Lock()
+
+    def attach(self, playback):
+        with self._lock:
+            self._playback = playback
+
+    def status(self):
+        with self._lock:
+            playback = self._playback
+        return None if playback is None else playback.status()
+
+    def update(self, line):
+        try:
+            update = json.loads(line)
+        except (TypeError, ValueError):
+            return False
+        command = update.get('transport') if isinstance(update, dict) else None
+        if command not in self.COMMANDS:
+            return False
+        with self._lock:
+            playback = self._playback
+        if playback is None:
+            return False
+        if command == 'seek':
+            try:
+                position = float(update.get('position'))
+            except (TypeError, ValueError):
+                return False
+            if not np.isfinite(position) or position < 0:
+                return False
+            playback.seek(position)
+        else:
+            getattr(playback, command)()
+        return True
+
+
+# A sender run by the sender window stops once, cleanly: the first request
+# (the window closing our control input, Ctrl+C, or Ctrl+Break on Windows)
+# raises KeyboardInterrupt in the main thread, which closes FFmpeg and the
+# audio stream on the way out; later requests are ignored so they cannot cut
+# that cleanup short.
+_STOP_REQUESTED = threading.Event()
+
+
+def _stop_signal(_signum=None, _frame=None):
+    if _STOP_REQUESTED.is_set():
+        return
+    _STOP_REQUESTED.set()
+    raise KeyboardInterrupt
+
+
+def _install_gui_stop_handlers():
+    import signal
+    signal.signal(signal.SIGINT, _stop_signal)
+    if hasattr(signal, 'SIGBREAK'):                  # Windows Ctrl+Break
+        signal.signal(signal.SIGBREAK, _stop_signal)
+
+
+def _stop_from_gui():
+    """The window closed our control input: stop as Ctrl+C does."""
+    import _thread
+    _thread.interrupt_main()                          # runs _stop_signal
+
+
+def _read_live_tone_controls(stream, controls, stop, transport=None,
+                             kernels=None, on_eof=None):
+    """Consume newline-delimited GUI updates until EOF or shutdown. EOF means
+    the window asked us to stop (``on_eof``)."""
+    while not stop.is_set():
+        line = stream.readline()
+        if not line:
+            if on_eof is not None and not stop.is_set():
+                on_eof()
+            return
+        controls.update(line)
+        if transport is not None:
+            transport.update(line)
+        if kernels is not None:
+            kernels.update(line)
+
+
+def _file_playback(args, start, open_reader, reader=None, on_close=None):
+    """Transport wrapper for a local video file, or None for other sources."""
+    from tools.v7_capture import (FilePlayback, is_file_video_source,
+                                  probe_duration, probe_frames)
+
+    if (args.source != 'video' or getattr(args, 'video_live', False) or
+            not is_file_video_source(args.video_source)):
+        return None
+    fps, frames = probe_frames(args.video_source)
+    duration = probe_duration(args.video_source)
+    reader_fps = getattr(reader, 'fps', None)
+    if isinstance(reader_fps, (int, float)) and reader_fps > 0:
+        # Shared A/V capture emits a constant-rate picture stream rather than
+        # the source file's frame cadence. Transport positions follow it.
+        fps = reader_fps
+        frames = round(duration*fps) if duration else None
+    playback = FilePlayback(open_reader, duration=duration,
+                         start=start, reader=reader, on_close=on_close,
+                         fps=fps, loop_frames=frames,
+                          passes=getattr(args, 'source_passes', 0))
+    playback.completed_passes = getattr(args, '_sender_completed_passes', 0)
+    playback.ended = bool(playback.passes and
+                          playback.completed_passes >= playback.passes)
+    return playback
+
+
+def _device_arg(value):
+    """Accept sounddevice names or numeric device indexes."""
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return value
+
+
+def _audio_volume_arg(value):
+    try:
+        volume = float(value)
+    except (TypeError, ValueError) as exc:
+        raise argparse.ArgumentTypeError(
+            'audio volume must be a number from 0 to 1') from exc
+    if not np.isfinite(volume) or not 0.0 <= volume <= 1.0:
+        raise argparse.ArgumentTypeError(
+            'audio volume must be between 0 and 1')
+    return volume
+
+
+def _resolve_send_source(args, interactive=None, input_fn=None):
+    """Resolve optional interactive source and video-file/stream prompts."""
+    if interactive is None:
+        interactive = sys.stdin.isatty()
+    if input_fn is None:
+        input_fn = input
+
+    def ask(prompt):
+        try:
+            return input_fn(prompt)
+        except EOFError as exc:
+            raise ValueError(
+                'interactive source selection ended before a choice') from exc
+
+    if args.source is None and args.video_source:
+        args.source = 'video'
+    if args.source is None:
+        if not interactive:
+            raise ValueError(
+                'specify --source, or run interactively to choose one')
+        print('Capture source: local, camera, screen, video, test, or '
+              'mouse-follow')
+        while True:
+            selected = ask('Source: ').strip().lower()
+            if selected in ('local', 'camera', 'screen', 'video', 'test',
+                            'mouse-follow'):
+                args.source = selected
+                break
+            print('Choose local, camera, screen, video, test, or mouse-follow.')
+
+    if args.source == 'video':
+        if not args.video_source:
+            if not interactive:
+                raise ValueError(
+                    'video source missing; pass --video-source PATH_OR_URL')
+            args.video_source = ask(
+                'Video file path or live stream URL: ').strip()
+        args.video_source = args.video_source.strip()
+        if (len(args.video_source) >= 2 and
+                args.video_source[0] == args.video_source[-1] and
+                args.video_source[0] in ('"', "'")):
+            args.video_source = args.video_source[1:-1]
+        if not args.video_source:
+            raise ValueError('video file path or stream URL cannot be empty')
+    elif args.video_source:
+        raise ValueError('--video-source can only be used with --source video')
+    return args
+
+
+def _capture(args, start=0.0):
+    """Build one of the shared RGB capture sources."""
+    from tools.v7_capture import (LocalModeSource, camera_source,
+                                  mouse_follow_source, screen_capture_source,
+                                  screen_source, test_source, video_source,
+                                  Throttled, _region)
+
+    region = _region(args.region)
+    capture_filter = _capture_scale_flags(args)
+    if args.source == 'local':
+        return LocalModeSource(getattr(args, 'capture_fps', None) or FPS)
+    if args.source == 'test':
+        return test_source()
+    if args.source == 'video':
+        return video_source(args.video_source, width=args.capture_width,
+                            **({'loop': False} if getattr(args, 'source_passes', 0) else {}),
+                            scale_flags=capture_filter,
+                            live=True if args.video_live else None,
+                            preserve_size=bool(getattr(args, 'dct_encode', False)),
+                            **({'start': start} if start else {}))
+    if args.source == 'mouse-follow':
+        return mouse_follow_source(initial_width=args.capture_width)
+    if args.source == 'camera':
+        # Let FFmpeg probe the lowest mode/rate when the user did not override
+        # it.  Some AVFoundation devices advertise 15 fps but reject a forced
+        # 15-fps open unless their exact mode is selected first.
+        if getattr(args, 'dct_encode', False):
+            return camera_source(args.camera, args.capture_fps,
+                                 width=args.capture_width, spec=args.ffmpeg_input,
+                                 scale_flags=capture_filter, preserve_size=True)
+        if getattr(args, 'perceptual_resize', 'off') == 'off':
+            return camera_source(
+                args.camera, args.capture_fps, width=args.capture_width,
+                spec=args.ffmpeg_input, scale_flags=capture_filter,
+                output_size=P.PREPARED_SIZE)
+        return camera_source(args.camera, args.capture_fps,
+                             width=args.capture_width, spec=args.ffmpeg_input,
+                             scale_flags=capture_filter)
+    if args.screen_backend == 'mss':
+        return screen_source(region)
+    capture_fps = args.capture_fps
+    # AVFoundation screen capture commonly exposes only the display's native
+    # refresh rate (for example 60 fps), not the modem wire rate.
+    if capture_fps is None and sys.platform == 'darwin':
+        capture_fps = 60
+    return screen_capture_source(capture_fps or FPS, region, args.display,
+                                 args.capture_width, args.ffmpeg_input,
+                                 capture_filter,
+                                 preserve_size=bool(getattr(args, 'dct_encode', False)))
+
+
+def _capture_scale_flags(args):
+    """Resolve FFmpeg's scaler, deriving the direct camera default from profile."""
+    selected = getattr(args, 'capture_filter', None)
+    if selected:
+        return selected
+    if (getattr(args, 'source', None) == 'camera' and
+            getattr(args, 'perceptual_resize', 'off') == 'off'):
+        encode_filter = getattr(args, 'encode_filter', None) or 'box'
+        return ENCODE_TO_FFMPEG_SCALE[encode_filter]
+    return 'neighbor'
+
+
+def _model(fixture, encode_filter='nearest'):
+    model = P.build_model(fixture, .1521 / np.sqrt(
+        1 + 10**(P.CLOCK_REL_DB/10)), encode_filter=encode_filter)
+    return model
+
+
+# The GUI preview is a thumbnail; a toned preview built at full source size
+# cost ~30 ms per 1080p frame in the encode thread (8x the encode itself).
+DCT_PREVIEW_SIZE = (256, 320)
+
+
+def _dct_preview_image(rgb, brightness, gamma):
+    """Toned source preview for --dct-encode, reduced before toning."""
+    data = np.asarray(rgb)
+    if data.dtype != np.uint8:
+        data = np.asarray(data, dtype=np.float32)
+        if data.size and data.max() <= 1.0:
+            data = data*255.0
+        data = np.uint8(np.clip(np.rint(data), 0, 255))
+    image = Image.fromarray(np.ascontiguousarray(data), 'RGB')
+    factor = max(1, min(image.width//DCT_PREVIEW_SIZE[0],
+                        image.height//DCT_PREVIEW_SIZE[1]))
+    if factor > 1:
+        image = image.reduce(factor)
+    codes = np.arange(256, dtype=np.float64)/255.0
+    toned = np.clip(codes*brightness, 0.0, 1.0)
+    if gamma != 1.0:
+        toned = toned**(1.0/gamma)
+    table = np.uint8(np.rint(toned*255.0)).tolist()
+    return image.point(table*3)
+
+
+def _local_stamp(info):
+    """(source index, LoopInfo, direction) for a frame from local mode, from
+    the image it shows and local mode's clock (local_frame_bridge)."""
+    frames = max(1, int(info['frames']))
+    pingpong = bool(info['pingpong'])
+    if info['clocked']:
+        loop = P.LoopInfo.from_epoch(frames, int(info['launch_ns']), pingpong)
+        direction = P.loop_direction(P.loop_ticks(int(info['shown_ns'])), loop)
+    else:
+        loop = P.LoopInfo(frames, P.LOOP_NO_CLOCK, pingpong)
+        direction = 1
+    return int(info['index']) % (P.MAX_SOURCE_INDEX+1), loop, direction
+
+
+class _SenderIndex:
+    """The index each packet carries when sending outside the app: the count
+    of frames encoded, rolling over at the metadata's 15-bit field, sent with
+    that roll-over as a one-way loop (no clock), so the receiver knows the
+    count's range and where it wraps."""
+
+    FIELD = P.MAX_SOURCE_INDEX+1          # 32767 index values: 0..32766
+    LOOP = P.LoopInfo(FIELD, P.LOOP_NO_CLOCK, pingpong=False)
+
+    def stamp(self, counter):
+        """(source index, LoopInfo, direction) for packet ``counter`` (1-based)."""
+        return (int(counter)-1) % self.FIELD, self.LOOP, 1
+
+
+def _wire_index(counter):
+    """Live source index for packet ``counter`` (1-based), wrapping at the
+    metadata's 15-bit field instead of failing after about 44 minutes."""
+    return (int(counter)-1) % (P.MAX_SOURCE_INDEX+1)
+
+
+_wire_index_plain = _wire_index
+
+
+def _masks_on_grids(masks, grids):
+    """Chroma masks on the coding grids. A wire's masks are on the legacy V7
+    chroma grid; an enlarged grid (the adaptive nested tables) holds the same
+    coefficient (u, v) at its own row length (nested_grid.FoldGrid), so each
+    legacy mask is moved there; coefficients past the grid's edge are not
+    carried."""
+    out = []
+    for plane, mask in zip((1, 2), masks):
+        mask = np.asarray(mask, dtype=bool)
+        rows, cols = grids[plane]
+        if mask.size == rows*cols:
+            out.append(mask)
+            continue
+        old_rows, old_cols = P.V7_GRIDS[plane]
+        if mask.size != old_rows*old_cols:
+            raise ValueError('chroma mask fits neither the legacy nor the coding grid')
+        moved = np.zeros((rows, cols), dtype=bool)
+        keep_rows, keep_cols = min(rows, old_rows), min(cols, old_cols)
+        moved[:keep_rows, :keep_cols] = mask.reshape(
+            old_rows, old_cols)[:keep_rows, :keep_cols]
+        out.append(moved.ravel())
+    return out
+
+
+def _chroma_sent_masks(codec):
+    """Per chroma grid: the coefficients a fold codec's packets carry."""
+    kept = np.asarray(codec.kept, dtype=np.int64)
+    sent = getattr(codec, 'sent_model_indices', None)
+    if sent is not None:
+        kept = kept[np.asarray(sent, dtype=np.int64)]
+    offsets = codec.grid.off
+    if len(offsets) < 4:
+        return None
+    masks = []
+    for plane in (1, 2):
+        mask = np.zeros(int(offsets[plane+1]-offsets[plane]), dtype=bool)
+        inside = kept[(kept >= offsets[plane]) & (kept < offsets[plane+1])]
+        mask[inside-offsets[plane]] = True
+        masks.append(mask)
+    return masks
+
+
+def _fit_to_aspect(frame, aspect_code):
+    """Pillar- or letterbox ``frame`` into V7 aspect ``aspect_code``.
+
+    The result keeps the frame's pixel size (and capture metadata) but now
+    stands for the target ratio: the picture keeps its own ratio inside a
+    black frame. Used when the sender fixes the aspect layout, so the packet's
+    aspect code can name the layout (the metadata screen bit) and the receiver
+    still shows an undistorted picture.
+    """
+    source_size = getattr(frame, 'source_size', None)
+    rgb = frame.rgb if source_size is not None else frame
+    image = (rgb.convert('RGB') if isinstance(rgb, Image.Image) else
+             Image.fromarray(np.ascontiguousarray(np.asarray(rgb, np.uint8)),
+                             'RGB'))
+    width, height = image.size
+    ratio = (source_size[0]/source_size[1] if source_size else width/height)
+    target = float(P.V7_ASPECT_RATIOS[int(aspect_code) & 7])
+    box = (max(1, round(width*min(1.0, ratio/target))),
+           max(1, round(height*min(1.0, target/ratio))))
+    fitted = Image.new('RGB', (width, height))
+    if box != (width, height):
+        image = image.resize(box, Image.Resampling.BOX)
+    fitted.paste(image, ((width-box[0])//2, (height-box[1])//2))
+    out = fitted if isinstance(rgb, Image.Image) else np.asarray(fitted)
+    if source_size is None:
+        return out
+    from dataclasses import replace
+    return replace(frame, rgb=out)
+
+
+def _values(model, frame, encode_filter='nearest', brightness=1.05, gamma=1.0,
+            perceptual_resize='off', perceptual_detail_strength=0.25,
+            dct_encode=False, dct_options=None, return_resized=False,
+            fit_aspect=None, chroma_sent_for=None, kernel_masks_for=None,
+            defer_kernel_gain=False, deferred_gains_out=None,
+            adaptive_source_area=False):
+    """(values, aspect code[, preview]) for one source frame.
+
+    With ``fit_aspect`` (a V7 aspect code: the sender's fixed aspect layout)
+    the picture is boxed into that ratio first and the returned code carries
+    P.ASPECT_SCREEN, which sets the metadata screen bit.
+
+    With ``chroma_sent_for`` (aspect code -> the wire's chroma masks) a
+    direct-DCT frame gets luma adjustment: its luma is re-fitted so that, with
+    the chroma the receiver will have, each pixel keeps the source's
+    luminance (v7_source_dct.luma_adjust).
+    """
+    luminance = [] if chroma_sent_for is not None and dct_encode else None
+    if fit_aspect is not None:
+        frame = _fit_to_aspect(frame, fit_aspect)
+    kernel_frame, kernel_masks = [], None
+    if (dct_encode and dct_options and dct_options.get('kernel') is not None
+            and kernel_masks_for is not None):
+        kernel_masks = kernel_masks_for(
+            (int(fit_aspect) & 7) | P.ASPECT_SCREEN if fit_aspect is not None
+            else P.aspect_wire_code(_frame_size(frame)))
+    selection = (dct_options or {}).get('kernel')
+    defer_kernel_gain = bool(
+        defer_kernel_gain and dct_encode and chroma_sent_for is None and
+        selection is not None and selection.kernel.defer_gain_to_codec and
+        not selection.kernel.has_post and not selection.kernel.has_prefilter)
+    out = _picture_values(model, frame, encode_filter, brightness, gamma,
+                          perceptual_resize, perceptual_detail_strength,
+                          dct_encode, dct_options, return_resized,
+                          luminance_out=luminance, kernel_masks=kernel_masks,
+                          kernel_frame_out=kernel_frame,
+                          defer_kernel_gain=defer_kernel_gain)
+    aspect = (out[1] if fit_aspect is None else
+              (int(fit_aspect) & 7) | P.ASPECT_SCREEN)
+    values = out[0]
+    if luminance and luminance[0] is not None:
+        from animation_modem.v7_source_dct import luma_adjust
+        masks = chroma_sent_for(aspect)
+        if masks is not None:
+            masks = _masks_on_grids(masks, model.coder.grids)
+            values = luma_adjust(values, model.coder.grids, masks, luminance[0])
+    deferred_gains = None
+    if kernel_frame and defer_kernel_gain:
+        deferred_gains = kernel_frame[0].coefficient_gains()
+    elif kernel_frame:
+        # The kernel's non-linear refit goes last, after luma adjustment, so
+        # nothing re-fits the luma it just cleaned.
+        values = kernel_frame[0].post(values, model.coder.grids)
+    if adaptive_source_area and (selection is None or
+                                 selection.kernel.name == 'reference'):
+        # Match the validated adaptive sender preparation: positive-area
+        # integration from the actual source RGB onto the table's exact Y/Cb/Cr
+        # grids. Reference has no enhancement to preserve. Other kernels keep
+        # their complete source conversion, prefilter, gain and post pipeline;
+        # replacing their output here would silently discard the selection.
+        from tools.v7_adaptive_pipeline import source_values
+        source_rgb = getattr(frame, 'rgb', frame)
+        if isinstance(source_rgb, Image.Image):
+            source_image = source_rgb.convert('RGB')
+        else:
+            source_image = Image.fromarray(
+                np.ascontiguousarray(np.asarray(source_rgb, dtype=np.uint8)), 'RGB')
+        if brightness != 1.0:
+            source_image = ImageEnhance.Brightness(source_image).enhance(brightness)
+        if gamma != 1.0:
+            toned = np.asarray(source_image, np.float32) / 255.0
+            source_image = Image.fromarray(
+                np.uint8(np.rint(np.clip(toned, 0, 1)**(1.0/gamma)*255)), 'RGB')
+        values = source_values(np.asarray(source_image, dtype=np.uint8))
+    if deferred_gains_out is not None:
+        deferred_gains_out.append(deferred_gains)
+    extra = tuple(out[2:])
+    if kernel_frame and return_resized and extra:
+        # With a kernel chosen the "Encoder input" picture is what the wire
+        # carries (an ideal receiver's picture), so the kernel can be judged.
+        sent = _sent_preview_image(values, model.coder.grids,
+                                   model.coder.shapes, kernel_masks,
+                                   coefficient_gains=deferred_gains)
+        # The wire squeezes the picture into its grid; draw it at the
+        # source's own proportions, as the receiver does.
+        width, height = _frame_size(frame)
+        if width > 0 and height > 0:
+            sent = sent.resize((max(1, round(sent.height*width/height)),
+                                sent.height), Image.Resampling.BILINEAR)
+        extra = (sent,) + extra[1:]
+    return (values, aspect) + extra
+
+
+def _sent_preview_image(values, grids, shapes, masks=None, up=2,
+                        coefficient_gains=None):
+    """The picture an ideal receiver draws from the sent DCT coefficients.
+
+    Every plane is inverted at ``up`` times its own grid (zero-padded
+    coefficients), chroma is then repeated up to the luma size: small
+    transforms, cheap enough to run on every preview frame."""
+    from scipy.fft import dctn, idctn
+    height, width = grids[0][0]*up, grids[0][1]*up
+    planes, offset = [], 0
+    for index, (rows, cols) in enumerate(grids):
+        block = np.asarray(values[offset:offset+rows*cols], np.float32)
+        offset += rows*cols
+        coefficients = dctn(block.reshape(rows, cols), norm='ortho')
+        if coefficient_gains is not None:
+            gain = coefficient_gains[index]
+            if gain is not None:
+                coefficients *= np.asarray(gain, dtype=coefficients.dtype)
+        mask = None if masks is None else masks[index]
+        if mask is None or np.shape(mask) != (rows, cols):
+            mask = np.zeros((rows, cols), bool)
+            mask[:shapes[index][0], :shapes[index][1]] = True
+        coefficients[~np.asarray(mask, bool)] = 0
+        big = np.zeros((rows*up, cols*up), np.float32)
+        big[:rows, :cols] = coefficients*up
+        plane = idctn(big, norm='ortho')*.5 + .5
+        for axis, size in ((0, height), (1, width)):
+            if plane.shape[axis] != size:
+                plane = np.repeat(plane, size//plane.shape[axis], axis=axis)
+        planes.append(plane)
+    y, cb, cr = planes[0], planes[1]-.5, planes[2]-.5
+    rgb = np.stack((y+1.402*cr, y-.344136*cb-.714136*cr, y+1.772*cb), -1)
+    return Image.fromarray(np.uint8(np.clip(rgb, 0, 1)*255+.5), 'RGB')
+
+
+def _kernel_cli_values(items):
+    """``--dct-kernel-param name=value`` entries as a dict."""
+    values = {}
+    for item in items or ():
+        name, separator, value = str(item).partition('=')
+        if not separator:
+            raise ValueError('--dct-kernel-param is NAME=VALUE')
+        try:
+            values[name.strip()] = float(value)
+        except ValueError:
+            raise ValueError(f'--dct-kernel-param {name}: {value!r} is not a number')
+    return values
+
+
+def _warm_kernels(model, registry, masks_for, dct_options, profile=None):
+    """Encode a small test frame through every kernel (all hooks, default
+    parameters) before the output stream is live."""
+    frame = np.zeros((model.coder.grids[0][0]*4, model.coder.grids[0][1]*4, 3),
+                     np.uint8)
+    frame[::7] = 200
+    for name in registry.names():
+        try:
+            selection = registry.select(name, profile=profile)
+        except K.KernelError:
+            continue
+        masks = masks_for(0) if selection is not None else None
+        frames = []
+        from animation_modem.v7_source_dct import direct_dct_values
+        warm_options = {}
+        native_source = False
+        if selection is not None:
+            if selection.kernel.has_prefilter:
+                try:
+                    native_source = bool(
+                        (selection.kernel.prefilter(selection.params) or {})
+                        .get('full_source', False))
+                except Exception:
+                    native_source = False
+            if native_source or selection.kernel.has_gain:
+                # Compile the optional source-luminance reduction and the
+                # kernel-target transforms before live frames arrive.
+                warm_options['luminance_out'] = []
+        values = direct_dct_values(
+            frame, model.coder.grids, model.coder.shapes,
+            kernel=selection, kernel_masks=masks, kernel_frame_out=frames,
+            **warm_options)
+        if frames:
+            frames[0].post(values, model.coder.grids)
+
+
+def _frame_size(frame):
+    """(width, height) the aspect code is named from, for any frame type."""
+    size = getattr(frame, 'source_size', None)
+    if size is not None:
+        return size
+    frame = getattr(frame, 'rgb', frame)
+    return frame.size if isinstance(frame, Image.Image) else np.shape(frame)[1::-1]
+
+
+def _picture_values(model, frame, encode_filter='nearest', brightness=1.05,
+                    gamma=1.0, perceptual_resize='off',
+                    perceptual_detail_strength=0.25, dct_encode=False,
+                    dct_options=None, return_resized=False, luminance_out=None,
+                    kernel_masks=None, kernel_frame_out=None,
+                    defer_kernel_gain=False):
+    _validate_tone_controls(brightness, gamma)
+    source_size = getattr(frame, 'source_size', None)
+    capture_prepared = bool(getattr(frame, 'prepared', False))
+    if source_size is not None:
+        frame = frame.rgb
+    if (dct_encode and not capture_prepared and perceptual_resize == 'off'
+            and not (dct_options or {}).get('pixel')):
+        # The direct encode needs at least the coder grid; a smaller frame
+        # (a zoomed-in mouse-follow crop) is prepared by Box resize instead.
+        frame_size = (frame.size if isinstance(frame, Image.Image) else
+                      np.shape(frame)[1::-1])
+        rows, cols = (max(axis) for axis in zip(*model.coder.grids))
+        if frame_size[0] < cols or frame_size[1] < rows:
+            dct_encode = False
+            encode_filter = 'box'
+    if dct_encode:
+        if perceptual_resize != 'off':
+            raise ValueError('--dct-encode cannot be combined with --perceptual-resize')
+        if capture_prepared:
+            raise ValueError('--dct-encode requires an unprepared source frame')
+        from animation_modem.v7_source_dct import (direct_dct_values,
+                                                   pixel_dct_values,
+                                                   source_dct_values)
+        rgb = np.asarray(frame.convert('RGB') if isinstance(frame, Image.Image)
+                         else frame)
+        options = dict(dct_options or {})
+        pixel_detail = options.pop('pixel_detail', 'average')
+        # Aspect code -> the wire's pixel grid for that layout (the aspect
+        # profile); without it the grid is the model's sent rectangle.
+        pixel_shapes = options.pop('pixel_shapes', None)
+        if options.pop('pixel', False):
+            # Pixel encode: the sent rectangle's own pixels, exactly; no
+            # enhancement and no luma adjustment (they would change them).
+            shapes = model.coder.shapes
+            if pixel_shapes is not None:
+                shapes = pixel_shapes[P.aspect_wire_code(
+                    source_size or (rgb.shape[1], rgb.shape[0])) & 7]
+            values = pixel_dct_values(
+                rgb, model.coder.grids, shapes,
+                brightness=brightness, gamma=gamma,
+                detail=pixel_detail)
+        elif (options.pop('aggregation', 'off') == 'off' and
+              options.pop('band_profile', 'off') == 'off'):
+            # The specified direct encode: tone + block pre-shrink fused in
+            # one pass, then small cached DCT products per plane.
+            values = direct_dct_values(
+                rgb, model.coder.grids, model.coder.shapes,
+                brightness=brightness, gamma=gamma,
+                luminance_out=luminance_out, kernel_masks=kernel_masks,
+                kernel_frame_out=kernel_frame_out,
+                defer_kernel_gain=defer_kernel_gain, **options)
+        else:
+            # Research reducers keep the full-resolution analysis path.
+            research = dict(dct_options or {})
+            source_kernel = research.pop('kernel', None)
+            research.pop('preshrink', None)
+            research.pop('linear_preshrink', None)
+            linear_light = bool(research.pop('linear_light', False))
+            research.pop('pixel', None)
+            research.pop('pixel_detail', None)
+            research.pop('pixel_shapes', None)
+            full_source = False
+            if source_kernel is not None and source_kernel.kernel.has_prefilter:
+                try:
+                    full_source = bool(
+                        (source_kernel.kernel.prefilter(source_kernel.params) or {})
+                        .get('full_source', False))
+                except Exception as exc:
+                    source_kernel.kernel.note_failure(exc)
+            if full_source:
+                # Area-box is itself a spatial reduction, so the native-source
+                # mode keeps the source's actual DCT coefficients instead.
+                if research.get('aggregation') == 'area-box':
+                    research['aggregation'] = 'off'
+                values, _stats = source_dct_values(
+                    rgb, model.coder.grids, model.coder.shapes,
+                    brightness=brightness, gamma=gamma,
+                    linear_light=linear_light, luminance_out=luminance_out,
+                    neutral_chroma=.5,
+                    numba_projection=True,
+                    kernel=source_kernel, kernel_masks=kernel_masks,
+                    kernel_frame_out=kernel_frame_out, **research)
+            else:
+                values, _stats = source_dct_values(
+                    rgb, model.coder.grids, model.coder.shapes,
+                    brightness=brightness, gamma=gamma, **research)
+        size = source_size or (rgb.shape[1], rgb.shape[0])
+        aspect = P.aspect_wire_code(size)
+        if return_resized:
+            # Direct source-DCT encoding has no resized RGB intermediate.
+            # Show the toned source entering its color/DCT conversion rather
+            # than reconstructing pixels from encoded coefficients.
+            return values, aspect, _dct_preview_image(rgb, brightness, gamma)
+        return values, aspect
+    rgb_frame = (isinstance(frame, np.ndarray) and frame.dtype == np.uint8 and
+                 frame.ndim == 3 and frame.shape[2] == 3)
+    if perceptual_resize == 'off':
+        # Keep this default path byte-identical to the established sender.
+        image = frame if isinstance(frame, Image.Image) else Image.fromarray(frame)
+        prepared = (image.convert('RGB') if capture_prepared else
+                    prepare_image(image, encode_filter=encode_filter))
+        size = source_size or image.size
+    else:
+        if encode_filter != 'box':
+            raise ValueError('perceptual resize requires --encode-filter box')
+        from animation_modem.perceptual_resize import resize_image, resize_rgb
+        if rgb_frame:
+            # Captured frames are already RGB uint8 arrays. Going through
+            # Pillow and back would copy them three times and change nothing.
+            # Strided views (mss BGRA->RGB) are made contiguous once, so the
+            # kernels see only the C layouts warmup_resize compiled.
+            prepared = Image.fromarray(
+                resize_rgb(np.ascontiguousarray(frame), perceptual_resize,
+                           perceptual_detail_strength), mode='RGB')
+            size = source_size or (frame.shape[1], frame.shape[0])
+        else:
+            image = (frame if isinstance(frame, Image.Image)
+                     else Image.fromarray(frame))
+            prepared = resize_image(image, perceptual_resize,
+                                    perceptual_detail_strength)
+            size = source_size or image.size
+    if brightness != 1.0:
+        prepared = ImageEnhance.Brightness(prepared).enhance(brightness)
+    if gamma != 1.0:
+        values = np.asarray(prepared, np.float32)/255.0
+        values = np.clip(values, 0, 1)**(1.0/gamma)
+        adjusted = Image.fromarray(np.uint8(np.rint(values*255)), 'RGB')
+        adjusted.info.update(prepared.info)
+        prepared = adjusted
+    values = image_values(prepared, model.coder.grids,
+                          encode_filter=encode_filter)
+    aspect = P.aspect_wire_code(size)
+    if return_resized:
+        return values, aspect, prepared
+    return values, aspect
+
+
+def _experimental_fold(slots):
+    """PROTOTYPE: the test_modem_v7 luma fold (see docs/transport_v7_spec.md
+    section 10). Both ends load the same pinned table; coded pilot status
+    identifies the fold size and supplies the timing estimator's chip signs."""
+    if not slots:
+        return None
+    _ensure_test_modem_path()
+    from live_fold import LiveFold
+    try:
+        fold = LiveFold(slots)
+    except ValueError as exc:
+        raise SystemExit(f'--experimental-fold {slots}: {exc}')
+    print(f'[fold + coded pilot] {slots} luma slots, table {fold.digest} '
+          f'(the other end must use the same profile)', flush=True)
+    return fold
+
+
+def _ensure_test_modem_path():
+    path = str(ROOT/'test_modem_v7')
+    if path not in sys.path:
+        sys.path.insert(0, path)
+
+
+def _fold_slots(args):
+    """Resolve the shared live profile; the historical profile is explicit opt-out."""
+    requested = getattr(args, 'experimental_fold', None)
+    mono_fold = bool(getattr(args, 'experimental_mono_fold', False))
+    if mono_fold and requested is not None:
+        raise ValueError('experimental mono profiles must be selected on their own')
+    if mono_fold:
+        return 0
+    if getattr(args, 'aspect_fold', False):
+        if requested is not None:
+            raise ValueError('aspect-fold-500 must be selected on its own')
+        # The aspect profile folds with its own layout tables, not LiveFold.
+        return 0
+    if getattr(args, 'slices', None):
+        if requested is not None:
+            raise ValueError('stereo-slices must be selected on its own')
+        return 0
+    return 500 if requested is None else int(requested)
+
+
+def _send_profile(args, slots):
+    """Apply profile defaults while preserving explicit user overrides."""
+    encode_filter = getattr(args, 'encode_filter', None)
+    brightness = getattr(args, 'brightness', None)
+    perceptual_resize = getattr(args, 'perceptual_resize', 'off')
+    _apply_encode_defaults(args, slots)
+    dct_encode = bool(getattr(args, 'dct_encode', False))
+    if slots:
+        encode_filter = encode_filter or 'box'
+        brightness = 1.0 if brightness is None else brightness
+        if encode_filter != 'box':
+            raise ValueError('folded coded-pilot mode requires --encode-filter box')
+        if not P._is_reference(getattr(args, 'fixture', None)):
+            if perceptual_resize != 'off':
+                raise ValueError('--perceptual-resize requires the canonical V7 fixture and matching pinned fold table')
+            raise ValueError('folded coded-pilot mode requires the default V7 fixture')
+        if not getattr(args, 'pilot_tones', True):
+            raise ValueError('coded-pilot folding cannot be combined with --no-pilot-tones')
+    else:
+        encode_filter = encode_filter or 'nearest'
+        brightness = 1.05 if brightness is None else brightness
+    _validate_tone_controls(brightness, getattr(args, 'gamma', 1.0))
+    dct_options = _dct_encode_options(args)
+    if dct_encode:
+        if slots != 500 or encode_filter != 'box':
+            raise ValueError('--dct-encode requires the canonical box Fold-500 profile')
+        if not P._is_reference(getattr(args, 'fixture', None)):
+            raise ValueError('--dct-encode requires the canonical V7 fixture')
+        from animation_modem.v7_source_dct import (
+            AGGREGATIONS, BAND_PROFILES, SHARPEN_MODES)
+        if dct_options['sharpen'] not in SHARPEN_MODES:
+            raise ValueError('unknown --dct-sharpen mode')
+        if dct_options['aggregation'] not in AGGREGATIONS:
+            raise ValueError('unknown --dct-aggregation mode')
+        if dct_options['band_profile'] not in BAND_PROFILES:
+            raise ValueError('unknown --dct-band-profile')
+        if not 0 <= dct_options['sharpen_strength'] <= 1:
+            raise ValueError('--dct-sharpen-strength must be in [0, 1]')
+        if not 0 <= dct_options['clarity'] <= 1:
+            raise ValueError('--dct-clarity must be in [0, 1]')
+        if not 1 <= dct_options['chroma_gain'] <= 1.3:
+            raise ValueError('--dct-chroma-gain must be in [1, 1.3]')
+        if not 1.75 <= dct_options['preshrink'] <= 8.0:
+            raise ValueError('--dct-preshrink must be in [1.75, 8]')
+    elif _dct_options_explicit(args):
+        raise ValueError('DCT enhancement options require --dct-encode')
+    if perceptual_resize != 'off':
+        if slots != 500:
+            raise ValueError('--perceptual-resize requires the pinned fold profile (Fold 500)')
+        if encode_filter != 'box':
+            raise ValueError('--perceptual-resize requires --encode-filter box')
+        strength = float(getattr(args, 'perceptual_detail_strength', 0.25))
+        if not np.isfinite(strength) or not 0.0 <= strength <= 1.0:
+            raise ValueError('--perceptual-detail-strength must be finite and in [0, 1]')
+    return encode_filter, float(brightness)
+
+
+def _dct_encode_options(args):
+    def option(name, default):
+        configured = getattr(args, name, None)
+        return default if configured is None else configured
+
+    return {
+        'sharpen': option('dct_sharpen', 'off'),
+        'sharpen_strength': float(option('dct_sharpen_strength', .25)),
+        'clarity': float(option('dct_clarity', 0.0)),
+        'chroma_gain': float(option('dct_chroma_gain', 1.0)),
+        'preshrink': float(option('dct_preshrink', 4.0)),
+        'aggregation': option('dct_aggregation', 'off'),
+        'band_profile': option('dct_band_profile', 'off'),
+        'linear_light': bool(option('luma_adjust_linear', False)),
+        'pixel': bool(option('pixel_encode', False)),
+        'pixel_detail': option('pixel_detail', 'average'),
+        'linear_preshrink': bool(option('linear_preshrink',
+                                        SENDER_DEFAULTS['linear_preshrink'])),
+    }
+
+
+def _dct_options_explicit(args):
+    return any(getattr(args, name, None) is not None for name in (
+        'dct_sharpen', 'dct_sharpen_strength', 'dct_clarity',
+        'dct_chroma_gain', 'dct_preshrink', 'dct_aggregation',
+        'dct_band_profile')) or (
+        getattr(args, 'dct_kernel', None) not in (None, K.REFERENCE))
+
+
+def _validate_tone_controls(brightness, gamma):
+    """Reject tone controls that could turn a frame into invalid/black data."""
+    if not np.isfinite(brightness) or brightness <= 0:
+        raise ValueError('--brightness must be finite and positive')
+    if not np.isfinite(gamma) or gamma <= 0:
+        raise ValueError('--gamma must be finite and positive')
+
+
+def _encode_pulse_frame_coeffs(model, coeffs, counter, aspect_code=0,
+                               source_index=None,
+                               pilot_values=None, pulse_profile_code=1,
+                               adaptive_body=False):
+    """Build one folded pulse packet without an inverse/forward DCT round trip."""
+    if source_index is None:
+        source_index = int(counter)-1
+    return P.encode_pulse_frame_coeffs(
+        model, np.asarray(coeffs), counter, aspect_code=aspect_code,
+        source_index=source_index, pilot_tones=False,
+        pilot_values=pilot_values,
+        pulse_profile_code=pulse_profile_code, adaptive_body=adaptive_body)
+
+
+def _add_coded_pilots(audio, start_counter, fold_slots, mode=None):
+    """Overlay each packet's fold-mode status and coded reference tones."""
+    _ensure_test_modem_path()
+    from tone_code import FOLD_500, add_tone_code, encode_status
+
+    modes = {500: FOLD_500}
+    if mode is not None:
+        modes = {fold_slots: int(mode)}
+    if fold_slots not in modes:
+        raise ValueError(f'coded pilots support fold sizes {sorted(modes)}')
+    audio = np.asarray(audio)
+    if audio.ndim != 2 or audio.shape[1] != 2 or len(audio) % P.PULSE_FRAME:
+        raise ValueError('coded-pilot audio must contain complete stereo V7 packets')
+    packets = audio.reshape((-1, P.PULSE_FRAME, 2))
+    status = encode_status(modes[fold_slots])
+    if len(packets) == 1:
+        return add_tone_code(packets[0], int(start_counter), status)
+    return np.concatenate([
+        add_tone_code(packet, int(start_counter)+index, status)
+        for index, packet in enumerate(packets)])
+
+
+def _coded_mode_matches_fold(result, fold):
+    """A valid per-packet status may authorize only its matching pinned table."""
+    _ensure_test_modem_path()
+    from tone_code import FOLD_MODE_TO_SLOTS
+    timing = result.diag.get('pilot_timing') or {}
+    mode = timing.get('coded_status_mode')
+    return mode is not None and FOLD_MODE_TO_SLOTS.get(mode) == fold.slots
+
+
+def _mix_mono_video_audio(modem, frames, source, delay, video_side,
+                          sample_rate, gain=1.0):
+    """Put delayed source audio opposite the mono video carrier."""
+    output = np.array(modem, dtype=np.float32, copy=True, order='C')
+    if output.ndim != 2 or output.shape[1] != 2:
+        raise ValueError('mono video plus source audio requires stereo output')
+    frames = max(1, int(frames))
+    audio_side = 1-int(video_side)
+    base, extra = divmod(len(output), frames)
+    offset = 0
+    for frame in range(frames):
+        count = base + (frame < extra)
+        if count <= 0:
+            continue
+        samples = (source.read(count) if source is not None else
+                   np.zeros(count, dtype=np.float32))
+        samples = np.clip(np.asarray(samples, dtype=np.float32)*float(gain),
+                          -1.0, 1.0)
+        output[offset:offset+count, audio_side] = delay.apply(
+            samples, count, sample_rate)
+        offset += count
+    return output
+
+
+# Sender profiles on offer.  fold-500, mono-colour-500 and stereo-slices are
+# deprecated: no longer valid choices, though their wires
+# stay (the nested folds ride on them and the receiver still reads them).
+from tools.v7_profile_registry import (ADAPTIVE_PROFILES,
+                                       SEND_PROFILES as PROFILE_REGISTRY)
+
+SEND_PROFILES = tuple(value for _label, value in PROFILE_REGISTRY)
+DEPRECATED_SEND_PROFILES = ('fold-500', 'mono-colour-500', 'stereo-slices')
+
+
+def deprecated_profiles_allowed():
+    """The deprecated profiles are refused unless V7_ALLOW_DEPRECATED_PROFILES
+    is set.  The test suite sets it: those wires are still what the nested
+    folds ride on and what the receiver must keep reading, so their tests
+    stay."""
+    return os.environ.get('V7_ALLOW_DEPRECATED_PROFILES', '') not in ('', '0')
+
+
+def selectable_send_profiles():
+    return SEND_PROFILES+(DEPRECATED_SEND_PROFILES
+                          if deprecated_profiles_allowed() else ())
+
+
+def _apply_profile_option(args):
+    """Translate the sender GUI/CLI profile name to the wire flags.
+
+    With no profile and no wire flag given, the sender's default profile
+    (tools/v7_send_defaults.py) is the one sent.
+    """
+    profile = getattr(args, 'profile', None)
+    if profile == 'mono-fold-500':
+        raise ValueError('mono-fold-500 status ID 4 is retired; ID 4 now '
+                         'identifies adaptive-stereo-nested')
+    if (profile is None and getattr(args, 'experimental_mono_fold', False) and
+            not getattr(args, 'experimental_mono_colour', False) and
+            not getattr(args, 'aspect_mono', False) and
+            not getattr(args, 'nested_fold', False)):
+        raise ValueError('--experimental-mono-fold used retired status ID 4; '
+                         'select adaptive-stereo-nested for ID 4')
+    if profile is None and not (
+            getattr(args, 'experimental_mono_fold', False) or
+            getattr(args, 'experimental_fold', None) is not None or
+            getattr(args, 'aspect_fold', False) or
+            getattr(args, 'slices', None)):
+        profile = args.profile = SENDER_DEFAULTS['profile']
+    if profile == 'mono-fold-500':
+        args.experimental_mono_fold = True
+    elif profile == 'mono-colour-500':
+        args.experimental_mono_fold = True
+        args.experimental_mono_colour = True
+    elif profile == 'fold-500':
+        args.experimental_fold = 500
+    elif profile == 'aspect-fold-500':
+        args.aspect_fold = True
+    elif profile == 'aspect-mono-500':
+        args.experimental_mono_fold = True
+        args.aspect_mono = True
+    elif profile == 'stereo-slices':
+        args.slices = 'stereo'
+    elif profile == 'aspect-mono-nested':
+        # Compatibility alias for earlier saved GUI settings.
+        args.experimental_mono_fold = True
+        args.aspect_mono = True
+        args.nested_fold = True
+    elif profile == 'adaptive-mono-nested':
+        args.experimental_mono_fold = True
+        args.aspect_mono = True
+        args.nested_fold = True
+        args.adaptive_nested_family = True
+    elif profile == 'stereo-nested':
+        # Compatibility alias for earlier saved GUI settings.
+        args.slices = 'stereo'
+        args.nested_fold = True
+    elif profile == 'adaptive-stereo-nested':
+        args.slices = 'stereo'
+        args.nested_fold = True
+        args.adaptive_nested_family = True
+
+
+def _kernel_defaults_profile(args):
+    """Return the selected wire profile for profile-specific kernel defaults."""
+    profile = getattr(args, 'profile', None)
+    if profile:
+        # A nested-fold mode's own kernel settings first, then its wire's.
+        return kernel_profiles(profile)
+    if getattr(args, 'aspect_mono', False):
+        return 'aspect-mono-500'
+    if getattr(args, 'aspect_fold', False):
+        return 'aspect-fold-500'
+    if getattr(args, 'experimental_mono_colour', False):
+        return 'mono-colour-500'
+    if getattr(args, 'experimental_mono_fold', False):
+        return 'mono-fold-500'
+    if getattr(args, 'experimental_fold', None) == 500:
+        return 'fold-500'
+    return None
+
+
+def _default_kernel_for_profile(profile):
+    """The quality-tuned active kernel default for a profile."""
+    return default_kernel_for_profile(profile)
+
+
+def _apply_encode_defaults(args, profile_slots):
+    """Fill the picture-encode choices nobody made from the sender defaults.
+
+    Direct DCT is the default wherever the wire can carry it, and the luma
+    re-fit follows it, exactly as the sender GUI starts out.
+    An explicit --dct-encode/--no-dct-encode or --luma-adjust/--no-luma-adjust
+    is left alone (and refused later if the wire cannot do it).
+    """
+    if getattr(args, 'linear_preshrink', None) is None:
+        args.linear_preshrink = SENDER_DEFAULTS['linear_preshrink']
+    if getattr(args, 'pixel_encode', False):
+        # Pixel encode is its own picture encode, not a Direct DCT option.
+        # It reads the full-size source like the direct path does, so the
+        # unprepared-source plumbing (``dct_encode``) is switched on for it.
+        if getattr(args, '_pixel_resolved', False):
+            return                          # this runs once per profile pass
+        if getattr(args, 'dct_encode', None) is not None:
+            raise ValueError('--pixel-encode is its own encode; drop '
+                             '--dct-encode / --no-dct-encode')
+        if getattr(args, 'luma_adjust', None):
+            raise ValueError('--luma-adjust does not apply to --pixel-encode')
+        args.dct_encode = True
+        args.luma_adjust = False
+        args._pixel_resolved = True
+        return
+    if getattr(args, 'dct_encode', None) is None:
+        args.dct_encode = bool(
+            SENDER_DEFAULTS['dct_encode'] and profile_slots == 500 and
+            (getattr(args, 'encode_filter', None) or 'box') == 'box' and
+            getattr(args, 'perceptual_resize', 'off') == 'off' and
+            P._is_reference(getattr(args, 'fixture', None)))
+    if getattr(args, 'luma_adjust', None) is None:
+        args.luma_adjust = bool(
+            SENDER_DEFAULTS['luma_adjust'] and args.dct_encode)
+
+
+HOST_PARAM_NAMES = ('luma_mix', 'chroma_mix')
+
+
+def _resolve_named_send_device(sd, args):
+    """Make a numeric ``--device`` name the device ``--device-name`` says.
+
+    A device index is only valid inside one PortAudio device list.  The
+    sender GUI reads its list in another process, possibly before a device
+    was plugged in or removed, so the index it passes can name a different
+    device here.  With the name given, the index is checked against it and
+    corrected; a device that is gone or ambiguous is an error, never a
+    silent substitute.
+    """
+    from tools.v7_device_recovery import resolve_device_index
+
+    expected_name = getattr(args, 'device_name', None)
+    if not expected_name or not isinstance(args.device, int):
+        return
+    expected = {'name': str(expected_name),
+                'hostapi': str(getattr(args, 'device_hostapi', None) or '')}
+    try:
+        resolved = resolve_device_index(sd, args.device, expected, 'output')
+    except ValueError as exc:
+        raise RuntimeError(f'Audio output device: {exc}') from exc
+    if resolved != args.device:
+        print(json.dumps({
+            'status': 'sender_device_index_corrected',
+            'device': expected['name'], 'requested_index': args.device,
+            'index': resolved}), flush=True)
+        args.device = resolved
+
+
+def run_send(args):
+    from tools.v7_runtime import blas_budget
+    with blas_budget():
+        return _run_send(args)
+
+
+def _run_send(args):
+    from tools.v7_file import validate_run_options
+    validate_run_options(args)
+    if getattr(args, 'write', None):
+        from tools.v7_file import export_wav
+        try:
+            count = export_wav(args, live=sys.modules[__name__])
+        except KeyboardInterrupt:
+            if not args.no_log or getattr(args, 'gui_control', False):
+                print(json.dumps({'status': 'wav_export_stopped',
+                                  'path': str(args.write)}), flush=True)
+            return
+        if not args.no_log or getattr(args, 'gui_control', False):
+            print(json.dumps({'status': 'wav_exported', 'packets': count,
+                              'path': str(args.write)}), flush=True)
+        return count
+    if args.device is None:
+        raise ValueError('Live sending requires --device (or use --write)')
+    import sounddevice as sd
+    from tools.v7_device_recovery import device_identity
+
+    if getattr(args, 'gui_control', False):
+        _install_gui_stop_handlers()
+
+    _resolve_named_send_device(sd, args)
+    try:
+        identity = device_identity(sd, args.device, 'output')
+        if not identity.get('name'):
+            identity = None
+    except Exception:
+        identity = None
+    args._sender_device_identity = identity
+    args._sender_started_at = None
+    args._sender_counter = 1
+    args._sender_total = 0
+    args._sender_transport = None
+    args._sender_video_position = None
+    args._sender_completed_passes = 0
+    args._record_started = False
+    stop = threading.Event()
+    try:
+        while not stop.is_set():
+            try:
+                _run_send_session(args)
+                return
+            except SenderDeviceLost as exc:
+                if identity is None:
+                    raise RuntimeError(
+                        f'Transmitter device was lost and its identity cannot '
+                        f'be resolved for recovery: {exc}') from exc
+                print(json.dumps({
+                    'status': 'sender_device_lost',
+                    'device': identity.get('name'),
+                    'message': str(exc),
+                }), flush=True)
+                recovered = _wait_for_stable_send_device(
+                    sd, args.device, identity, stop)
+                if recovered is None:
+                    return
+                args.device, recovered_rate = recovered
+                print(json.dumps({
+                    'status': 'sender_device_reconnected',
+                    'device': identity.get('name'),
+                    'sample_rate': recovered_rate,
+                }), flush=True)
+    except KeyboardInterrupt:
+        stop.set()
+        if not args.no_log:
+            print(f'V7 send stopped after interruption', flush=True)
+    finally:
+        stop.set()
+
+
+def build_send_encoder(args):
+    """The sender's picture encode and wire, from send arguments.
+
+    Everything between a source frame and the wire's packets: profile, wire,
+    model, Direct DCT / Pixel encode, luma adjustment, kernel, tone. The live
+    sender (``send``) and the application (``main.py --mode modem``) both
+    build it, so both send what tools/v7_send_defaults.py says is best.
+    Returns a namespace with ``frame_values(frame)`` and
+    ``wire_audio(values, aspects, counter, source_indices)`` plus the parts
+    the live sender reports and controls.
+    """
+    _apply_profile_option(args)
+    if (getattr(args, 'adaptive_nested_family', False) and
+            not getattr(args, 'adaptive_nested_installed', False)):
+        from tools.v7_nested_gui_patch import install_sender
+        table = install_sender(
+            sys.modules[__name__],
+            getattr(args, 'adaptive_nested_table', ''), args.profile)
+        args.adaptive_nested_table = str(table)
+        args.adaptive_nested_installed = True
+    kernel_profile = _kernel_defaults_profile(args)
+    slots = _fold_slots(args)
+    mono_fold_profile = bool(getattr(args, 'experimental_mono_fold', False))
+    fold = _experimental_fold(slots)
+    mono_wire = None
+    if mono_fold_profile:
+        if not getattr(args, 'pilot_tones', True):
+            raise ValueError('experimental mono profiles require coded pilot tones')
+    if mono_fold_profile and getattr(args, 'mono_sum', False):
+        raise ValueError('the mono-video side selector requires two output '
+                         'channels; do not combine it with --mono-sum')
+    source_audio_mode = getattr(args, 'source_audio', None)
+    if mono_fold_profile:
+        source_audio_mode = source_audio_mode or 'source'
+        if (source_audio_mode == 'device' and
+                getattr(args, 'source_audio_device', None) is None):
+            raise ValueError('--source-audio device requires '
+                             '--source-audio-device')
+    elif source_audio_mode not in (None, 'off'):
+        raise ValueError('source audio requires --experimental-mono-fold')
+    audio_gain = float(getattr(args, 'source_audio_gain', 1.0))
+    extra_audio_delay_ms = float(getattr(args, 'source_audio_delay_ms', 0.0))
+    if not np.isfinite(audio_gain) or not 0.0 <= audio_gain <= 4.0:
+        raise ValueError('--source-audio-gain must be between 0 and 4')
+    if not np.isfinite(extra_audio_delay_ms) or extra_audio_delay_ms < 0:
+        raise ValueError('--source-audio-delay-ms must be finite and non-negative')
+    aspect_profile = bool(getattr(args, 'aspect_fold', False))
+    if aspect_profile:
+        if not getattr(args, 'pilot_tones', True):
+            raise ValueError('aspect-fold-500 requires coded pilot tones')
+    profile_slots = 500 if (mono_fold_profile or aspect_profile or
+                            getattr(args, 'slices', None)) else slots
+    clip_aware = bool(getattr(args, 'clip_aware_encode', False))
+    if clip_aware and not (fold is not None or mono_fold_profile or
+                           aspect_profile or getattr(args, 'slices', None)):
+        raise ValueError('--clip-aware-encode requires a folded profile')
+    _apply_encode_defaults(args, profile_slots)
+    luma_adjusted = bool(getattr(args, 'luma_adjust', False))
+    if luma_adjusted and not getattr(args, 'dct_encode', False):
+        raise ValueError('--luma-adjust requires --dct-encode')
+    args.encode_filter, args.brightness = _send_profile(args, profile_slots)
+    dct_options = _dct_encode_options(args)
+    tone_controls = LiveToneControls(args.brightness, args.gamma)
+    # DCT kernels: found in the kernel folders at launch; a bad file is
+    # reported and skipped, an unknown choice is refused before any audio.
+    kernel_registry = K.open_registry(getattr(args, 'dct_kernel_dir', None) or ())
+    try:
+        kernel_name = getattr(args, 'dct_kernel', None)
+        if kernel_name is None and dct_options.get('pixel'):
+            kernel_name = K.REFERENCE      # pixels are sent as they are
+        if kernel_name is None:
+            # The default follows the profile as named (a nested fold has its
+            # own); kernel parameter defaults follow the wire it rides on.
+            kernel_name = _default_kernel_for_profile(
+                getattr(args, 'profile', None) or kernel_profile)
+        kernel_controls = LiveKernelControls(
+            kernel_registry, kernel_name,
+            _kernel_cli_values(getattr(args, 'dct_kernel_param', None)),
+            profile=kernel_profile)
+        refused = kernel_controls.take_notices()
+        if refused:
+            raise K.KernelError(refused[0])
+    except K.KernelError as exc:
+        raise ValueError(str(exc))
+    if (kernel_controls.listing()['selected'] != K.REFERENCE and
+            dct_options.get('pixel')):
+        raise ValueError('a DCT kernel cannot be combined with --pixel-encode '
+                         '(it sends the pixels as they are)')
+    if getattr(args, 'perceptual_resize', 'off') != 'off':
+        # Compile the optional Numba resize before an output stream is open;
+        # first-call JIT latency must not stall the live sender.
+        from animation_modem.perceptual_resize import warmup_resize
+        warmup_resize((2, 2), args.perceptual_resize,
+                      args.perceptual_detail_strength)
+    model = _model(args.fixture, args.encode_filter)
+    if getattr(args, 'adaptive_nested_family', False):
+        from dataclasses import replace
+        from animation_modem.v7_core import SourceCoder
+        from tools.v7_adaptive_pipeline import LUMA_SHAPE, CHROMA_SHAPE
+        model = replace(model, coder=SourceCoder(
+            model.coder.shapes, grids=(LUMA_SHAPE, CHROMA_SHAPE, CHROMA_SHAPE)))
+    slices_profile = getattr(args, 'slices', None)
+    slice_wire = None
+    if slices_profile:
+        if not getattr(args, 'pilot_tones', True):
+            raise ValueError('the slices profiles require coded pilot tones')
+        if getattr(args, 'mono_sum', False):
+            raise ValueError('stereo-slices needs two output channels; use a '
+                             'mono video profile for one')
+        _ensure_test_modem_path()
+        from slice_wire import SliceWire
+        from tone_code import warmup_status_templates
+        slice_wire = SliceWire(getattr(args, 'aspect_layout', 'auto'))
+        if getattr(args, 'nested_fold', False):
+            import nested_fold
+            slice_wire = nested_fold.slice_wire(
+                getattr(args, 'aspect_layout', 'auto'), send=True,
+                path=(getattr(args, 'adaptive_nested_table', None)
+                      if getattr(args, 'adaptive_nested_family', False) else None),
+                # Level chosen per picture by trial decode (the stock nested
+                # fold's rule, V7_SK_VERDICT.md), not a fixed host level.
+                adaptive_guest_range=False,
+                chroma_detail=bool(getattr(args,
+                                           'adaptive_nested_family', False)))
+            if getattr(args, 'adaptive_nested_family', False):
+                wire_mode = ADAPTIVE_PROFILES[args.profile]['mode']
+                slice_wire.status_mode = wire_mode
+                slice_wire.pulse_profile_code = wire_mode
+        # Build every layout model the sender may need before audio starts.
+        for layout in ((slice_wire.layout,) if slice_wire.layout != 'auto' else
+                       tuple(dict.fromkeys(
+                           slice_wire.layout_for(code) for code in range(8)))):
+            slice_wire.model_for(model, layout)
+        warmup_status_templates(slice_wire.status_mode)
+        if getattr(args, 'dct_encode', False) and dct_options.get('pixel'):
+            raise ValueError('stereo-slices carries no pixel grid; use Pixel '
+                             'encode with Aspect Fold 500 or Fold 500')
+    if mono_fold_profile:
+        _ensure_test_modem_path()
+        from mono_video import MonoColourFoldWire, MonoFreshFoldWire
+        if getattr(args, 'aspect_mono', False):
+            from aspect_mono import AspectMonoWire
+            # Builds every layout model the sender may need before audio.
+            mono_wire = AspectMonoWire(
+                model, side=getattr(args, 'mono_video_side', 'right'),
+                layout=getattr(args, 'aspect_layout', 'auto'))
+            if getattr(args, 'nested_fold', False):
+                import nested_fold
+                nested_fold.enable_mono(
+                    mono_wire, send=True,
+                    path=(getattr(args, 'adaptive_nested_table', None) if getattr(
+                        args, 'adaptive_nested_family', False) else None))
+                if getattr(args, 'adaptive_nested_family', False):
+                    wire_mode = ADAPTIVE_PROFILES[args.profile]['mode']
+                    mono_wire.status_mode = wire_mode
+                    mono_wire.pulse_profile_code = wire_mode
+        else:
+            wire_class = (MonoColourFoldWire
+                          if getattr(args, 'experimental_mono_colour', False)
+                          else MonoFreshFoldWire)
+            mono_wire = wire_class(
+                model, side=getattr(args, 'mono_video_side', 'right'))
+        from tone_code import warmup_status_templates
+        warmup_status_templates(mono_wire.status_mode)
+    aspect_wire = None
+    if aspect_profile:
+        _ensure_test_modem_path()
+        from aspect_fold import AspectFoldWire
+        from tone_code import warmup_status_templates
+        # With Pixel encode the profile sends each layout's pixel grid.
+        pixel_grid = (getattr(args, 'pixel_grid', None) or DEFAULT_PIXEL_GRID
+                      if getattr(args, 'dct_encode', False) and
+                      dct_options.get('pixel') else None)
+        aspect_wire = AspectFoldWire(getattr(args, 'aspect_layout', 'auto'),
+                                     pixel=pixel_grid)
+        if pixel_grid:
+            dct_options = dict(dct_options, pixel_shapes=tuple(
+                aspect_wire.pixel_shapes(aspect_wire.layout_for(code))
+                for code in range(8)))
+        # Build every layout model the sender may need before audio starts.
+        layouts = ((aspect_wire.layout,) if aspect_wire.layout != 'auto' else
+                   tuple(dict.fromkeys(
+                       aspect_wire.layout_for(code) for code in range(8))))
+        for layout in layouts:
+            aspect_wire.model_for(model, layout)
+        warmup_status_templates(aspect_wire.status_mode)
+    if fold is not None:
+        # Fail before any audio: the table folds only the model it was built
+        # for (the canonical box profile).
+        fold.check(model)
+        _ensure_test_modem_path()
+        from tone_code import warmup_tone_templates
+        warmup_tone_templates(fold.slots)
+    # A fixed aspect layout is signalled, not matched by hand: its code goes
+    # in every packet with the screen bit and the picture is boxed into it.
+    fit_aspect = None
+    for layout_wire in (aspect_wire, mono_wire, slice_wire):
+        layout = getattr(layout_wire, 'layout', None)
+        if layout not in (None, 'auto'):
+            fit_aspect = P.V7_ASPECT_NAMES.index(layout)
+
+    def codec_for(aspect_code):
+        """The fold codec this packet will be sent with, or None."""
+        if slice_wire is not None:
+            return None                                 # no fold on slices
+        if mono_wire is not None:
+            return mono_wire._codec(mono_wire._packet_model(model, aspect_code))
+        if aspect_wire is not None:
+            layout = aspect_wire.layout_for(aspect_code)
+            if layout is None:
+                return None
+            return aspect_wire.codec(aspect_wire.model_for(model, layout))
+        return fold.codec(model) if fold is not None else None
+
+    def chroma_sent_for(aspect_code):
+        if slice_wire is not None:
+            layout = slice_wire.layout_for(aspect_code)
+            return (None if layout is None else
+                    slice_wire.chroma_sent_masks(layout))
+        codec = codec_for(aspect_code)
+        return None if codec is None else _chroma_sent_masks(codec)
+
+    def clip_aware_values(value, aspect_code):
+        """Fit one frame's sent luma to the receiver's clip (see v7_source_dct)."""
+        from animation_modem.v7_source_dct import clip_aware_luma
+        if slice_wire is not None:
+            layout = slice_wire.layout_for(aspect_code)
+            return (value if layout is None else clip_aware_luma(
+                value, model.coder.grids[0], slice_wire.luma_sent_mask(layout)))
+        codec = codec_for(aspect_code)
+        if codec is None:
+            return value
+        return clip_aware_luma(value, codec.grid.grids[0],
+                               codec.sent_luma_mask())
+
+    kernel_mask_cache = {}
+
+    def kernel_masks_for(aspect_code):
+        """Per plane, the coefficients this packet's wire carries, or None."""
+        key = int(aspect_code) & 0xff
+        if key not in kernel_mask_cache:
+            if slice_wire is not None:
+                layout = slice_wire.layout_for(aspect_code)
+                luma = None if layout is None else slice_wire.luma_sent_mask(layout)
+            else:
+                codec = codec_for(aspect_code)
+                luma = None if codec is None else codec.sent_luma_mask()
+            chroma = chroma_sent_for(aspect_code) or [None, None]
+            kernel_mask_cache[key] = [luma, *chroma]
+        return kernel_mask_cache[key]
+
+
+    def frame_values(frame, brightness=None, gamma=None, return_resized=False,
+                     deferred_gains_out=None, kernel=None):
+        """(values, aspect code[, preview]) for one source frame: exactly what
+        the live sender encodes. ``kernel`` is the frame's DCT options (the
+        live kernel controls' current choice); the launch choice if None."""
+        from tools.v7_file import transform_frame
+        frame = transform_frame(frame, getattr(args, 'rotation', 0),
+                                getattr(args, 'mirror', False))
+        tones = tone_controls.snapshot()
+        options = kernel_controls.options(dct_options) if kernel is None else kernel
+        return _values(
+            model, frame, args.encode_filter,
+            tones['brightness'] if brightness is None else brightness,
+            tones['gamma'] if gamma is None else gamma,
+            getattr(args, 'perceptual_resize', 'off'),
+            getattr(args, 'perceptual_detail_strength', 0.25),
+            dct_encode=getattr(args, 'dct_encode', False),
+            dct_options=options,
+            return_resized=return_resized,
+            fit_aspect=fit_aspect,
+            chroma_sent_for=chroma_sent_for if luma_adjusted else None,
+            kernel_masks_for=kernel_masks_for,
+            defer_kernel_gain=(fold is not None and
+                               not luma_adjusted and not clip_aware),
+            deferred_gains_out=deferred_gains_out,
+            adaptive_source_area=bool(
+                getattr(args, 'adaptive_nested_family', False) and
+                not options.get('pixel')))
+
+    def wire_audio(values, aspects, counter, source_indices,
+                   deferred_gains=None):
+        """The wire's 48 kHz packets (coded pilots included, before speed)
+        for frame values from ``frame_values``; packet ``counter+i`` carries
+        ``source_indices[i]``."""
+        values = np.asarray(values)
+        if clip_aware:
+            values = np.asarray([clip_aware_values(value, aspects[index])
+                                 for index, value in enumerate(values)])
+        if mono_wire is not None:
+            return mono_wire.encode(
+                model, values, start_counter=counter,
+                aspect_codes=aspects, source_indices=list(source_indices))
+        if slice_wire is not None:
+            return slice_wire.encode(
+                model, values, start_counter=counter, aspect_codes=aspects,
+                source_indices=list(source_indices))
+        if aspect_wire is not None:
+            packets = []
+            for index, value in enumerate(values):
+                packet_model, coeffs = aspect_wire.encode_coefficients(
+                    model, value, aspects[index])
+                packets.append(_encode_pulse_frame_coeffs(
+                    packet_model, coeffs, counter+index,
+                    aspect_code=aspects[index],
+                    source_index=source_indices[index],
+                    pulse_profile_code=aspect_wire.pulse_profile_code))
+            return _add_coded_pilots(np.concatenate(packets), counter,
+                                     aspect_wire.fold_slots,
+                                     mode=aspect_wire.status_mode)
+        if fold is not None:
+            from tone_code import FOLD_500
+            audio = np.concatenate([
+                _encode_pulse_frame_coeffs(
+                    model, fold.encode_coefficients(
+                        model, value,
+                        coefficient_gains=(
+                            deferred_gains[index]
+                            if deferred_gains is not None else None)),
+                    counter+index, aspect_code=aspects[index],
+                    source_index=source_indices[index],
+                    pulse_profile_code=FOLD_500)
+                for index, value in enumerate(values)])
+            return _add_coded_pilots(audio, counter, fold.slots)
+        return P.encode_pulse_stream(
+            model, values, start_counter=counter, aspect_codes=aspects,
+            source_indices=list(source_indices),
+            pilot_tones=getattr(args, 'pilot_tones', True))
+
+    def warmup():
+        """Compile the frame and packet path before the first real frame."""
+        frame = np.zeros((P.PREPARED_SIZE[1], P.PREPARED_SIZE[0], 3), np.uint8)
+        value, aspect = frame_values(frame)
+        wire_audio([value], [aspect], 1, [0])
+        if getattr(args, 'dct_encode', False):
+            from animation_modem.v7_source_dct import warmup_direct_dct
+            warmup_direct_dct(model.coder.grids, model.coder.shapes)
+
+    return SimpleNamespace(
+        frame_values=frame_values, wire_audio=wire_audio, warmup=warmup,
+        aspect_wire=aspect_wire,
+        audio_gain=audio_gain,
+        chroma_sent_for=chroma_sent_for,
+        clip_aware=clip_aware,
+        clip_aware_values=clip_aware_values,
+        dct_options=dct_options,
+        extra_audio_delay_ms=extra_audio_delay_ms,
+        fit_aspect=fit_aspect,
+        fold=fold,
+        kernel_masks_for=kernel_masks_for,
+        kernel_profile=kernel_profile,
+        kernel_registry=kernel_registry,
+        kernel_controls=kernel_controls,
+        luma_adjusted=luma_adjusted,
+        model=model,
+        mono_fold_profile=mono_fold_profile,
+        mono_wire=mono_wire,
+        slice_wire=slice_wire,
+        slots=slots,
+        source_audio_mode=source_audio_mode,
+        tone_controls=tone_controls,
+        codec_for=codec_for,
+        profile_slots=profile_slots,
+        aspect_profile=aspect_profile,
+    )
+
+
+def _run_send_session(args):
+    import sounddevice as sd
+    from tools.v7_capture import Throttled
+    from tools.v7_device_recovery import (
+        DEVICE_RATE_FRAME_INTERVAL, DeviceRateDebouncer,
+        query_device_snapshot)
+
+    encoder = build_send_encoder(args)
+    aspect_wire = encoder.aspect_wire
+    audio_gain = encoder.audio_gain
+    dct_options = encoder.dct_options
+    extra_audio_delay_ms = encoder.extra_audio_delay_ms
+    fold = encoder.fold
+    kernel_masks_for = encoder.kernel_masks_for
+    kernel_profile = encoder.kernel_profile
+    kernel_registry = encoder.kernel_registry
+    kernel_controls = encoder.kernel_controls
+    model = encoder.model
+    mono_fold_profile = encoder.mono_fold_profile
+    mono_wire = encoder.mono_wire
+    slice_wire = encoder.slice_wire
+    source_audio_mode = encoder.source_audio_mode
+    tone_controls = encoder.tone_controls
+    def say_kernel(message, **extra):
+        """A line for the GUI (JSON) or, on the command line, plain text."""
+        if getattr(args, 'gui_control', False):
+            print(json.dumps({'status': 'kernel', 'message': message, **extra}),
+                  flush=True)
+        else:
+            print(message, flush=True)
+    for path, message in kernel_registry.errors:
+        say_kernel(f'DCT kernel {Path(path).name} skipped: {message}')
+    if getattr(args, 'dct_encode', False):
+        say_kernel('DCT kernels: ' + ', '.join(kernel_registry.names()),
+                   **kernel_controls.listing())
+    # One transport for the whole send: a control reader left over from a
+    # session before a device reconnect still reaches the current playback.
+    transport = getattr(args, '_sender_transport', None)
+    if transport is None:
+        transport = args._sender_transport = LiveTransportControls()
+    control_stop = threading.Event()
+    if getattr(args, 'gui_control', False):
+        threading.Thread(
+            target=_read_live_tone_controls,
+            args=(sys.stdin, tone_controls, control_stop, transport,
+                  kernel_controls, _stop_from_gui),
+            name='v7-live-tone-controls', daemon=True).start()
+    # A file resumes where the GUI last left it, or where this send was when
+    # its output device was lost.
+    video_start = getattr(args, '_sender_video_position', None)
+    if video_start is None:
+        video_start = getattr(args, 'video_start', 0.0) or 0.0
+    if not np.isfinite(video_start) or video_start < 0:
+        raise ValueError('--video-start must be finite and non-negative')
+    if video_start:
+        from tools.v7_capture import is_file_video_source
+        if (args.source != 'video' or getattr(args, 'video_live', False) or
+                not is_file_video_source(args.video_source)):
+            video_start = 0.0            # a position only means a file
+    playback_reported = [None, 0.0]
+
+    def report_playback():
+        status = transport.status()
+        if status is None:
+            return
+        args._sender_video_position = status['position']
+        args._sender_completed_passes = status['passes']
+        if not getattr(args, 'gui_control', False):
+            return
+        now = time.monotonic()
+        if (not status.get('ended') and status['paused'] == playback_reported[0] and
+                now-playback_reported[1] < .25):
+            return
+        playback_reported[:] = [status['paused'], now]
+        print(json.dumps({
+            'status': 'playback',
+            'position': round(status['position'], 3),
+            'duration': status['duration'],
+            'paused': status['paused'],
+            'passes': status['passes'], 'ended': status['ended'],
+        }), flush=True)
+    requested_rate = getattr(args, 'rate', None)
+    output_rate = None
+    capture_hz = args.capture_fps or (CAMERA_CAPTURE_FPS
+                                      if args.source == 'camera' else
+                                      (60 if args.screen_backend == 'ffmpeg' and
+                                       sys.platform == 'darwin' else FPS))
+    wire_fps = FPS*args.speed
+    raw_grab = None
+    playback = None
+    grab = None
+    source_audio = None
+    audio_delay = None
+    batches = None
+    stop = threading.Event()
+    device_monitor_stop = threading.Event()
+    device_monitor_thread = None
+    device_lost = threading.Event()
+    device_lost_reason = ['selected output device stopped']
+    producer_done = threading.Event()
+    prebuffer_ready = threading.Event()
+    buffered_audio_seconds = 0.0
+    sentinel = object()
+    producer_errors = []
+    image_preview_port = getattr(args, 'image_preview_port', None)
+    if (image_preview_port is not None and
+            not 1 <= int(image_preview_port) <= 65535):
+        raise ValueError('--image-preview-port must be between 1 and 65535')
+    preview_worker = None
+    batch_size = max(1, args.batch_frames)
+    total = getattr(args, '_sender_total', 0)
+    started = getattr(args, '_sender_started_at', None)
+    if started is None:
+        started = time.monotonic()
+
+    unset = object()
+    applied_kernel = [unset]
+
+    def report_kernel(selection=None):
+        for message in kernel_controls.take_notices():
+            say_kernel(message, **kernel_controls.listing())
+        # Say when a changed kernel (or value) starts shaping the frames, so
+        # the GUI can show that the change arrived. Audio already queued
+        # ahead of it is still playing: the change is heard a moment later.
+        key = None if selection is None else (selection.kernel.name,
+                                              selection.values)
+        previous, applied_kernel[0] = applied_kernel[0], key
+        if key == previous or (previous is unset and key is None):
+            return
+        label = ('reference' if key is None else key[0] + ' ' + ' '.join(
+            f'{name}={value:g}' for name, value in key[1]
+            if name not in HOST_PARAM_NAMES or value != 1.0))
+        say_kernel(f'DCT kernel in use: {label}', applied=label)
+
+    def record_sound(audio, frames):
+        """Like a VCR: put the sound beside the picture as the packet is made.
+
+        The sound is read now, right after the picture was taken and encoded,
+        so picture and sound of a packet come from the same moment; nothing
+        is added at output time, where a queue could split them.
+        """
+        if not mono_fold_profile:
+            return audio
+        return _mix_mono_video_audio(
+            audio, frames, source_audio, audio_delay,
+            mono_wire.carrier_index, output_rate, audio_gain)
+
+    def encode_batch(frames, aspects, counter, deferred_gains=None, stamps=None):
+        if stamps is not None:
+            with P.send_stamps({index: (loop, way) for index, loop, way in stamps}):
+                return encode_batch_inner(frames, aspects, counter, deferred_gains,
+                                          _indexes=[index for index, _, _ in stamps])
+        return encode_batch_inner(frames, aspects, counter, deferred_gains)
+
+    def encode_batch_inner(frames, aspects, counter, deferred_gains=None,
+                           _indexes=None):
+        def _wire_index(packet_counter):
+            # The clocked index when stamped, else the packet count.
+            if _indexes is not None:
+                return _indexes[packet_counter-counter]
+            return _wire_index_plain(packet_counter)
+        audio = encoder.wire_audio(
+            frames, aspects, counter,
+            [_wire_index(counter+i) for i in range(len(frames))],
+            deferred_gains)
+        report_stats = args.log and not args.no_log
+        if report_stats:
+            encoded_peak = float(np.max(np.abs(audio))) if audio.size else 0.0
+            encoded_rms = float(np.sqrt(np.mean(audio*audio))) if audio.size else 0.0
+        limiter_gain = 1.0
+        limiter_samples = 0
+        if args.mono_sum:
+            audio = (audio[:, :1].copy() if mono_wire is not None else
+                     audio.sum(axis=1, keepdims=True)/np.sqrt(2))
+            before_peak = float(np.max(np.abs(audio))) if audio.size else 0.0
+            if report_stats:
+                before_rms = float(np.sqrt(np.mean(audio*audio))) if audio.size else 0.0
+        else:
+            if report_stats:
+                # The signal is unchanged, so reuse encoded measurements rather
+                # than scanning the full packet again.
+                before_peak, before_rms = encoded_peak, encoded_rms
+        if args.mono_sum:
+            peak = before_peak
+            if peak > .89:
+                limiter_gain = .89/float(peak)
+                if report_stats:
+                    limiter_samples = int(np.count_nonzero(np.abs(audio) > .89))
+                audio *= limiter_gain
+                if report_stats:
+                    peak_after_limit = float(np.max(np.abs(audio)))
+            elif report_stats:
+                peak_after_limit = before_peak
+        if not args.mono_sum and report_stats:
+            peak_after_limit = before_peak
+        if report_stats:
+            stats = {
+                'frames_encoded': len(frames),
+                'encoded_peak': encoded_peak,
+                'encoded_rms': encoded_rms,
+                'peak_before_limit': before_peak,
+                'peak_after_limit': peak_after_limit,
+                'rms_before_limit': before_rms,
+                'limiter_active': limiter_gain < 1.0,
+                'limiter_gain': limiter_gain,
+                'samples_limited': limiter_samples,
+                'fold_slots': (fold.slots if fold is not None else
+                               aspect_wire.fold_slots if aspect_wire is not None
+                               else getattr(mono_wire, 'fold_slots', 0)),
+                'coded_pilot': (fold is not None or mono_wire is not None or
+                                aspect_wire is not None or
+                                slice_wire is not None),
+                'wire_profile': (args.profile
+                                 if args.profile in (
+                                     'adaptive-mono-nested',
+                                     'adaptive-stereo-nested') else
+                                 mono_wire.wire_profile
+                                 if mono_wire is not None else
+                                 slice_wire.wire_profile
+                                 if slice_wire is not None else
+                                 aspect_wire.wire_profile
+                                 if aspect_wire is not None else
+                                 'folded' if fold is not None else 'baseline'),
+                'mono_video_side': getattr(mono_wire, 'side', None),
+            }
+        else:
+            stats = {'frames_encoded': len(frames)}
+        output = P.speed_pulse_stream(audio, args.speed, rate=output_rate)
+        if report_stats:
+            stats.update({
+                'emitted_peak': float(np.max(np.abs(output)))
+                if output.size else 0.0,
+                'emitted_rms': float(np.sqrt(np.mean(output*output)))
+                if output.size else 0.0,
+            })
+        return output, stats
+
+    def produce():
+        nonlocal total, buffered_audio_seconds, started
+        if getattr(args, '_sender_started_at', None) is None:
+            started = time.monotonic()
+            args._sender_started_at = started
+        frames = []
+        aspects = []
+        deferred_gains = []
+        preview_images = []
+        counter = getattr(args, '_sender_counter', 1)
+        first_audio_video_frame = (
+            getattr(grab, 'first_frame', None) if source_audio is not None
+            else None)
+        next_capture = time.monotonic()
+        failure = None
+        # The frames-encoded count, rolling over, with its loop length (see
+        # _SenderIndex); V7_SEND_INDEX=0 sends the bare count as before.
+        keeper = (_SenderIndex() if os.environ.get('V7_SEND_INDEX', '1') != '0'
+                  else None)
+        stamps = []
+        from tools.v7_frame_cache import PreparedFrameCache, preparation_settings
+        prepared = PreparedFrameCache()
+        try:
+            while not stop.is_set() and (not getattr(args, 'frames', 0) or
+                                         total+len(frames) < args.frames) and (args.seconds <= 0 or
+                                         time.monotonic()-started < args.seconds):
+                delay = next_capture-time.monotonic()
+                if delay > 0:
+                    time.sleep(delay)
+                frame = first_audio_video_frame
+                first_audio_video_frame = None
+                capture_token = None
+                if frame is None:
+                    snapshot = getattr(grab, 'snapshot', None)
+                    if snapshot is None:
+                        frame = grab()
+                    else:
+                        frame, capture_token = snapshot()
+                        capture_token = ('capture', capture_token)
+                if frame is None and getattr(grab, 'ended', False):
+                    report_playback()
+                    break
+                # A file soundtrack is the clock: take the picture for the
+                # sound this packet will carry, chosen now, not on arrival.
+                timed = getattr(source_audio, 'picture', None)
+                timed = timed() if timed is not None else None
+                if timed is not None:
+                    frame = timed
+                    # Shared A/V pictures are newly decoded arrays retained
+                    # in its picture queue; preparation also holds this object.
+                    capture_token = ('soundtrack', id(frame))
+                report_playback()
+                current_tones = tone_controls.snapshot()
+                source_preview = (getattr(frame, 'rgb', frame)
+                                   if image_preview_port is not None else None)
+                if source_preview is not None:
+                    from tools.v7_file import transform_frame
+                    source_preview = transform_frame(
+                        source_preview, getattr(args, 'rotation', 0),
+                        getattr(args, 'mirror', False))
+                frame_options = kernel_controls.options(dct_options)
+                settings_key = preparation_settings(
+                    current_tones['brightness'], current_tones['gamma'], frame_options,
+                    getattr(args, 'rotation', 0), getattr(args, 'mirror', False),
+                    image_preview_port is not None)
+                processed = prepared.prepare(
+                    frame, capture_token, settings_key,
+                    lambda gains: encoder.frame_values(
+                        frame, current_tones['brightness'], current_tones['gamma'],
+                        return_resized=image_preview_port is not None,
+                        deferred_gains_out=gains, kernel=frame_options),
+                    deferred_gains)
+                report_kernel(frame_options.get('kernel'))
+                if image_preview_port is not None:
+                    value, aspect, resized_preview = processed
+                    preview_images.append((source_preview, resized_preview))
+                else:
+                    value, aspect = processed
+                # Keep captured source values unfolded. encode_batch folds
+                # exactly once, directly in coefficient space; a second fold
+                # would quantize the hosts again and erase the guest residuals.
+                frames.append(value); aspects.append(aspect)
+                # Local mode says which image this is and gives its clock:
+                # the packet then carries the real index and loop, as
+                # main.py --mode modem's do.
+                local_info = getattr(raw_grab, 'info', None)
+                if local_info is not None:
+                    stamps.append(_local_stamp(local_info))
+                elif keeper is not None:
+                    stamps.append(keeper.stamp(counter+len(frames)-1))
+                # A compressed packet still needs a new source frame at the
+                # faster wire cadence; otherwise the audio stream has gaps.
+                next_capture += 1/wire_fps
+                if len(frames) < batch_size:
+                    continue
+                audio, stats = encode_batch(frames, aspects, counter,
+                                            deferred_gains,
+                                            stamps=(stamps if len(stamps) == len(frames)
+                                                    else None))
+                stamps = []
+                preview_frames = (
+                    tuple((counter+index, aspects[index], frame)
+                          for index, frame in enumerate(preview_images))
+                    if image_preview_port is not None else ())
+                batches.put((counter, record_sound(audio, len(frames)),
+                             stats, preview_frames))
+                buffered_audio_seconds += len(audio)/output_rate
+                if buffered_audio_seconds >= startup_buffer_seconds:
+                    prebuffer_ready.set()
+                total += len(frames)
+                counter += len(frames)
+                frames = []
+                aspects = []
+                deferred_gains = []
+                preview_images = []
+        except Exception as exc:
+            failure = exc
+
+        if failure is None and frames and not stop.is_set():
+            try:
+                audio, stats = encode_batch(frames, aspects, counter,
+                                            deferred_gains,
+                                            stamps=(stamps if len(stamps) == len(frames)
+                                                    else None))
+                preview_frames = (
+                    tuple((counter+index, aspects[index], frame)
+                          for index, frame in enumerate(preview_images))
+                    if image_preview_port is not None else ())
+                batches.put((counter, record_sound(audio, len(frames)),
+                             stats, preview_frames))
+                buffered_audio_seconds += len(audio)/output_rate
+                if buffered_audio_seconds >= startup_buffer_seconds:
+                    prebuffer_ready.set()
+                total += len(frames)
+            except Exception as exc:
+                failure = exc
+
+        close = getattr(grab, 'close', None)
+        try:
+            if close is not None:
+                close()
+        except Exception as exc:
+            if failure is None:
+                failure = exc
+        if failure is not None:
+            producer_errors.append(failure)
+        producer_done.set()
+        batches.put(sentinel)
+
+    worker = threading.Thread(target=produce, daemon=True)
+    worker_started = False
+    recording = None
+    try:
+        stream_args = {
+            'channels': (max(getattr(args, 'channels', (0, 1)))+1
+                         if not args.mono_sum else 1),
+            'dtype': 'float32',
+            'device': args.device,
+            'blocksize': 0,
+        }
+        if requested_rate is not None:
+            stream_args['samplerate'] = requested_rate
+        with sd.OutputStream(**stream_args) as stream:
+            # With no --rate, sounddevice opens the DAC at its native clock.
+            # The producer must wait until that clock is known so its packet
+            # resampling preserves 1x playback speed on any supported device.
+            output_rate = float(stream.samplerate)
+            if getattr(args, 'record', None):
+                from tools.v7_wav_io import WavWriter
+                recording = WavWriter(args.record, output_rate,
+                                      1 if args.mono_sum else 2,
+                                      append=getattr(args, '_record_started', False))
+                args._record_started = True
+            if (not np.isfinite(args.speed) or
+                    not P.MIN_PLAYBACK_SPEED <= args.speed <= P.MAX_PLAYBACK_SPEED):
+                raise ValueError(
+                    f'--speed must be between {P.MIN_PLAYBACK_SPEED:g} and '
+                    f'{P.MAX_PLAYBACK_SPEED:g} (higher speeds may lose high-frequency detail)')
+            first_packet_samples = len(P.speed_pulse_stream(
+                np.zeros(P.PULSE_FRAME, dtype=np.float32), args.speed,
+                rate=output_rate))
+            # Keep exactly one emitted packet as startup/queue headroom at the
+            # actual DAC rate and speed. Packet duration shrinks at fast speed.
+            startup_buffer_seconds = first_packet_samples/output_rate
+            queue_batches = _sender_queue_batches(
+                startup_buffer_seconds, output_rate, first_packet_samples)
+            batches = queue.Queue(maxsize=queue_batches)
+            if image_preview_port is not None:
+                try:
+                    from tools.v7_image_preview import ImagePreviewWorker
+                    preview_worker = ImagePreviewWorker(image_preview_port)
+                    preview_worker.start()
+                except Exception as exc:
+                    preview_worker = None
+                    print(json.dumps({
+                        'status': 'image_preview_unavailable',
+                        'message': str(exc),
+                    }), flush=True)
+
+            if getattr(args, '_sender_device_identity', None) is not None:
+                def monitor_output_device():
+                    rate_stability = DeviceRateDebouncer()
+                    while not device_monitor_stop.wait(
+                            DEVICE_RATE_FRAME_INTERVAL):
+                        try:
+                            if not getattr(stream, 'active', True):
+                                device_lost_reason[0] = (
+                                    'PortAudio output stream stopped')
+                                device_lost.set()
+                                return
+                            snapshot = query_device_snapshot(
+                                sd, args.device, args._sender_device_identity,
+                                'output')
+                        except Exception as exc:
+                            device_lost_reason[0] = str(exc)
+                            device_lost.set()
+                            return
+                        resolved_index, _info, observed_identity, rate = snapshot
+                        if (isinstance(args.device, int) and
+                                resolved_index != args.device):
+                            device_lost_reason[0] = (
+                                'PortAudio device index changed')
+                            device_lost.set()
+                            return
+                        if (requested_rate is None and
+                                abs(rate-output_rate) > .5):
+                            if rate_stability.observe(observed_identity, rate):
+                                device_lost_reason[0] = (
+                                    f'output sample rate changed from '
+                                    f'{output_rate:g}Hz to {rate:g}Hz')
+                                device_lost.set()
+                                return
+                        else:
+                            rate_stability.reset()
+
+                device_monitor_thread = threading.Thread(
+                    target=monitor_output_device, daemon=True,
+                    name='v7-send-output-monitor')
+                device_monitor_thread.start()
+            # Compile the per-frame image and pulse encoder path before the
+            # first real packet. Numba's first-call work must not become a gap
+            # in the recorded modem waveform.
+            warm_frame = np.zeros(
+                (P.PREPARED_SIZE[1], P.PREPARED_SIZE[0], 3), dtype=np.uint8)
+            warm_tones = tone_controls.snapshot()
+            warm_values, _ = _values(
+                model, warm_frame, args.encode_filter,
+                warm_tones['brightness'], warm_tones['gamma'],
+                getattr(args, 'perceptual_resize', 'off'),
+                getattr(args, 'perceptual_detail_strength', 0.25),
+                dct_encode=getattr(args, 'dct_encode', False),
+                dct_options=dct_options)
+            encode_batch([warm_values], [0], 1)
+            if getattr(args, 'dct_encode', False):
+                from animation_modem.v7_source_dct import warmup_direct_dct
+                warmup_direct_dct(model.coder.grids, model.coder.shapes)
+                # Run every kernel once so a live switch never meets a first
+                # call (imports, caches) on the frame thread.
+                _warm_kernels(model, kernel_registry, kernel_masks_for,
+                              dct_options, kernel_profile)
+            # Start picture and soundtrack capture only after the output clock
+            # is known, and close together so file/stream timelines begin near
+            # the same source time.
+            if (mono_fold_profile and source_audio_mode == 'source' and
+                    args.source == 'video' and hasattr(os, 'mkfifo')):
+                from tools.v7_source_audio import SharedVideoAudioSource
+                capture = SharedVideoAudioSource(
+                    args.video_source, output_rate, width=args.capture_width,
+                    scale_flags=_capture_scale_flags(args),
+                    live=True if args.video_live else None,
+                    target_samples=first_packet_samples,
+                    preserve_size=getattr(args, 'dct_encode', False),
+                    loop=not bool(getattr(args, 'source_passes', 0)),
+                    **({'start': video_start} if video_start else {}))
+                raw_grab = capture.video_grab
+                source_audio = capture if capture.has_audio else None
+                # Picture and soundtrack stop and reopen as one process.
+                playback = _file_playback(
+                    args, video_start, lambda start: capture.reopen(start),
+                    reader=getattr(capture, 'playback_reader',
+                                   lambda: raw_grab)(),
+                    on_close=capture.close)
+            else:
+                def open_file_reader(start):
+                    reader = _capture(args, start)
+                    if separate_audio[0] is None:
+                        return reader
+                    # No shared process here: stop and restart the separate
+                    # soundtrack reader with the picture.
+                    close_video = reader.close
+
+                    def close_both():
+                        separate_audio[0].halt()
+                        close_video()
+
+                    reader.close = close_both
+                    separate_audio[0].restart(start)
+                    return reader
+
+                separate_audio = [None]
+                raw_grab = (_capture(args, video_start) if video_start
+                            else _capture(args))
+                playback = _file_playback(
+                    args, video_start, open_file_reader, reader=raw_grab)
+            if (mono_fold_profile and source_audio_mode == 'source' and
+                    args.source == 'video' and not hasattr(os, 'mkfifo')):
+                from tools.v7_source_audio import FFmpegSourceAudio
+                source_audio = FFmpegSourceAudio(
+                    args.video_source, output_rate,
+                    live=True if args.video_live else None,
+                    target_samples=first_packet_samples,
+                    loop=not bool(getattr(args, 'source_passes', 0)),
+                    **({'start': video_start} if video_start else {}))
+                if playback is not None:
+                    separate_audio[0] = source_audio
+                    close_first_video = raw_grab.close
+
+                    def close_first_reader():
+                        source_audio.halt()
+                        close_first_video()
+
+                    raw_grab.close = close_first_reader
+            if playback is not None:
+                raw_grab = playback
+                transport.attach(playback)
+            elif mono_fold_profile and source_audio_mode == 'device':
+                from tools.v7_source_audio import DeviceSourceAudio
+
+                def source_audio_status(error):
+                    print(json.dumps({
+                        'status': ('sender_source_audio_lost' if error else
+                                   'sender_source_audio_restored'),
+                        'device': str(args.source_audio_device),
+                        'message': error,
+                    }), flush=True)
+
+                try:
+                    source_audio = DeviceSourceAudio(
+                        args.source_audio_device, output_rate,
+                        input_side=getattr(
+                            args, 'source_audio_input_side', 'mix'),
+                        target_samples=first_packet_samples,
+                        status_callback=source_audio_status)
+                except Exception as exc:
+                    source_audio = None
+                    source_audio_status(str(exc))
+            if mono_fold_profile:
+                from tools.v7_source_audio import PacketAudioDelay
+                audio_delay = PacketAudioDelay(extra_audio_delay_ms)
+            # Drain paced FFmpeg capture continuously and expose the newest
+            # frame; reading once per encoded frame creates stale-video lag.
+            grab = Throttled(raw_grab, capture_hz)
+            if hasattr(grab, 'retune'):
+                grab.retune(wire_fps)
+            if source_audio is not None:
+                # Preserve the soundtrack beginning by waiting for up to one
+                # packet of samples. No-track sources end immediately; startup
+                # underflow remains zero-filled rather than discarding audio.
+                source_audio.wait_for_samples(
+                    first_packet_samples,
+                    first_packet_samples/output_rate+.2)
+            worker.start()
+            worker_started = True
+            # Start playback only after a small encoded cushion exists. This
+            # absorbs transient frame/encoder stalls; the bounded queue limits
+            # latency and memory if capture runs faster than the output clock.
+            while (not prebuffer_ready.is_set() and
+                   not producer_done.wait(.02)):
+                if stop.is_set():
+                    break
+            if not args.no_log:
+                camera_text = (f'camera={args.ffmpeg_input or args.camera} '
+                               if args.source == 'camera' else '')
+                if (getattr(args, 'dct_encode', False) and
+                        args.source in ('camera', 'video', 'screen') and
+                        not (args.source == 'screen' and
+                             args.screen_backend == 'mss')):
+                    # Direct DCT and Pixel encode read the frame at its own
+                    # size: FFmpeg's width and scaler are not used.
+                    capture_text = 'full-size'
+                elif (args.source == 'camera' and
+                        getattr(args, 'perceptual_resize', 'off') == 'off'):
+                    capture_text = f'80x96/{_capture_scale_flags(args)}'
+                elif args.source == 'local':
+                    capture_text = 'local-mode RGB'
+                elif (args.source == 'screen' and
+                      args.screen_backend == 'mss') or args.source in (
+                          'mouse-follow', 'test'):
+                    capture_text = 'native'
+                else:
+                    capture_text = (f'{args.capture_width}px/'
+                                    f'{_capture_scale_flags(args)}')
+                wire_mode = (args.profile
+                             if args.profile in (
+                                 'adaptive-mono-nested',
+                                 'adaptive-stereo-nested') else
+                             mono_wire.wire_profile
+                             if mono_wire is not None else
+                             f'{slice_wire.wire_profile} L/R'
+                             if slice_wire is not None else
+                             'mono-sum' if args.mono_sum else 'M/S')
+                if slice_wire is not None:
+                    wire_mode += f' layout={slice_wire.layout}'
+                if aspect_wire is not None:
+                    wire_mode += (f' aspect-fold-500 layout={aspect_wire.layout} '
+                                  f'tail={aspect_wire.tail}')
+                if getattr(mono_wire, 'wire_profile', None) == 'aspect-mono-500':
+                    wire_mode += f' layout={mono_wire.layout}'
+                if mono_fold_profile:
+                    audio_side = 'right' if mono_wire.side == 'left' else 'left'
+                    audio_label = source_audio_mode
+                    if source_audio_mode == 'source' and source_audio is None:
+                        audio_label += '/no-track'
+                    if source_audio_mode == 'device':
+                        audio_label += (
+                            f'/{getattr(args, "source_audio_input_side", "mix")}')
+                    wire_mode += (f' video={mono_wire.side} '
+                                  f'audio={audio_label}->{audio_side}')
+                print(f'V7 send ready: source={args.source} device={args.device!r} '
+                       f'rate={output_rate:g}Hz wire={wire_fps:.3f}fps '
+                       f'speed={args.speed:g}x {camera_text}'
+                        f'pilot-tones={"on" if getattr(args, "pilot_tones", False) else "off"} '
+                         f'capture={capture_text} '
+                         f'encode={args.encode_filter} mode={wire_mode}',
+                        flush=True)
+
+            def write_output(audio):
+                if device_lost.is_set():
+                    raise SenderDeviceLost(device_lost_reason[0])
+                try:
+                    from animation_modem.audio_common import route
+                    output = (audio if args.mono_sum else
+                              route(audio, getattr(args, 'channels', (0, 1))))
+                    stream.write(np.ascontiguousarray(output, dtype=np.float32))
+                except Exception as exc:
+                    raise SenderDeviceLost(
+                        f'output write failed: {exc}') from exc
+                if recording is not None:
+                    recording.write(audio)
+
+            while True:
+                if device_lost.is_set():
+                    raise SenderDeviceLost(device_lost_reason[0])
+                try:
+                    item = batches.get(timeout=DEVICE_RECOVERY_POLL_SECONDS)
+                except queue.Empty:
+                    continue
+                if item is sentinel:
+                    break
+                counter, audio, stats, preview_frames = item
+                if mono_fold_profile:
+                    frames = max(1, int(stats['frames_encoded']))
+                    base, extra = divmod(len(audio), frames)
+                    offset = 0
+                    for index in range(frames):
+                        count = base + (index < extra)
+                        # The sound was recorded beside the picture at encode.
+                        packet = audio[offset:offset+count]
+                        # One packet per blocking write lets paced soundtrack
+                        # capture advance while the DAC plays this video frame.
+                        write_output(packet)
+                        args._sender_counter = counter+index+1
+                        args._sender_total = getattr(args, '_sender_total', 0)+1
+                        if preview_worker is not None:
+                            handoff_ns = time.monotonic_ns()
+                            frame_counter, aspect, values = preview_frames[index]
+                            source_image, resized_image = values
+                            preview_worker.submit(
+                                frame_counter, aspect, source_image,
+                                resized_image, handoff_ns)
+                        offset += count
+                else:
+                    # sounddevice requires a C-contiguous interleaved buffer;
+                    # filtering/resampling can return a strided view here.
+                    write_output(audio)
+                    args._sender_counter = counter+stats['frames_encoded']
+                    args._sender_total = (getattr(args, '_sender_total', 0)+
+                                          stats['frames_encoded'])
+                    if preview_worker is not None:
+                        handoff_ns = time.monotonic_ns()
+                        for frame_counter, aspect, images in preview_frames:
+                            source_image, resized_image = images
+                            preview_worker.submit(
+                                frame_counter, aspect, source_image,
+                                resized_image, handoff_ns)
+                if args.log and not args.no_log:
+                    print({
+                        'sent_through_frame': (
+                            counter+stats['frames_encoded']-1),
+                        **{key: value for key, value in stats.items()
+                           if key != 'frames_encoded'},
+                    }, flush=True)
+    except KeyboardInterrupt:
+        raise
+    finally:
+        if recording is not None:
+            recording.close()
+        device_monitor_stop.set()
+        if device_monitor_thread is not None:
+            device_monitor_thread.join(timeout=1)
+        control_stop.set()
+        transport.attach(None)
+        stop.set()
+        if worker_started:
+            deadline = time.monotonic()+2
+            while worker.is_alive() and time.monotonic() < deadline:
+                try:
+                    batches.get_nowait()
+                except queue.Empty:
+                    pass
+                worker.join(timeout=.02)
+        else:
+            close = getattr(grab, 'close', None)
+            if close is None:
+                close = getattr(raw_grab, 'close', None)
+            if close is not None:
+                close()
+        if preview_worker is not None:
+            preview_worker.close()
+        if source_audio is not None:
+            source_audio.close()
+            if args.log and not args.no_log:
+                buffer = getattr(source_audio, 'buffer', None)
+                clock = getattr(source_audio, 'clock_match', None)
+                print({
+                    'source_audio_dropped_samples': getattr(buffer, 'dropped', 0),
+                    'source_audio_max_clock_correction_ppm': round(
+                        getattr(clock, 'max_correction', 0.0)*1_000_000, 1),
+                }, flush=True)
+    if producer_errors:
+        failure = producer_errors[0]
+        raise RuntimeError(f'V7 live producer failed: {failure}') from failure
+    if args.log and not args.no_log:
+        print(f'V7 send stopped after {total} frames', flush=True)
+
+
+# Capture at the device's own rate, like the sender's PacketOutput: forcing
+# 48 kHz made PortAudio resample behind our back, and on a 96 kHz device a 2x
+# wire (carriers up to 25.5 kHz) lost its top carriers to that converter.  The
+# decoder uses the actual capture rate to normalize the frame scale measured
+# from each preamble. The raw sample scale is capture rate/(48 kHz x speed),
+# so a higher-rate capture provides more timing samples without changing the
+# accepted playback-speed range. Above 96 kHz capture is capped at 96 kHz.
+MAX_CAPTURE_RATE = 96_000
+
+
+def capture_rate_for(device_info):
+    rate = float(device_info.get('default_samplerate') or P.RATE)
+    return min(rate, MAX_CAPTURE_RATE)
+
+
+class _MonoChannelProbe:
+    """Pulse-only monitor for the non-selected receiver leg."""
+
+    MIN_CONFIDENCE = .75
+
+    def __init__(self, rate, direction='auto', decode_history=1,
+                 decode_batch=1):
+        self.input = LiveInput(decode_history, decode_batch, rate=rate,
+                               direction=direction)
+        self.last_position = None
+        self.last_scale = None
+        self.last_direction = None
+        self.streak = 0
+        self.status_mode = None
+        self.status_candidate = None
+        self.status_streak = 0
+        self.last_valid = None
+        self.status_last_seen = None
+        self.status_scale = None
+
+    def add(self, block):
+        self.input.add(block)
+
+    def reset(self):
+        self.input.reset()
+        self.last_position = None
+        self.last_scale = None
+        self.last_direction = None
+        self.streak = 0
+        self.status_mode = None
+        self.status_candidate = None
+        self.status_streak = 0
+        self.last_valid = None
+        self.status_last_seen = None
+        self.status_scale = None
+
+    def _reset_status(self):
+        self.status_mode = None
+        self.status_candidate = None
+        self.status_streak = 0
+        self.last_valid = None
+        self.status_last_seen = None
+        self.status_scale = None
+
+    def _reset_status_if_stale(self, now):
+        if (self.status_candidate is None or
+                self.status_last_seen is None or
+                self.status_scale is None):
+            return
+        timeout = (1.5*P.PULSE_FRAME*self.status_scale/self.input.rate)
+        if float(now)-self.status_last_seen > timeout:
+            self._reset_status()
+
+    def _observe_status(self, mode, scale, now):
+        """Require consecutive, distinct pulse words before routing a leg."""
+        if mode is None:
+            self._reset_status()
+            return
+        mode, scale, now = int(mode), float(scale), float(now)
+        if mode == self.status_candidate:
+            self.status_streak += 1
+        else:
+            self.status_candidate = mode
+            self.status_streak = 1
+        self.status_last_seen = now
+        self.status_scale = scale
+        if self.status_streak >= 2:
+            self.status_mode = mode
+            self.last_valid = now
+
+    def scan(self, now):
+        self._reset_status_if_stale(now)
+        audio = self.input.take(now)
+        if audio is None:
+            return self.streak
+        audio_start = self.input.total-len(audio)
+        profile_by_position = {
+            int(round(position)): mode
+            for position, mode in self.input.pulse_profile_hits(audio)}
+        for position, scale, confidence, direction in self.input.pulse_hits(audio):
+            absolute = int(round(audio_start+position))
+            if (self.last_position is not None and
+                    absolute <= self.last_position):
+                continue
+            if confidence < self.MIN_CONFIDENCE:
+                self.last_position = absolute
+                self._reset_status()
+                continue
+            mode = profile_by_position.get(int(round(position)))
+            self._observe_status(mode, scale, now)
+            previous_position = self.last_position
+            if previous_position is None:
+                self.streak = 1
+            else:
+                expected = P.PULSE_FRAME*.5*(scale+self.last_scale)
+                tolerance = max(3*scale, .15*expected)
+                if (direction == self.last_direction and
+                        abs((absolute-previous_position)-expected) <= tolerance):
+                    self.streak = min(self.streak+1, 8)
+                else:
+                    self.streak = 1
+            self.last_position = absolute
+            self.last_scale = scale
+            self.last_direction = direction
+        self.input.decoded()
+        return self.streak
+
+
+class _ProfileStatusProbe:
+    """Find complete coded-profile packets independently on one input leg."""
+
+    MIN_CONFIDENCE = .45
+
+    def __init__(self, rate, side_index, direction='auto', decode_history=1,
+                 decode_batch=1):
+        self.input = LiveInput(decode_history, decode_batch, rate=rate,
+                               direction=direction)
+        self.side_index = int(side_index)
+        self.last_position = None
+        self.audio = None
+        self._audio_windows = []
+
+    def add(self, block):
+        self.input.add(block)
+
+    def reset(self):
+        self.input.reset()
+        self.last_position = None
+        self.audio = None
+        self._audio_windows.clear()
+
+    def window_for(self, absolute_position):
+        """Recent unconsumed probe audio covering a paired packet position."""
+        absolute_position = float(absolute_position)
+        windows = sorted(self._audio_windows,
+                         key=lambda item: (item[0], item[0]+len(item[1])))
+        starts = [index for index, (origin, audio, _hits) in enumerate(windows)
+                  if origin <= absolute_position < origin+len(audio)]
+        for start_index in starts:
+            origin, audio, hits = windows[start_index]
+            end = origin+len(audio)
+            chunks = [audio]
+            merged_hits = list(hits)
+            # The probe can consume a packet between the primary and paired
+            # decoders. Adjacent rolling windows overlap; join that overlap so
+            # the companion packet retains its EOF samples as well as header.
+            for next_origin, next_audio, next_hits in windows[start_index+1:]:
+                next_end = next_origin+len(next_audio)
+                if next_origin > end or next_end <= end:
+                    continue
+                overlap = end-next_origin
+                chunks.append(next_audio[max(0, overlap):])
+                merged_hits.extend(next_hits)
+                end = next_end
+            audio = chunks[0] if len(chunks) == 1 else np.concatenate(chunks)
+            relative_hits = tuple((position-origin, scale, confidence, direction)
+                                  for position, scale, confidence, direction in
+                                  dict.fromkeys(merged_hits))
+            return audio, origin, relative_hits
+        audio = self.input.audio_snapshot()
+        if audio is None:
+            return None, None, ()
+        origin = self.input.total-len(audio)
+        if not origin <= absolute_position < origin+len(audio):
+            return None, None, ()
+        return audio, origin, self.input.pulse_hits(audio)
+
+    def scan(self, now):
+        """Return one status observation per distinct complete packet."""
+        self.audio = self.input.take(now)
+        if self.audio is None:
+            return ()
+        audio_start = self.input.total-len(self.audio)
+        hits = self.input.pulse_hits(self.audio)
+        self._audio_windows.append((audio_start,
+                                    np.array(self.audio, copy=True),
+                                    tuple((audio_start+position, scale,
+                                           confidence, direction)
+                                          for position, scale, confidence, direction
+                                          in hits)))
+        if len(self._audio_windows) > 4:
+            del self._audio_windows[:-4]
+        profile_by_position = {
+            int(round(position)): mode
+            for position, mode in self.input.pulse_profile_hits(self.audio)}
+        events = []
+        for position, scale, confidence, direction in hits:
+            absolute = int(round(audio_start+position))
+            if (self.last_position is not None and
+                    absolute <= self.last_position):
+                continue
+            # A header arrives before the profile chips. Leave it pending until
+            # its complete packet region is in the rolling input buffer.
+            if position+P.PULSE_FRAME*scale > len(self.audio)+1.0:
+                continue
+            if confidence < self.MIN_CONFIDENCE:
+                self.last_position = absolute
+                events.append({'position': absolute, 'scale': scale,
+                               'side_index': self.side_index, 'mode': None})
+                continue
+            self.last_position = absolute
+            # A packet runs from its header to its end: a header with no end
+            # where its own scale puts it (no mark, no steady timing tone)
+            # is something in the picture data that looked like one.
+            mono = np.asarray(self.audio, np.float32)
+            if mono.ndim == 2:
+                mono = mono.mean(axis=1)
+            if (P._measure_eof_marker(mono, position, scale) is None and
+                    P._tone_eof_marker(mono, position, scale) is None):
+                continue
+            mode = profile_by_position.get(int(round(position)))
+            # A whole packet (header to end marker): the audio gate cuts it.
+            events.append({'position': absolute, 'scale': scale,
+                           'side_index': self.side_index, 'mode': mode,
+                           'packet': True})
+        self.input.decoded()
+        return tuple(events)
+
+
+class _AdaptiveProfileDecoder:
+    """Dispatch coded Fold-500 and mono-video packets after three confirmations."""
+
+    REQUIRED_STREAK = 3
+    # A pixel-grid packet without its fold signature is decoded again on the
+    # other grid: the first such packet, then every PIXEL_RETRY_EVERY-th, so a
+    # grid change is followed at once and a noisy link is not decoded twice
+    # per packet.
+    PIXEL_RETRY_EVERY = 4
+
+    def __init__(self, fold, base_model, preferred_side='auto',
+                 aspect_layout='auto', nested_table_path=None):
+        from animation_modem import v7
+        _ensure_test_modem_path()
+        from live_fold import LiveFold
+        from aspect_fold import AspectFoldWire
+        from aspect_mono import AspectMonoWire
+        from mono_video import MonoColourFoldWire, mono_channel_profile
+        from tone_code import FOLD_500, MONO_1000
+
+        self.fold = fold
+        self.base_mode = FOLD_500
+        self.v7 = v7
+        self.base_model = base_model
+        self.preferred_side = preferred_side
+        self.input_channels = 2
+        # Mono colour Fold 500 over an aspect layout; its layout is the
+        # same receiver setting as the stereo aspect profile's.
+        self.aspect_mono_wire = AspectMonoWire(base_model, side='both',
+                                               layout=aspect_layout)
+        # Nested-fold packets are recognised per packet by their signature;
+        # stock packets, and layouts without a nested table, decode as before.
+        import nested_fold
+        nested_fold.enable_mono(self.aspect_mono_wire)
+        self.aspect_mono_mode = self.aspect_mono_wire.status_mode
+        self.nested_table_path = nested_table_path
+        self.adaptive_mono_wire = AspectMonoWire(
+            base_model, side='both', layout=aspect_layout)
+        nested_fold.enable_mono(self.adaptive_mono_wire,
+                                path=nested_table_path,
+                                require_nested=True)
+        self.mono_wires = {
+            MONO_1000: MonoColourFoldWire(base_model, side='both'),
+            self.aspect_mono_mode: self.aspect_mono_wire,
+        }
+        self.mono_channel_profile = mono_channel_profile
+        self.mono_status_modes = frozenset(self.mono_wires)
+        # Stereo Fold 500 with an aspect-matched coefficient layout; its
+        # layout is a receiver setting matching the sender's.
+        self.aspect_wire = AspectFoldWire(aspect_layout)
+        self.aspect_mode = self.aspect_wire.status_mode
+        # The same profile on a pixel grid (the sender's Pixel encode); the
+        # packet's metadata model bit says which, so nothing is set here.
+        # Which pixel grid is not in the metadata: the fold signature
+        # (different for every table) tells them apart.
+        from aspect_fold import PIXEL_ENCODING_TYPE, PIXEL_GRID_NAMES
+        self.pixel_encoding_type = PIXEL_ENCODING_TYPE
+        self.pixel_wires = {
+            grid: AspectFoldWire(aspect_layout, pixel=grid)
+            for grid in PIXEL_GRID_NAMES}
+        # Last confirmed grid (None: an ordinary layout), and packets since
+        # its signature was last seen.
+        self._last_pixel = None
+        self._pixel_unconfirmed = 0
+        # Stereo slices: each channel its own mono wire, under the aspect
+        # mono status with the metadata model bit set to nearest.
+        self.slice_wire = nested_fold.slice_wire(aspect_layout)
+        self.adaptive_slice_wire = nested_fold.slice_wire(
+            aspect_layout, path=nested_table_path, adaptive_guest_range=False,
+            chroma_detail=True)
+        self.adaptive_mono_mode = ADAPTIVE_PROFILES['adaptive-mono-nested']['mode']
+        self.adaptive_stereo_mode = ADAPTIVE_PROFILES['adaptive-stereo-nested']['mode']
+        self.adaptive_slice_wire.status_mode = self.adaptive_stereo_mode
+        self.adaptive_slice_wire.pulse_profile_code = self.adaptive_stereo_mode
+        self.stereo_slice_modes = frozenset((self.adaptive_stereo_mode,))
+        self.mono_wires[self.adaptive_mono_mode] = self.adaptive_mono_wire
+        self.mono_status_modes = frozenset(self.mono_wires)
+        self.stereo_status_modes = frozenset((self.aspect_mode, *self.stereo_slice_modes))
+        self.supported_modes = frozenset(
+            (FOLD_500, self.aspect_mode, *self.mono_wires,
+             *self.stereo_slice_modes))
+        self._mode_names = {
+            FOLD_500: 'fold-500',
+            self.aspect_mode: 'aspect-fold-500',
+            MONO_1000: 'mono-colour-500',
+            self.aspect_mono_mode: 'aspect-mono-500',
+            self.adaptive_mono_mode: 'adaptive-mono-nested',
+            self.adaptive_stereo_mode: 'adaptive-stereo-nested',
+        }
+        self.active_mode = self.base_mode
+        self.active_side = None
+        self.candidate = None
+        self.streak = 0
+        self.candidate_last_seen = None
+        self.last_packet = None
+        self.last_decoded_packet = None
+        self.generation = 0
+        self.capture_rate = v7.RATE
+        self.candidate_scale = None
+        self.state = None
+        self.stereo_tail_memory = True
+        self.dispatch_mode = None
+        self.dispatch_side = None
+        self.dispatch_slice_metadata = False
+        self.aspect_mono_slices = False
+        self.startup_hint = None
+        # Called with (profile name, side) whenever a new profile is
+        # confirmed; the live receiver keeps it for its next start.
+        self.on_switch = None
+        self._local = threading.local()
+        self._installed = None
+        # Last layout confirmed by packet metadata, per aspect profile mode.
+        self._last_layouts = {}
+        # LiveFold is also the equalizer-output capture hook used by mono
+        # profiles; the selected table is applied later, after status dispatch.
+        if not isinstance(fold, LiveFold):
+            raise TypeError('adaptive V7 profile dispatch requires LiveFold')
+
+    def may_use_stereo_slices(self, mode=None):
+        """Whether this confirmed wire identity carries two slice legs."""
+        mode = self.dispatch_mode if mode is None else mode
+        return (mode in self.stereo_slice_modes or
+                (mode == self.aspect_mono_mode and
+                 self.dispatch_slice_metadata))
+
+    @property
+    def profile_name(self):
+        return self._mode_names[self.active_mode]
+
+    @property
+    def candidate_name(self):
+        if self.candidate is None:
+            return None
+        return self._mode_names[self.candidate[0]]
+
+    def start_with(self, profile_name, side=None):
+        """Remember a saved profile as a hint; wire status remains authoritative."""
+        modes = {name: mode for mode, name in self._mode_names.items()}
+        mode = modes.get(profile_name)
+        if mode is None:
+            return False
+        self.startup_hint = (mode, side)
+        self.reset_candidate()
+        return True
+
+    def bind_state(self, state):
+        self.state = state
+        self.stereo_tail_memory = bool(state.tail.enabled)
+        if (self.active_mode in self.mono_status_modes or
+                self.active_mode in self.stereo_slice_modes):
+            state.tail.enabled = False
+
+    def reset_candidate(self):
+        self.candidate = None
+        self.streak = 0
+        self.candidate_last_seen = None
+        self.candidate_scale = None
+
+    def reset_capture_timeline(self):
+        self._reset_aspect_wires()
+        self._reset_capture_positions()
+        self.active_mode = self.base_mode
+        self.active_side = None
+        self.dispatch_mode = self.dispatch_side = None
+        self.dispatch_slice_metadata = False
+        self.aspect_mono_slices = False
+        self._last_pixel = None
+        self._pixel_unconfirmed = 0
+        self._last_layouts.clear()
+        self.generation += 1
+
+    def _reset_aspect_wires(self):
+        wire = getattr(self, 'slice_wire', None)
+        if wire is not None:
+            wire.reset()
+        wire = getattr(self, 'adaptive_slice_wire', None)
+        if wire is not None:
+            wire.reset()
+        mono = getattr(self, 'aspect_mono_wire', None)
+        if mono is not None and hasattr(mono, 'reset_nested'):
+            mono.reset_nested()
+        mono = getattr(self, 'adaptive_mono_wire', None)
+        if mono is not None and hasattr(mono, 'reset_nested'):
+            mono.reset_nested()
+
+    def _reset_capture_positions(self):
+        """Forget capture-sample positions after the input stream reopens.
+
+        Packet positions count samples from the start of one input stream. A
+        reopened stream counts from zero again, so positions kept from the
+        previous stream would reject every new packet as already seen.
+        """
+        self.reset_candidate()
+        self.last_packet = None
+        self.last_decoded_packet = None
+
+    def reset_candidate_if_stale(self, now, timeout):
+        packet_seconds = (
+            1.5*P.PULSE_FRAME*self.candidate_scale/self.capture_rate
+            if self.candidate_scale is not None else 0.0)
+        timeout = max(float(timeout), packet_seconds)
+        if (self.candidate is not None and
+                self.candidate_last_seen is not None and
+                float(now)-self.candidate_last_seen > max(0.0, timeout)):
+            self.reset_candidate()
+
+    def observe_packets(self, events, now=None):
+        """Group leg observations and update the confirmed packet profile."""
+        if not events:
+            return ()
+        now = time.monotonic() if now is None else float(now)
+        grouped = []
+        for event in sorted(events, key=lambda item: item['position']):
+            group = next((item for item in reversed(grouped)
+                          if abs(event['position']-item['position']) <=
+                          max(32.0, .25*P.PULSE_FRAME*min(
+                              event['scale'], item['scale']))), None)
+            if group is None:
+                group = {'position': event['position'],
+                         'scale': event['scale'], 'events': []}
+                grouped.append(group)
+            group['events'].append(event)
+
+        decisions = []
+        for group in grouped:
+            position = int(round(group['position']))
+            scale = float(group['scale'])
+            if (self.last_packet is not None and
+                    position <= self.last_packet+
+                    .5*P.PULSE_FRAME*scale):
+                continue
+            self.last_packet = position
+            channel_modes = [None, None]
+            observed = {int(event['mode']) for event in group['events']
+                        if event['mode'] is not None}
+            for event in group['events']:
+                if event['mode'] is not None:
+                    channel_modes[event['side_index']] = int(event['mode'])
+            mode = next(iter(observed)) if len(observed) == 1 else None
+            if mode not in self.supported_modes:
+                mode = None
+            side = None
+            if mode in self.mono_status_modes:
+                sides = [event['side_index'] for event in group['events']
+                         if event['mode'] == mode]
+                preferred_index = {'left': 0, 'right': 1}.get(
+                    self.preferred_side)
+                if (preferred_index is not None and
+                        (preferred_index in sides or
+                         self.input_channels == 1 and 0 in sides)):
+                    side = (0 if self.input_channels == 1 else
+                            preferred_index)
+                elif preferred_index is None:
+                    side = (1 if 1 in sides else sides[0]) if sides else None
+                else:
+                    mode = None
+
+            decision = self._observe(position, scale, mode, side, now)
+            decision['channel_modes'] = tuple(channel_modes)
+            decisions.append(decision)
+        return tuple(decisions)
+
+    def _observe(self, position, scale, mode, side, now):
+        changed = False
+        confirmed = False
+        if mode is None:
+            self.reset_candidate()
+        else:
+            key = (mode, side if mode in self.mono_status_modes else None)
+            # The saved profile only speaks for the first packet heard.
+            hint, self.startup_hint = getattr(self, 'startup_hint', None), None
+            if mode == self.active_mode:
+                self.reset_candidate()
+                if mode in self.mono_status_modes and side is not None:
+                    self.active_side = side
+                confirmed = True
+            else:
+                if key == self.candidate:
+                    self.streak += 1
+                else:
+                    self.candidate = key
+                    self.streak = 1
+                if hint is not None and (
+                        key == hint or (key[0] == hint[0] and key[1] is None)):
+                    # The profile confirmed last run (fixes list item 33),
+                    # named by this packet's own status: no streak needed.
+                    self.streak = self.REQUIRED_STREAK
+                self.candidate_last_seen = now
+                self.candidate_scale = scale
+                if self.streak >= self.REQUIRED_STREAK:
+                    self.active_mode, self.active_side = key
+                    self.reset_candidate()
+                    self.dispatch_mode = self.dispatch_side = None
+                    self.dispatch_slice_metadata = False
+                    self.aspect_mono_slices = False
+                    self._last_pixel = None
+                    self._pixel_unconfirmed = 0
+                    self._last_layouts.clear()
+                    if self.on_switch is not None:
+                        self.on_switch(self._mode_names[self.active_mode],
+                                       self.active_side)
+                    self._reset_aspect_wires()
+                    self.generation += 1
+                    changed = confirmed = True
+                    if self.state is not None:
+                        self.state.tail.reset()
+                        self.state.tail.enabled = (
+                            self.stereo_tail_memory and
+                            self.active_mode not in self.mono_status_modes and
+                            self.active_mode not in self.stereo_slice_modes)
+                        self.state.last_verified = None
+        return {
+            'position': position, 'scale': scale, 'mode': mode,
+            'side_index': side, 'confirmed': confirmed,
+            'switched': changed, 'active_mode': self.active_mode,
+            'active_side': self.active_side,
+        }
+
+    def claim(self, decision):
+        """Prevent a rolling input window from decoding the same status twice."""
+        if decision is None or not decision.get('confirmed'):
+            return False
+        position = int(decision['position'])
+        span = P.PULSE_FRAME*float(decision['scale'])
+        if (self.last_decoded_packet is not None and
+                position <= self.last_decoded_packet+.5*span):
+            return False
+        self.last_decoded_packet = position
+        self.dispatch_mode = int(decision['mode'])
+        self.dispatch_side = decision['side_index']
+        return True
+
+    def install(self):
+        if self._installed is not None:
+            return
+        self.fold.install()
+        real_decode = self.v7.decode_frame
+        real_numba = self.v7._equalize_numba
+        real_numpy = self.v7._equalize_numpy
+        local = self._local
+
+        def equalize_numba(model, Z, H, noise, counter):
+            result = real_numba(model, Z, H, noise, counter)
+            local.equalized = (result[0].copy(), result[1].copy())
+            return result
+
+        def equalize_numpy(model, Z, H, noise, counter,
+                           force_float32=False):
+            result = real_numpy(model, Z, H, noise, counter,
+                                force_float32=force_float32)
+            local.equalized = (result[0].copy(), result[1].copy())
+            return result
+
+        self._real_decode = real_decode
+        self._real_equalizers = (real_numba, real_numpy)
+        self.v7._equalize_numba, self.v7._equalize_numpy = (
+            equalize_numba, equalize_numpy)
+        self.v7.decode_frame = self._decode_frame
+        self._installed = True
+
+    def uninstall(self):
+        if self._installed is None:
+            return
+        self.v7.decode_frame = self._real_decode
+        self.v7._equalize_numba, self.v7._equalize_numpy = (
+            self._real_equalizers)
+        self._installed = None
+        self.fold.uninstall()
+
+    def _decode_frame(self, model, x, tmap, counter, prev_tail, *args,
+                      **kwargs):
+        from mono_wire import MonoWire
+
+        def held(reason, observed_mode=None):
+            if self.state is not None:
+                self.state.last_verified = None
+            return self.v7.Result(
+                counter, 'lost', np.asarray(prev_tail).copy(),
+                {'displayable': False, 'held': True,
+                 'coded_status_mode': observed_mode,
+                 'profile_rejected': reason})
+
+        mode = self.dispatch_mode
+        body = kwargs.get('direct_body')
+        observed_mode = None
+        if body is not None:
+            try:
+                status = MonoWire._status_for_body(
+                    model, body, kwargs.get('force_float32', False))
+                if status and status.get('valid') and status.get('status'):
+                    observed_mode = int(status['status']['mode'])
+            except (ValueError, FloatingPointError, np.linalg.LinAlgError):
+                observed_mode = None
+        if (mode is None or observed_mode != mode or mode != self.active_mode):
+            return held('status_not_confirmed_for_active_profile',
+                        observed_mode)
+
+        profile_model = model
+        aspect_layout = None
+        hint = kwargs.get('profile_hint') or {}
+        # A packet whose metadata failed carries no aspect code. Its picture
+        # data may still be good, so try the last layout the metadata
+        # confirmed; the fold signature (different for every layout) must then
+        # confirm it, or the packet is held as before.
+        predicted_layout = False
+        aspect_wire = None
+        pixel_grids = ()
+        pixel_signed = False
+        if mode == self.aspect_mode:
+            # Metadata names the layout and, by its model bit, a pixel grid;
+            # without metadata both follow the last confirmed packet.
+            pixel = hint.get('encoding_type')
+            pixel = (self._last_pixel is not None if pixel is None else
+                     int(pixel) == self.pixel_encoding_type)
+            if pixel:
+                first = self._last_pixel or next(iter(self.pixel_wires))
+                pixel_grids = (first,) + tuple(
+                    grid for grid in self.pixel_wires if grid != first)
+                aspect_wire = self.pixel_wires[first]
+            else:
+                aspect_wire = self.aspect_wire
+            aspect_layout = aspect_wire.layout_for(hint.get('aspect_code'))
+            if aspect_layout is None:
+                aspect_layout = self._last_layouts.get(mode)
+                predicted_layout = aspect_layout is not None
+            if aspect_layout is None:
+                return held('aspect_layout_unknown', observed_mode)
+            try:
+                profile_model = aspect_wire.model_for(model, aspect_layout)
+            except ValueError:
+                return held('unsupported_model_for_profile', observed_mode)
+            # The fixed tail arrives whole in every packet: no tail memory.
+            prev_tail = profile_model.mu
+        slices = False
+        if mode == self.adaptive_stereo_mode:
+            slices = True
+            slice_wire = self.adaptive_slice_wire
+            aspect_layout = slice_wire.layout_for(hint.get('aspect_code'))
+            if aspect_layout is None:
+                aspect_layout = self._last_layouts.get(mode)
+                predicted_layout = aspect_layout is not None
+            if aspect_layout is None:
+                return held('aspect_layout_unknown', observed_mode)
+        elif mode in (self.aspect_mono_mode, self.adaptive_mono_mode):
+            slices = (self.aspect_mono_slices if hint.get('encoding_type') is None
+                      else mode == self.aspect_mono_mode and
+                      int(hint['encoding_type']) == self.pixel_encoding_type)
+            mono_wire = (self.adaptive_mono_wire
+                         if mode == self.adaptive_mono_mode else
+                         self.aspect_mono_wire)
+            aspect_layout = mono_wire.layout_for(
+                hint.get('aspect_code'))
+            if aspect_layout is None:
+                aspect_layout = self._last_layouts.get(mode)
+                predicted_layout = aspect_layout is not None
+            if aspect_layout is None:
+                return held('aspect_layout_unknown', observed_mode)
+        if mode in self.mono_status_modes:
+            try:
+                profile_model = (
+                    (self.adaptive_slice_wire if mode == self.adaptive_stereo_mode
+                     else self.slice_wire).model_for(model, aspect_layout)
+                    if slices else
+                    self.mono_wires[mode].model_for(model, aspect_layout)
+                    if aspect_layout is not None else
+                    self.mono_wires[mode].model_for(model))
+            except ValueError:
+                return held('unsupported_model_for_profile', observed_mode)
+            # Mono layouts have no cross-packet tail memory. The outer pulse
+            # loop owns the shared store, so give this decoder its own prior.
+            prev_tail = profile_model.mu
+        elif mode in self.stereo_slice_modes:
+            try:
+                profile_model = self.adaptive_slice_wire.model_for(
+                    model, aspect_layout)
+            except ValueError:
+                return held('unsupported_model_for_profile', observed_mode)
+            prev_tail = profile_model.mu
+        self._local.equalized = None
+        if (mode in self.mono_status_modes or
+                mode in self.stereo_slice_modes):
+            with self.mono_channel_profile():
+                result = self._real_decode(
+                    profile_model, x, tmap, counter, prev_tail, *args,
+                    **kwargs)
+        else:
+            result = self._real_decode(
+                profile_model, x, tmap, counter, prev_tail, *args, **kwargs)
+        if result is not None and pixel_grids:
+            # Confirm the grid by its fold signature; when it is missing,
+            # see whether the other grid fits (PIXEL_RETRY_EVERY).
+            def signed(wire, candidate, decoded):
+                equalized = decoded.diag.get('fold_eq')
+                if equalized is None:
+                    return False
+                codec = wire.codec(candidate)
+                return (codec.signature_score(*equalized[:2]) >= .5 and
+                        codec.signature_error(*equalized[:2]) <= .7)
+
+            if signed(aspect_wire, profile_model, result):
+                self._pixel_unconfirmed = 0
+                pixel_signed = True
+            else:
+                self._pixel_unconfirmed += 1
+                if (self._pixel_unconfirmed == 1 or self._pixel_unconfirmed %
+                        self.PIXEL_RETRY_EVERY == 0):
+                    for grid in pixel_grids[1:]:
+                        wire = self.pixel_wires[grid]
+                        candidate = wire.model_for(model, aspect_layout)
+                        other = self._real_decode(
+                            candidate, x, tmap, counter,
+                            candidate.mu,
+                            *args, **kwargs)
+                        if other is not None and signed(wire, candidate, other):
+                            aspect_wire, profile_model, result = (
+                                wire, candidate, other)
+                            self._pixel_unconfirmed = 0
+                            pixel_signed = True
+                            break
+                    else:
+                        if self._last_pixel is None:
+                            return held('pixel_grid_unknown', observed_mode)
+        if result is not None and predicted_layout and slices:
+            # No fold signature on this wire: the last layout is kept.
+            result.diag['aspect_layout_predicted'] = True
+        elif result is not None and predicted_layout:
+            if mode == self.aspect_mode:
+                codec = aspect_wire.codec(profile_model)
+                equalized = result.diag.get('fold_eq')
+            elif mode == self.adaptive_stereo_mode:
+                codec = self.adaptive_slice_wire._codec(profile_model)
+                equalized = self._local.equalized
+            else:
+                mono_wire = (self.adaptive_mono_wire if mode == self.adaptive_mono_mode
+                             else self.aspect_mono_wire)
+                codec = mono_wire._codec(profile_model)
+                equalized = self._local.equalized
+            score = (codec.signature_score(*equalized[:2])
+                     if equalized is not None else None)
+            if score is None or score < .5:
+                return held('aspect_layout_unknown', observed_mode)
+            result.diag['aspect_layout_predicted'] = True
+        elif result is not None and aspect_layout is not None:
+            self._last_layouts[mode] = aspect_layout
+            if aspect_wire is not None and (
+                    not aspect_wire.pixel or pixel_signed):
+                self._last_pixel = aspect_wire.pixel
+            if mode == self.aspect_mono_mode:
+                self.aspect_mono_slices = slices
+                self.dispatch_slice_metadata = slices
+        if result is not None:
+            result.diag['coded_status_mode'] = mode
+            result.diag['profile_mode'] = mode
+            result.diag['wire_profile'] = (
+                (self._mode_names[mode] if mode in self.stereo_slice_modes else
+                 (self.adaptive_slice_wire if mode == self.adaptive_stereo_mode else
+                  self.slice_wire).wire_profile) if slices else
+                self._mode_names[mode])
+            result.diag['slices'] = slices
+            if aspect_layout is not None:
+                result.diag['aspect_layout'] = aspect_layout
+                if mode == self.aspect_mode:
+                    result.diag['aspect_pixel'] = aspect_wire.pixel
+            if (mode in self.mono_status_modes or
+                    mode in self.stereo_slice_modes) and self._local.equalized is not None:
+                result.diag['mono_fold_eq'] = self._local.equalized
+        return result
+
+    def slice_half(self, model, result, channel=None):
+        """One decoded stereo-slices channel (slice_wire.Half), or None.
+        ``channel`` is the input channel it was heard on."""
+        layout = result.diag.get('aspect_layout')
+        if not result.diag.get('slices') or layout is None:
+            return None
+        wire = (self.adaptive_slice_wire if result.diag.get('profile_mode') ==
+                getattr(self, 'adaptive_stereo_mode', None) else self.slice_wire)
+        return wire.half(wire.model_for(model, layout), result, channel)
+
+    def slice_values(self, halves, result=None):
+        """Grid values from one or two stereo-slices channels; notes on
+        ``result`` what was shown."""
+        wire = (self.adaptive_slice_wire if result is not None and
+                result.diag.get('profile_mode') == getattr(self, 'adaptive_stereo_mode', None)
+                else self.slice_wire)
+        used = wire.choose(halves)
+        if result is not None:
+            result.diag['slices_shown'] = '+'.join(sorted(
+                half.kind for half in used))
+        values = wire.values(halves)
+        if result is not None:
+            # A nested fold's account of its coefficients, for the display.
+            result.diag['luma_room'] = getattr(wire, 'last_room', None)
+            result.diag['display_grids'] = getattr(wire, 'last_grids', P.V7_GRIDS)
+        return values
+
+    def values(self, model, result):
+        mode = result.diag.get('profile_mode')
+        if mode == 1:
+            return self.fold.values(model, result, metadata_confirmed=True)
+        if mode == self.aspect_mode and result.diag.get('aspect_layout'):
+            layout = result.diag['aspect_layout']
+            wire = self.pixel_wires.get(result.diag.get('aspect_pixel'),
+                                        self.aspect_wire)
+            profile_model = wire.model_for(model, layout)
+            return wire.values(profile_model, result)
+        if result.diag.get('slices') and result.diag.get('aspect_layout'):
+            return self.slice_values([self.slice_half(model, result)], result)
+        if mode == getattr(self, 'aspect_mono_mode', None):
+            layout = result.diag.get('aspect_layout')
+            if layout is None:
+                return self.v7.values_from(model, result.coeffs)
+            wire = self.aspect_mono_wire
+            return wire.values(wire.model_for(model, layout), result)
+        if mode == getattr(self, 'adaptive_stereo_mode', None):
+            return self.slice_values([self.slice_half(model, result)], result)
+        if mode == getattr(self, 'adaptive_mono_mode', None):
+            wire = self.adaptive_mono_wire
+            layout = result.diag.get('aspect_layout')
+            return wire.values(wire.model_for(model, layout), result)
+        if mode in self.mono_status_modes:
+            wire = self.mono_wires[mode]
+            return wire.values(wire.model_for(model), result)
+        return self.v7.values_from(model, result.coeffs)
+
+
+def _mono_packet_status_mode(result):
+    """Coded status mode carried by a decoded mono-profile candidate."""
+    if result is None:
+        return None
+    diag = getattr(result, 'diag', {}) or {}
+    timing = diag.get('pilot_timing') or {}
+    return timing.get('coded_status_mode', diag.get('coded_status_mode'))
+
+
+def _coded_status_mode(samples, frame_start, frame_scale, sample_rate,
+                       direction=1):
+    """Read the in-band profile code from one pulse-anchored packet."""
+    _ensure_test_modem_path()
+    from tone_code import decode_tone_code
+
+    audio = np.asarray(samples)
+    start = float(frame_start)
+    scale = float(frame_scale)
+    if direction < 0:
+        region = P.reverse_packet_region(audio, start, scale)
+        if region is None:
+            return None
+        audio, region_start = region
+        start = len(audio)+region_start-(float(frame_start)+
+                                         P.PULSE_FRAME*scale)
+    status = decode_tone_code(
+        audio, frame_start=start, frame_scale=scale,
+        sample_rate=sample_rate)
+    if not status.get('valid') or status.get('status') is None:
+        return None
+    return int(status['status']['mode'])
+
+
+def _mono_fold_input_side(channel_modes, mono_mode):
+    """Choose a leg only when its observed coded statuses consistently agree.
+
+    Require two valid packet statuses on a leg. A missing/damaged status is
+    ignored, while a conflicting valid status makes that leg ambiguous. Right
+    wins when both input legs independently validate the mono-video profile.
+    """
+    valid = []
+    for index, modes in enumerate(channel_modes):
+        modes = tuple(modes)
+        if len(modes) >= 2 and all(mode == mono_mode for mode in modes):
+            valid.append(index)
+    if not valid:
+        return None
+    selected = 1 if 1 in valid else valid[0]
+    return 'right' if selected == 1 else 'left'
+
+
+def _detect_mono_fold_side(args, timeout=2.0, wait_for_signal=False):
+    """Return (side, mode) for a valid mono status, or (None, None).
+
+    A short startup pass lets the ordinary receiver choose its model and rank
+    map before it opens the live decode path. If neither mono status validates,
+    the caller keeps the ordinary stereo Fold-500 profile. The GUI can wait for
+    the first non-silent block before starting its profile-detection timeout, so
+    it can be opened before its sender.
+    """
+    import sounddevice as sd
+    _ensure_test_modem_path()
+    from tone_code import ADAPTIVE_MONO, MONO_1000
+
+    device_info = sd.query_devices(args.device, 'input')
+    from animation_modem.audio_common import input_pair
+    selected = input_pair(getattr(args, 'channels', None),
+                          int(device_info.get('max_input_channels') or 0))
+    channels = len(selected)
+    rate = capture_rate_for(device_info)
+    direction = getattr(args, 'direction', 'auto')
+    inputs = [LiveInput(1, 1, rate=rate, direction=direction)
+              for _ in range(channels)]
+    observed_modes = [[] for _ in range(channels)]
+    last_positions = [set() for _ in range(channels)]
+    blocks = queue.Queue(maxsize=32)
+    stop = getattr(args, 'stop_event', None)
+
+    def confirmed_profile():
+        for candidate in (ADAPTIVE_MONO, MONO_1000):
+            side = _mono_fold_input_side(observed_modes, candidate)
+            if side is not None:
+                return side, candidate
+        return None, None
+
+    def callback(indata, _frames, _timing, status):
+        if status and not args.no_log:
+            print(f'profile probe input: {status}', file=sys.stderr, flush=True)
+        values = np.asarray(indata)[:, selected]
+        if not values.size or np.max(np.abs(values)) <= 1e-5:
+            return
+        try:
+            blocks.put_nowait(np.array(values, dtype=np.float32, copy=True))
+        except queue.Full:
+            try:
+                blocks.get_nowait()
+            except queue.Empty:
+                pass
+            try:
+                blocks.put_nowait(np.array(values, dtype=np.float32, copy=True))
+            except queue.Full:
+                pass
+
+    stream = sd.InputStream(
+        samplerate=rate, channels=max(selected)+1, dtype='float32',
+        device=args.device, blocksize=1024, callback=callback)
+    timeout = max(0.0, float(timeout))
+    deadline = (None if wait_for_signal else time.monotonic()+timeout)
+    try:
+        stream.start()
+        while not (stop and stop.is_set()):
+            if deadline is not None and time.monotonic() >= deadline:
+                break
+            try:
+                block = blocks.get(timeout=.05)
+            except queue.Empty:
+                continue
+            now = time.monotonic()
+            if deadline is None:
+                deadline = now+timeout
+            for index, live_input in enumerate(inputs):
+                live_input.add(block[:, index:index+1].copy())
+                audio = live_input.take(now)
+                if audio is None:
+                    continue
+                audio_start = live_input.total-len(audio)
+                profile_by_position = {
+                    int(round(position)): mode
+                    for position, mode in live_input.pulse_profile_hits(audio)}
+                for position, scale, _confidence, way in live_input.pulse_hits(audio):
+                    absolute = int(round(audio_start+position))
+                    if absolute in last_positions[index]:
+                        continue
+                    # A live header is found before the packet is complete.
+                    # Wait for the full region to align the status decision
+                    # with the frame that becomes ready for latest-only decode.
+                    if position+P.PULSE_FRAME*scale > len(audio)+1.0:
+                        continue
+                    last_positions[index].add(absolute)
+                    mode = profile_by_position.get(int(round(position)))
+                    if mode is not None:
+                        observed_modes[index].append(mode)
+                live_input.decoded()
+            if confirmed_profile()[0] is not None:
+                break
+    finally:
+        stream.stop()
+        stream.close()
+    return confirmed_profile()
+
+
+def _sticky_profile_path():
+    """Where the receiver keeps the last profile it confirmed (item 33)."""
+    root = Path(os.environ.get('XDG_CONFIG_HOME') or Path.home()/'.config')
+    return root/'modemTest'/'v7_receiver_profile.json'
+
+
+def _load_sticky_profile(decoder):
+    """Start the receiver on the profile it last confirmed, if any."""
+    try:
+        data = json.loads(_sticky_profile_path().read_text())
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict) or data.get('version') != 1:
+        return None
+    name, side = data.get('profile'), data.get('side')
+    if not isinstance(name, str) or not decoder.start_with(name, side):
+        return None
+    return name
+
+
+def _save_sticky_profile(name, side):
+    path = _sticky_profile_path()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = path.with_suffix('.tmp')
+        temporary.write_text(json.dumps({'version': 1, 'profile': name,
+                                         'side': side}, sort_keys=True)+'\n')
+        os.replace(temporary, path)
+    except OSError:
+        pass
+
+
+def _make_auto_profile_decoder(args, fold):
+    """Build the default status-driven Fold-500/mono-video receiver."""
+    return _AdaptiveProfileDecoder(
+        fold, _model(args.fixture, 'box'),
+        preferred_side=getattr(args, 'mono_video_side', 'auto'),
+        aspect_layout=getattr(args, 'aspect_layout', 'auto'),
+        nested_table_path=getattr(args, 'adaptive_nested_table', None),
+        )
+
+
+def run_receive(args):
+    from tools.v7_runtime import blas_budget
+    with blas_budget():
+        return _run_receive_with_budget(args)
+
+
+def _run_receive_with_budget(args):
+    if getattr(args, 'image_only', False) and getattr(args, 'headless', False):
+        raise ValueError('--image-only cannot be combined with --headless')
+    if not getattr(args, 'adaptive_nested_installed', False):
+        from tools.v7_nested_gui_patch import (DEFAULT_TABLE_PATH,
+                                                install_receiver)
+        table, _ = install_receiver(sys.modules[__name__], DEFAULT_TABLE_PATH)
+        args.adaptive_nested_table = str(table)
+        args.adaptive_nested_installed = True
+    if (getattr(args, 'experimental_mono_fold', False) and
+            not getattr(args, 'experimental_mono_colour', False) and
+            not getattr(args, 'aspect_mono', False) and
+            not getattr(args, 'nested_fold', False)):
+        raise ValueError('experimental Mono-500 receive mode was retired; '
+                         'ID 4 identifies adaptive-stereo-nested')
+    if getattr(args, 'nested_smooth', None) is not None:
+        if args.nested_smooth < 0:
+            raise ValueError('--nested-smooth must be 0 or more')
+        _ensure_test_modem_path()
+        import nested_fold
+        nested_fold.SMOOTH_PASSES = int(args.nested_smooth)
+    runtime_options = getattr(args, 'runtime_options', None)
+    if runtime_options is not None and not getattr(args, 'read', None):
+        identity = runtime_options.snapshot().get('audio_input_identity')
+        if identity is not None:
+            import sounddevice as sd
+            from tools.v7_receiver_audio import resolve_device_index
+            args.device = resolve_device_index(
+                sd, args.device, identity, 'input')
+    profile_is_explicit = bool(
+        getattr(args, 'experimental_mono_fold', False) or
+        getattr(args, 'experimental_mono_colour', False) or
+        getattr(args, 'experimental_fold', None) is not None)
+    if not profile_is_explicit:
+        if getattr(args, 'pilot_timing', 'tone-seeded') == 'baseline':
+            raise ValueError('automatic profile selection requires tone-assisted timing')
+        fold = _experimental_fold(500)
+        profile_decoder = _make_auto_profile_decoder(args, fold)
+        # Start on the profile confirmed last time: its first packet is then
+        # shown at once (fixes list item 33).
+        sticky = (None if getattr(args, 'read', None) else
+                  _load_sticky_profile(profile_decoder))
+        if sticky is not None and not args.no_log:
+            print({'status': 'sticky_profile', 'profile': sticky,
+                   'video_side': profile_decoder.active_side}, flush=True)
+        profile_decoder.on_switch = (None if getattr(args, 'read', None) else
+                                     _save_sticky_profile)
+        _ensure_test_modem_path()
+        from tone_code import coded_pilot_timing
+        profile_decoder.install()
+        try:
+            with coded_pilot_timing():
+                return _run_receive(
+                    args, fold, adaptive_profile=profile_decoder)
+        finally:
+            profile_decoder.uninstall()
+    slots = _fold_slots(args)
+    mono_fold_profile = bool(getattr(args, 'experimental_mono_fold', False) or
+                             getattr(args, 'experimental_mono_colour', False))
+    fold = _experimental_fold(slots)
+    if mono_fold_profile:
+        if getattr(args, 'pilot_timing', 'tone-seeded') == 'baseline':
+            raise ValueError('experimental mono profiles require tone-assisted timing')
+        _ensure_test_modem_path()
+        from tone_code import coded_pilot_timing
+        from mono_video import MonoColourFoldWire, MonoFreshFoldWire
+        from tone_code import MONO_1000
+        use_colour = (getattr(args, 'experimental_mono_colour', False) or
+                      getattr(args, '_detected_mono_mode', None) == MONO_1000)
+        wire_class = MonoColourFoldWire if use_colour else MonoFreshFoldWire
+        model = _model(args.fixture, 'box')
+        requested_side = getattr(args, 'mono_video_side', 'auto')
+        detected_side = getattr(args, '_detected_mono_video_side', None)
+        selected_side = (requested_side if requested_side in ('left', 'right')
+                         else detected_side or 'right')
+        mono_wire = wire_class(
+            model, side=selected_side)
+        mono_wire.install()
+        try:
+            with coded_pilot_timing():
+                return _run_receive(args, None, mono_wire)
+        finally:
+            mono_wire.uninstall()
+    if fold is None:
+        return _run_receive(args, None)
+    if getattr(args, 'pilot_timing', 'tone-seeded') == 'baseline':
+        raise ValueError('coded-pilot folding requires tone-assisted timing')
+    # The prototype wraps v7.decode_frame and the equalisers to keep each
+    # packet's equaliser output. The coded-pilot context despreads valid chips
+    # before V7 estimates tone timing. Both wrappers are always restored.
+    fold.install()
+    try:
+        _ensure_test_modem_path()
+        from tone_code import coded_pilot_timing
+        with coded_pilot_timing():
+            return _run_receive(args, fold)
+    finally:
+        fold.uninstall()
+
+
+def _run_receive(args, fold, mono_wire=None, adaptive_profile=None):
+    if getattr(args, 'read', None):
+        if adaptive_profile is not None:
+            from tools.v7_file import prime_file_profile
+            prime_file_profile(args, adaptive_profile, sys.modules[__name__])
+        return _run_receive_session(args, fold, mono_wire, adaptive_profile,
+                                    user_stop=getattr(args, 'stop_event', None))
+    if args.device is None:
+        raise ValueError('Receiving requires --device or --read recording.wav')
+    import sounddevice as sd
+    from tools.v7_device_recovery import device_identity
+
+    user_stop = getattr(args, 'stop_event', None) or threading.Event()
+    runtime_options = getattr(args, 'runtime_options', None)
+    identity = (runtime_options.snapshot().get('audio_input_identity')
+                if runtime_options is not None else None)
+    if identity is None:
+        identity = device_identity(sd, args.device)
+
+    while not user_stop.is_set():
+        recovery = _run_receive_session(
+            args, fold, mono_wire, adaptive_profile,
+            user_stop=user_stop, input_identity=identity)
+        if recovery is None or user_stop.is_set():
+            return
+        device, rate, reason = recovery
+        args.device = device
+        if adaptive_profile is not None:
+            adaptive_profile.reset_capture_timeline()
+        print(json.dumps({
+            'status': 'receiver_input_reconnected',
+            'device': identity.get('name'),
+            'sample_rate': rate,
+            'after': reason,
+        }), flush=True)
+
+
+def _run_receive_session(args, fold, mono_wire=None, adaptive_profile=None,
+                          user_stop=None, input_identity=None):
+    import sounddevice as sd
+    from tools.v7_receiver_audio import (AudioPassthrough,
+                                         ReceiverChannelRouter,
+                                         ReceiverRuntimeOptions,
+                                         passthrough_audio_side)
+    from tools.v7_device_recovery import (
+        DEVICE_RATE_FRAME_INTERVAL, DeviceRateDebouncer,
+        query_device_snapshot)
+
+    from animation_modem.audio_common import input_pair
+    file_input = getattr(args, 'read', None)
+    if file_input:
+        if getattr(args, 'audio_output_device', None) is not None:
+            raise ValueError('WAV decoding does not open a soundtrack output device')
+        from tools.v7_wav_io import wav_info
+        file_rate, file_channels, _ = wav_info(file_input)
+        device_info = {'default_samplerate': file_rate,
+                       'max_input_channels': file_channels}
+    else:
+        device_info = sd.query_devices(args.device, 'input')
+    selected_channels = input_pair(getattr(args, 'channels', None),
+                                   device_info['max_input_channels'])
+    from animation_modem.v7_input_kernels import select_and_measure
+    # Compile for this stream's channel count before PortAudio can call us.
+    select_and_measure(np.zeros((1, max(selected_channels)+1), np.float32),
+                       selected_channels)
+    RECEIVER_GUI_STATUS.clear()
+    # The standalone configuration GUI can cancel setup before the capture
+    # stream is opened. The CLI keeps the original self-owned lifecycle.
+    stop = threading.Event()
+    # Metadata is decoded with the common bootstrap model; the body model is
+    # selected from the protected encoding ID carried by each frame.
+    base_model = _model(
+        args.fixture,
+        'box' if (fold is not None or adaptive_profile is not None or
+                  getattr(mono_wire, 'requires_box', False))
+        else 'nearest')
+    model = mono_wire.model_for(base_model) if mono_wire is not None else base_model
+    if fold is not None:
+        fold.check(model)
+    # Compile acquisition, polarity, equalizer and coded-status kernels before
+    # opening audio. The Numba disk cache reuses unchanged kernels on compatible
+    # later runs; a cold cache is still compiled before capture begins.
+    P.PULSE.warmup_pulse_kernels()
+    P.warmup_leg_polarity()
+    P.warmup_equalizer(model)
+    if fold is not None:
+        from tone_code import warmup_coded_decoder
+        warmup_coded_decoder(model)
+    if mono_wire is not None:
+        from tone_code import warmup_coded_decoder
+        warmup_coded_decoder(model)
+        warmup_wire = mono_wire.encode(
+            base_model, [np.zeros(base_model.coder.source_count)]*3,
+            start_counter=1)
+        warmup_audio = warmup_wire
+        carrier_index = getattr(mono_wire, 'carrier_index', None)
+        if carrier_index is not None:
+            warmup_audio = warmup_wire[:, carrier_index]
+        P.decode_pulse_stream(
+            model, warmup_audio, sample_rate=capture_rate_for(device_info),
+            pilot_timing=args.pilot_timing)
+    if adaptive_profile is not None:
+        _ensure_test_modem_path()
+        from tone_code import warmup_status_templates
+        from tone_code import (ADAPTIVE_MONO, ADAPTIVE_STEREO, FOLD_500,
+                               FOLD_OFF, MONO_1000, MONO_OFF)
+        for mode in (FOLD_500, FOLD_OFF, ADAPTIVE_MONO, ADAPTIVE_STEREO,
+                     MONO_1000, MONO_OFF):
+            warmup_status_templates(mode)
+    if stop.is_set():
+        return
+    models = {model.encoding_type: model}
+
+    def model_factory(encoding_type):
+        """Build an alternate source model only when metadata requests it."""
+        if encoding_type not in models:
+            name = P.ENCODING_FILTERS[int(encoding_type)]
+            candidate = _model(args.fixture, name)
+            models[encoding_type] = (mono_wire.model_for(candidate)
+                                     if mono_wire is not None else candidate)
+        return models[encoding_type]
+    input_channels = len(selected_channels)
+    if adaptive_profile is not None:
+        adaptive_profile.input_channels = input_channels
+    video_input_index = getattr(mono_wire, 'carrier_index', None)
+    if video_input_index is not None and input_channels < 2:
+        video_input_index = 0
+    capture_rate = float(file_rate) if file_input else capture_rate_for(device_info)
+    if adaptive_profile is not None:
+        adaptive_profile.capture_rate = capture_rate
+    profile_probes = (
+        [_ProfileStatusProbe(
+            capture_rate, index, getattr(args, 'direction', 'auto'),
+            args.decode_history, args.decode_batch)
+         for index in range(input_channels)]
+        if adaptive_profile is not None else None)
+    blocks = queue.Queue(maxsize=INPUT_AUDIO_QUEUE_BLOCKS)
+    # (probe sample count, capture position, length) of recent decoder blocks:
+    # turns a packet's probe position into the capture position the audio
+    # gate works in.
+    probe_blocks = deque(maxlen=256)
+
+    def capture_position(position):
+        for start, capture, length in reversed(probe_blocks):
+            if position >= start:
+                return capture+(position-start)
+        return position if not probe_blocks else probe_blocks[0][1]+(
+            position-probe_blocks[0][0])
+    input_gap = threading.Event()
+    input_ready = threading.Event()
+    input_paused = threading.Event()
+    input_stream = [None]
+    recovery = [None]
+    last_input_device_error = [None]
+    capture_sample_cursor = [0]
+    # Fixes: one input channel a few samples behind the other (an editor
+    # drag, azimuth, interface skew). V7_ALIGN=0 turns the alignment off.
+    from animation_modem.v7_channel_align import ChannelAligner
+    channel_aligner = (ChannelAligner(capture_rate)
+                       if os.environ.get('V7_ALIGN', '1') != '0' else None)
+    live_input = LiveInput(
+        args.decode_history, args.decode_batch, rate=capture_rate,
+        direction=getattr(args, 'direction', 'auto'))
+    auto_mono_side = bool(
+        mono_wire is not None and
+        getattr(mono_wire, 'wire_profile', None) in
+        ('mono-fresh-500', 'mono-colour-500') and
+        getattr(args, 'mono_video_side', 'auto') == 'auto' and
+        input_channels > 1)
+    auto_mono_locked = not auto_mono_side
+    auto_mono_switches = 0
+    opposite_input_index = (
+        1-video_input_index if mono_wire is not None and
+        video_input_index is not None and input_channels > 1 else None)
+    opposite_probe = (_MonoChannelProbe(
+        capture_rate, getattr(args, 'direction', 'auto'),
+        args.decode_history, args.decode_batch)
+        if opposite_input_index is not None else None)
+    direction_streak = DirectionStreak()
+    # Absolute capture arrival of the last pulse hit handed to a decoder.
+    # The sample clock never rewinds, so an input gap needs no reset here.
+    decoded_through = None
+    # Tail store and learned loop constants (N, p) persist across decodes.
+    pulse_state = P.PulseState(
+        tail_memory=(not args.no_tail_memory and
+                     not getattr(mono_wire, 'disable_tail_memory', False)))
+    if adaptive_profile is not None:
+        adaptive_profile.bind_state(pulse_state)
+    # Stereo slices: the second input channel is a wire of its own.
+    slice_state = P.PulseState(tail_memory=False)
+    profile_generation_seen = (adaptive_profile.generation
+                               if adaptive_profile is not None else 0)
+    lag_ticks = deque(maxlen=32)        # recent picture lags, loop ticks
+    decode_times = deque(maxlen=64)     # wall time of every decode cycle
+    decode_cpu_times = deque(maxlen=512)  # (completion time, thread CPU seconds)
+    shown_times = deque(maxlen=64)      # wall time of every published picture
+    latest = None
+    latest_grids = None
+    display_frames = FRAME_BUFFER
+    previous_values = None
+    temporal_fusion = None
+    if getattr(args, 'temporal_fusion', 'off') == 'held':
+        from animation_modem.v7_temporal import TemporalFusion
+        temporal_fusion = TemporalFusion()
+    diagnostics = {} if args.diagnostics else None
+    auto_gain = 1.0
+    if auto_mono_side:
+        initial_side = 'left' if video_input_index == 0 else 'right'
+        input_mode = f'mono-video-auto-{initial_side}'
+    elif mono_wire is not None and video_input_index is not None:
+        input_mode = f'mono-video-{getattr(mono_wire, "side", "")}'
+    else:
+        input_mode = 'mono-input' if input_channels == 1 else 'M/S'
+    _ensure_test_modem_path()
+    from tone_code import FOLD_500, FOLD_OFF, MONO_1000, MONO_OFF
+    # ID 2 is adaptive mono; ID 4 is adaptive stereo and is never passthrough.
+    mono_status = ((MONO_1000, MONO_OFF, ADAPTIVE_PROFILES[
+        'adaptive-mono-nested']['mode'])
+                   if adaptive_profile is not None else
+                   MONO_1000 if getattr(mono_wire, 'wire_profile', None) ==
+                   'mono-colour-500' else MONO_1000)
+    stereo_status = ((FOLD_OFF, FOLD_500, ADAPTIVE_PROFILES[
+        'adaptive-stereo-nested']['mode']) if adaptive_profile is not None else
+        (FOLD_OFF, FOLD_500))
+    mono_status_name = ('MONO_1000 / MONO_OFF / ADAPTIVE_MONO'
+                        if adaptive_profile is not None else
+                        'MONO_1000')
+    initial_side = (getattr(mono_wire, 'side', None)
+                    if mono_wire is not None else None)
+    receiver_router = ReceiverChannelRouter(
+        mono_status, stereo_status,
+        initial_video_side=(initial_side if initial_side in (
+            'left', 'right', 'both') else None))
+    runtime_options = getattr(args, 'runtime_options', None)
+    if runtime_options is None:
+        runtime_options = ReceiverRuntimeOptions(
+            audio_output_device=getattr(args, 'audio_output_device', None),
+            audio_muted=getattr(args, 'audio_muted', False),
+            freewheel_seconds=getattr(args, 'freewheel_seconds', 2.0),
+            show_sync_warning=getattr(args, 'show_sync_warning', True),
+            audio_volume=getattr(args, 'audio_volume', 1.0),
+            audio_diagnostics=getattr(args, 'audio_diagnostics', False))
+    audio_bridge_enabled = bool(
+        getattr(args, 'runtime_options', None) is not None or
+        runtime_options.snapshot()['audio_output_device'] is not None)
+    meter = {'peak': np.zeros(input_channels),
+             'rms': np.zeros(input_channels), 'blocks': 0,
+             'dropped': 0, 'decoded': 0, 'verified': 0, 'lost': 0,
+             'status': 'acquiring', 'counter': None, 'decode_ms': None,
+              'decode_cpu_ms': None, 'decode_cpu_percent': 0.0,
+             'quality': '--',
+             'timing_delta': None, 'playback_speed': None, 'source_index': None,
+             # Largest source index (N-1) and the picture's lag behind the live
+             # loop, both from the loop constants in the rotating CRC field;
+             # '--' until learned (about a second) or if the sender has none.
+             'max_index': None, 'lag_ms': None, 'loop': None,
+             'shown_index': None, 'shown_direction': None,
+             'playback_direction': None, 'direction_candidate': None,
+             'direction_streak': 0,
+             'pulse': None, 'aspect': 0, 'aspect_candidate': 0,
+             'aspect_screen': False,
+              'aspect_streak': 0, 'input_samples': 0, 'started': time.monotonic(),
+              'wire_profile': (adaptive_profile.profile_name
+                               if adaptive_profile is not None else None),
+              'profile_candidate': None, 'profile_streak': 0,
+               'auto_gain': 1.0, 'polarity': 1,
+              'input_fps': 0., 'decode_fps': 0., 'shown_fps': 0.,
+               'channel_hint': '',
+               'route_state': receiver_router.state,
+               'detected_mode': receiver_router.state,
+               'channel_modes': (None, None),
+               'video_side': receiver_router.video_side,
+              'audio_side': receiver_router.audio_side,
+              'sync_state': 'acquiring',
+              'sync_age': None,
+              'sync_warning': bool(runtime_options.snapshot().get(
+                  'show_sync_warning', True)),
+              'audio_muted': bool(runtime_options.snapshot().get(
+                  'audio_muted', False)),
+              'audio_volume': runtime_options.snapshot().get(
+                  'audio_volume', 1.0),
+               'audio_output_device': runtime_options.snapshot().get(
+                   'audio_output_device'),
+                'audio_output_identity': runtime_options.snapshot().get(
+                    'audio_output_identity'),
+                 'audio_device_error': None,
+                 'input_device_error': None,
+                'audio_runtime': {
+                    'buffered_ms': 0.0,
+                    'underflow_events': 0,
+                    'dropped_samples': 0,
+                    'current_clock_correction_ppm': 0.0,
+                    'max_clock_correction_ppm': 0.0,
+                    'input_status': {},
+                    'output_status': {},
+                },
+               'mode': input_mode,
+             'device': str(args.device), 'capture_rate': capture_rate,
+             'input_channels': input_channels}
+
+    def callback(indata, frames, timing, status):
+        if input_paused.is_set():
+            return
+        block, peak, rms, has_data = select_and_measure(indata, selected_channels)
+        if status and passthrough is not None:
+            passthrough.note_input_status(status)
+        capture_start = capture_sample_cursor[0]
+        capture_sample_cursor[0] += len(block)
+        if passthrough is not None:
+            # Queue the selected leg on every device callback, including
+            # silence. Audio delivery must not depend on frame decoding.
+            passthrough.queue_capture(capture_start, block)
+        meter['peak'] = np.maximum(meter['peak'], peak)
+        meter['rms'] = rms
+        if has_data:
+            meter['blocks'] += 1
+            meter['input_samples'] += len(block)
+        if status:
+            print(f'input: {status}', file=sys.stderr, flush=True)
+        if not has_data:
+            return
+        try:
+            # With its capture position: silent blocks are not sent, so the
+            # decoder's own sample count is not the capture count.
+            blocks.put_nowait((capture_start, block))
+        except queue.Full:
+            # Dropping an input block is an explicit discontinuity; keeping
+            # stale audio would make the V7 clock appear to run backward.
+            meter['dropped'] += 1
+            input_gap.set()
+        input_ready.set()
+
+    def report_input_device_error(message):
+        if message == last_input_device_error[0]:
+            return
+        last_input_device_error[0] = message
+        meter['input_device_error'] = message
+        meter['status'] = 'input device lost'
+        print(json.dumps({
+            'status': 'receiver_input_device_lost',
+            'device': (input_identity or {}).get('name'),
+            'message': message,
+        }), flush=True)
+
+    def clear_input_device_error():
+        if last_input_device_error[0] is None:
+            return
+        previous = last_input_device_error[0]
+        last_input_device_error[0] = None
+        meter['input_device_error'] = None
+        meter['status'] = 'reacquiring'
+        if not args.no_log:
+            print(json.dumps({
+                'status': 'receiver_input_device_restored',
+                'device': (input_identity or {}).get('name'),
+                'previous_error': previous,
+            }), flush=True)
+
+    def monitor_input_device():
+        stable = DeviceRateDebouncer()
+        temporarily_unavailable = False
+        while not stop.wait(DEVICE_RATE_FRAME_INTERVAL):
+            stream = input_stream[0]
+            try:
+                stream_active = bool(stream is not None and stream.active)
+            except Exception:
+                stream_active = False
+            try:
+                index, info, observed_identity, _reported_rate = (
+                    query_device_snapshot(
+                        sd, args.device, input_identity, 'input'))
+            except Exception as exc:
+                input_paused.set()
+                temporarily_unavailable = True
+                stable.reset()
+                report_input_device_error(str(exc))
+                continue
+
+            next_rate = capture_rate_for(info)
+            index_changed = (isinstance(args.device, int) and
+                             index != args.device)
+            rate_changed = abs(next_rate-capture_rate) > .5
+            needs_reopen = not stream_active or index_changed or rate_changed
+            if needs_reopen:
+                input_paused.set()
+                if not stream_active:
+                    reason = 'input stream stopped'
+                elif index_changed:
+                    reason = 'input device index changed'
+                else:
+                    reason = (f'input sample rate changed from '
+                              f'{capture_rate:g}Hz to {next_rate:g}Hz')
+                report_input_device_error(reason)
+                if stable.observe(observed_identity, next_rate):
+                    recovery[0] = (index, next_rate, reason)
+                    input_ready.set()
+                    stop.set()
+                    return
+                continue
+
+            if temporarily_unavailable:
+                input_paused.set()
+                if stable.observe(observed_identity, next_rate):
+                    temporarily_unavailable = False
+                    input_paused.clear()
+                    stable.reset()
+                    clear_input_device_error()
+                continue
+
+            stable.reset()
+            if input_paused.is_set():
+                input_paused.clear()
+            clear_input_device_error()
+
+    def live_loop_position():
+        """(calculated index now, its direction, picture index minus it).
+
+        The calculated index is where the loop is right now on this machine's
+        clock, from the received N and p.  The offset is plain index
+        arithmetic against it -- no timing state -- so it is exactly what the
+        two numbers on screen differ by, and one index step is 1/30 s.  It
+        grows between pictures and drops as each new one arrives.  Its sign
+        follows the ping-pong direction: a late picture reads negative while
+        the loop counts up and positive while it counts down.  (None,
+        None) until the loop constants are known, or if the sender's index
+        does not follow the clock.
+        """
+        loop = meter['loop']
+        if loop is None or not loop.clocked:
+            return None, 0, None
+        ticks = P.loop_ticks(time.time_ns())
+        ideal = P.loop_index(ticks, loop)
+        way = P.loop_direction(ticks, loop)
+        if meter['shown_index'] is None:
+            return ideal, way, None
+        return ideal, way, meter['shown_index'] - ideal
+
+    def display_diagnostics():
+        """Keep the full receiver readout, sampled at the viewer's UI rate."""
+        now = time.monotonic()
+        meter['decode_fps'] = windowed_rate(decode_times, now)
+        meter['shown_fps'] = windowed_rate(shown_times, now)
+        decode_cpu_seconds = sum(
+            cpu_seconds for completed, cpu_seconds in decode_cpu_times
+            if completed >= now-2.0)
+        cpu_window = min(2.0, max(0.0, now-meter['started']))
+        meter['decode_cpu_percent'] = (
+            100.0*decode_cpu_seconds/cpu_window if cpu_window > 0 else 0.0)
+        incoming = live_input.incoming_fps(now)
+        meter['input_fps'] = incoming
+        shown = meter['shown_index']
+        ideal, ideal_way, diff = live_loop_position()
+        direction = {1: '+', -1: '-'}
+        shown_text = ('--' if shown is None else
+                      f'{shown}{direction.get(meter["shown_direction"], "")}')
+        ideal_text = ('--' if ideal is None else
+                      f'{ideal}{direction.get(ideal_way, "")}')
+        diff_text = ('--' if diff is None else
+                     f'{diff:+d} frames ({diff*1000/P.LOOP_IPS:+.0f} ms)')
+        max_index = '--' if meter['max_index'] is None else str(meter['max_index'])
+        decode_ms = ('--' if meter['decode_ms'] is None else
+                     f'{meter["decode_ms"]:.1f} ms')
+        pulse = meter['pulse']
+        pulse_text = '--' if pulse is None else f'{pulse:.3f}'
+        timing = meter['timing_delta']
+        timing_text = '--' if timing is None else f'{timing:+.1f} ppm'
+        speed = meter['playback_speed']
+        speed_text = '--' if speed is None else f'{speed:.3f}×'
+        playback_direction = meter['playback_direction']
+        playback_text = {1: 'forward', -1: 'reverse'}.get(
+            playback_direction, 'acquiring')
+        if meter['direction_candidate'] in (-1, 1):
+            playback_text += ('; candidate ' +
+                              ('forward' if meter['direction_candidate'] > 0
+                               else 'reverse') +
+                              f' ×{meter["direction_streak"]}')
+        aspect = P.V7_ASPECT_NAMES[int(meter['aspect']) & 7]
+        candidate = P.V7_ASPECT_NAMES[int(meter['aspect_candidate']) & 7]
+        peak = 20*np.log10(np.maximum(meter['peak'], 1e-9))
+        rms = 20*np.log10(np.maximum(meter['rms'], 1e-9))
+        if input_channels > 1:
+            channel_levels = (f'peak L/R  {peak[0]:6.1f} / {peak[1]:6.1f} dBFS',
+                              f'RMS  L/R  {rms[0]:6.1f} / {rms[1]:6.1f} dBFS')
+        else:
+            channel_levels = (f'peak mono {peak[0]:6.1f} dBFS',
+                              f'RMS  mono {rms[0]:6.1f} dBFS')
+        return {
+            'status': (str(meter['status']),),
+            'sync': (
+                f'shown      {shown_text} / {max_index}',
+                f'calculated {ideal_text}',
+                f'offset     {diff_text}'),
+            'decode': (
+                f'frame {meter["counter"] if meter["counter"] is not None else "--"}   '
+                f'good {meter["verified"]}   lost {meter["lost"]}',
+                f'incoming {incoming:5.2f} fps   '
+                f'decode {meter["decode_fps"]:5.2f}/s   '
+                f'shown {meter["shown_fps"]:5.2f} fps',
+                f'decode time {decode_ms}',
+                f'input blocks {meter["blocks"]}   dropped {meter["dropped"]}'),
+            'decode_cpu': (
+                ('last -- ms/frame' if meter['decode_cpu_ms'] is None else
+                 f'last {meter["decode_cpu_ms"]:.1f} ms/frame'),
+                f'2s avg {meter["decode_cpu_percent"]:.0f}% / core'),
+            'input': (*channel_levels,
+                      f'auto gain {meter["auto_gain"]:5.2f}×',
+                      f'right leg {"inverted" if meter["polarity"] < 0 else "normal"}'),
+            'device': ((meter['input_device_error'] or
+                        f'input {meter["device"]} · '
+                        f'{meter["capture_rate"]:g}Hz'),),
+            'audio': (
+                f'q{meter["audio_runtime"]["buffered_ms"]:.0f}ms · '
+                f'under {meter["audio_runtime"]["underflow_events"]}',
+                f'in/out xrun '
+                f'{sum(meter["audio_runtime"]["input_status"].values())}/'
+                f'{sum(meter["audio_runtime"]["output_status"].values())}',
+                f'clk {meter["audio_runtime"]["current_clock_correction_ppm"]:+.0f}/'
+                f'{meter["audio_runtime"]["max_clock_correction_ppm"]:.0f}ppm · '
+                f'drop {meter["audio_runtime"]["dropped_samples"]}',
+                f'{meter["audio_output_device"] or "output off"} · '
+                f'volume {meter["audio_volume"]:.2f}'),
+            'signal': (
+                f'aspect {aspect}'
+                f'{" (sender layout)" if meter.get("aspect_screen") else ""}'
+                f'  ·  candidate {candidate} ×{meter["aspect_streak"]}',
+                (f'wire {meter["wire_profile"] or "--"}' +
+                 (f' · candidate {meter["profile_candidate"]} '
+                  f'×{meter["profile_streak"]}/3'
+                  if meter['profile_candidate'] else '')),
+                f'foundation {meter["quality"]}',
+                f'pulse {pulse_text}   speed {speed_text}',
+                f'audio {playback_text}',
+                f'timing {timing_text}',
+                f'route {meter["route_state"]} · '
+                f'video {meter["video_side"] or "--"} · '
+                f'audio {meter["audio_side"] or "--"}',
+                f'passthrough {"muted" if meter["audio_muted"] else "live"} · '
+                f'output {meter["audio_output_device"] or "not selected"} · '
+                f'volume {meter["audio_volume"]:.2f}' +
+                ('' if not meter['audio_device_error'] else
+                 f' · {meter["audio_device_error"]}'),
+                f'sync {meter["sync_state"]}' +
+                ('' if meter['sync_age'] is None else
+                 f' · {meter["sync_age"]:.1f}s since valid packet'),
+                meter['channel_hint'] or 'channel route not independently flagged'),
+        }
+
+    RECEIVER_GUI_STATUS.update(meter=meter,
+                               diagnostics=display_diagnostics)
+
+    def refresh_runtime_state(now=None):
+        now = time.monotonic() if now is None else float(now)
+        options = runtime_options.snapshot()
+        route = receiver_router.snapshot(now)
+        meter['route_state'] = route['state']
+        meter['detected_mode'] = route['state']
+        meter['channel_modes'] = route['channel_modes']
+        meter['video_side'] = route['video_side']
+        sync_state = receiver_router.sync_state(
+            now, options['freewheel_seconds'])
+        if (sync_state == 'acquiring' and
+                now-meter['started'] > options['freewheel_seconds']):
+            sync_state = 'sync-lost'
+        meter['sync_state'] = sync_state
+        previous_audio_side = (passthrough.route
+                               if passthrough is not None else None)
+        meter['audio_side'] = passthrough_audio_side(route, input_channels)
+        meter['sync_age'] = (None if route['last_packet'] is None else
+                             max(0.0, now-route['last_packet']))
+        meter['sync_warning'] = bool(
+            meter['sync_state'] == 'sync-lost' and
+            options['show_sync_warning'])
+        meter['audio_muted'] = options['audio_muted']
+        meter['audio_volume'] = options['audio_volume']
+        identity = options['audio_output_identity']
+        meter['audio_output_identity'] = identity
+        meter['audio_output_device'] = (
+            identity.get('name') if identity is not None else
+            options['audio_output_device'])
+        if passthrough is not None:
+            passthrough.set_route(meter['audio_side'], options['audio_muted'])
+            passthrough.set_volume(options['audio_volume'])
+            meter['audio_device_error'] = passthrough.error
+            if previous_audio_side != meter['audio_side'] and not args.no_log:
+                print({'status': 'audio_route_change',
+                       'audio_side': meter['audio_side'],
+                       'route_state': route['state'],
+                       'sync_state': sync_state,
+                       'sync_age': meter['sync_age'],
+                       'channel_modes': route['channel_modes']}, flush=True)
+
+    # Output overrides for diagnosing stalls: V7_AUDIO_OUTPUT_MODE =
+    # 'blocking' (default: PortAudio plays from its own buffer, Python only
+    # refills it) or 'callback' (Python output callback); V7_AUDIO_OUTPUT_
+    # LATENCY = PortAudio suggested latency in seconds, 'low' or 'high';
+    # V7_AUDIO_OUTPUT_BLOCKSIZE = frames per write or callback (callback mode
+    # only: 0 lets the host choose). Unset, AudioPassthrough's defaults apply.
+    output_latency = os.environ.get('V7_AUDIO_OUTPUT_LATENCY') or None
+    if output_latency not in (None, 'low', 'high'):
+        output_latency = float(output_latency)
+    output_blocksize = os.environ.get('V7_AUDIO_OUTPUT_BLOCKSIZE')
+    output_blocksize = (None if output_blocksize in (None, '')
+                        else int(output_blocksize))
+    passthrough = (AudioPassthrough(
+        capture_rate, sounddevice_module=sd,
+        status_callback=lambda error: meter.__setitem__(
+            'audio_device_error', error),
+        output_latency=output_latency,
+        output_blocksize=output_blocksize,
+        output_mode=os.environ.get('V7_AUDIO_OUTPUT_MODE') or None)
+        if audio_bridge_enabled else None)
+
+    def audio_output_monitor():
+        current_device = object()
+        last_health_check = 0.0
+        last_audio_report = 0.0
+        last_audio_error_signature = None
+        rate_stability = DeviceRateDebouncer()
+        last_device_error = None
+        last_passthrough_error = None
+        while not stop.is_set():
+            options = runtime_options.snapshot()
+            device = options['audio_output_device']
+            identity = options['audio_output_identity']
+            selection = (device, identity)
+            now = time.monotonic()
+            selection_changed = selection != current_device
+            reopen = False
+            if passthrough is not None and selection_changed:
+                passthrough.close()
+                current_device = selection
+                rate_stability.reset()
+                if device is not None or identity is not None:
+                    passthrough.open(device, identity)
+                    reopen = passthrough.is_open
+            elif (passthrough is not None and
+                  (device is not None or identity is not None) and
+                  now-last_health_check >= DEVICE_RATE_FRAME_INTERVAL):
+                last_health_check = now
+                if passthrough.is_open:
+                    if not passthrough.check_device(identity):
+                        passthrough.close()
+                        rate_stability.reset()
+                    else:
+                        try:
+                            index, _info, observed_identity, reported_rate = (
+                                query_device_snapshot(
+                                    sd, device, identity, 'output'))
+                        except Exception as exc:
+                            if str(exc) != last_device_error:
+                                passthrough._report(
+                                    f'Audio output unavailable; waiting to '
+                                    f'reconnect: {exc}')
+                                last_device_error = str(exc)
+                            passthrough.close()
+                            rate_stability.reset()
+                        else:
+                            current_rate = passthrough.device_default_rate
+                            if (current_rate is not None and
+                                    abs(reported_rate-current_rate) > 0.5):
+                                if rate_stability.observe(
+                                        observed_identity, reported_rate):
+                                    passthrough.close()
+                                    passthrough.open(index, identity)
+                                    rate_stability.reset()
+                                    reopen = passthrough.is_open
+                            else:
+                                rate_stability.reset()
+                else:
+                    try:
+                        index, _info, observed_identity, reported_rate = (
+                            query_device_snapshot(
+                                sd, device, identity, 'output'))
+                    except Exception as exc:
+                        if str(exc) != last_device_error:
+                            passthrough._report(
+                                f'Audio output unavailable; waiting to '
+                                f'reconnect: {exc}')
+                            last_device_error = str(exc)
+                        rate_stability.reset()
+                    else:
+                        if rate_stability.observe(observed_identity,
+                                                  reported_rate):
+                            passthrough.open(index, identity)
+                            rate_stability.reset()
+                            reopen = passthrough.is_open
+            if reopen:
+                last_device_error = None
+                print(json.dumps({
+                    'status': 'audio_output_reconnected',
+                    'device': (identity or {}).get('name', device),
+                    'sample_rate': passthrough.output_rate,
+                }), flush=True)
+            if passthrough is not None:
+                passthrough.set_muted(options['audio_muted'])
+                audio_stats = passthrough.stats_snapshot()
+                meter['audio_runtime'] = audio_stats
+                current_error = passthrough.error
+                if current_error != last_passthrough_error:
+                    print(json.dumps({
+                        'status': ('receiver_passthrough_unavailable'
+                                   if current_error else
+                                   'receiver_passthrough_restored'),
+                        'message': current_error,
+                        'device': (identity or {}).get('name', device),
+                    }), flush=True)
+                    last_passthrough_error = current_error
+                signature = (
+                    audio_stats['underflow_events'],
+                    tuple(sorted(audio_stats['input_status'].items())),
+                    tuple(sorted(audio_stats['output_status'].items())),
+                    audio_stats['dropped_samples'])
+                has_audio_errors = any((
+                    signature[0], signature[1], signature[2], signature[3]))
+                audio_diagnostics = bool(options.get(
+                    'audio_diagnostics', False))
+                error_changed = (
+                    signature != last_audio_error_signature and
+                    has_audio_errors and
+                    (args.log or args.diagnostics or audio_diagnostics))
+                periodic_report = (
+                    (args.diagnostics or audio_diagnostics) and
+                    now-last_audio_report >= 1.0)
+                if ((not args.no_log or audio_diagnostics) and
+                        (error_changed or periodic_report)):
+                    report_stream = getattr(
+                        args, 'audio_diagnostics_stream', None) or sys.stdout
+                    print({'status': 'audio_runtime', **audio_stats},
+                          file=report_stream, flush=True)
+                    passthrough.reset_report_peaks()
+                    last_audio_report = now
+                last_audio_error_signature = signature
+            refresh_runtime_state(now)
+            stop.wait(DEVICE_RATE_FRAME_INTERVAL)
+
+    audio_threads = [threading.Thread(
+        target=audio_output_monitor, daemon=True,
+        name='v7-receiver-runtime-monitor')]
+    if passthrough is not None:
+        refresh_runtime_state()
+
+    def update_channel_hint():
+        if adaptive_profile is not None:
+            if adaptive_profile.candidate is not None:
+                hint = (f'profile candidate {adaptive_profile.candidate_name} '
+                        f'×{adaptive_profile.streak}/'
+                        f'{adaptive_profile.REQUIRED_STREAK}')
+            elif adaptive_profile.active_mode in adaptive_profile.mono_status_modes:
+                side = ('left' if adaptive_profile.active_side == 0 else
+                        'right' if adaptive_profile.active_side == 1 else 'mono')
+                hint = f'{adaptive_profile.profile_name} on {side}'
+            else:
+                hint = adaptive_profile.profile_name
+        elif auto_mono_side and not auto_mono_locked:
+            selected = 'left' if video_input_index == 0 else 'right'
+            hint = (f'auto probing {selected} for {mono_status_name}; right wins '
+                    'if both legs validate')
+        elif (auto_mono_side and opposite_probe is not None and
+              opposite_probe.streak >= 2):
+            hint = ('V7 pulses on both legs; possible duplicated mono '
+                    f'({mono_status_name} validated on selected leg)')
+        elif auto_mono_side:
+            selected = 'left' if video_input_index == 0 else 'right'
+            hint = f'auto selected {selected} after {mono_status_name} validation'
+        elif opposite_probe is None or opposite_probe.streak < 2:
+            hint = ''
+        elif meter['verified']:
+            hint = ('V7 pulses on both legs; possible duplicated mono '
+                    '(decoder profile verified on selected leg)')
+        else:
+            other = 'left' if opposite_input_index == 0 else 'right'
+            selected = 'left' if video_input_index == 0 else 'right'
+            hint = (f'V7 pulses on {other}; selected {selected} has not '
+                    f'validated {mono_status_name} — check --mono-video-side')
+        if hint != meter['channel_hint']:
+            meter['channel_hint'] = hint
+            if hint and not args.no_log:
+                print({'status': 'mono_channel_hint', 'hint': hint}, flush=True)
+
+    def update_route_from_packets(active_mode=None, active_valid=False,
+                                  now=None, observed_channel_modes=None):
+        now = time.monotonic() if now is None else float(now)
+        channel_modes = [None, None]
+        channel_times = [None, None]
+        channel_confirmed = [False, False]
+        if observed_channel_modes is not None:
+            for index, mode in enumerate(observed_channel_modes):
+                if mode is not None:
+                    channel_modes[index] = mode
+                    channel_times[index] = now
+                    channel_confirmed[index] = True
+        elif active_valid and active_mode is not None:
+            if video_input_index is None:
+                # A stereo decoder's valid coded profile describes the joined
+                # two-leg wire; it does not identify either leg as passthrough.
+                channel_modes = [active_mode, active_mode]
+                channel_times = [now, now]
+            else:
+                channel_modes[video_input_index] = active_mode
+                channel_times[video_input_index] = now
+        if (opposite_probe is not None and opposite_input_index is not None and
+                opposite_probe.status_mode is not None and
+                opposite_probe.last_valid is not None):
+            channel_modes[opposite_input_index] = opposite_probe.status_mode
+            channel_times[opposite_input_index] = opposite_probe.last_valid
+            channel_confirmed[opposite_input_index] = True
+        route = receiver_router.observe(
+            channel_modes[0], channel_modes[1], now=now,
+            left_seen_at=channel_times[0], right_seen_at=channel_times[1],
+            left_confirmed=channel_confirmed[0],
+            right_confirmed=channel_confirmed[1])
+        meter['route_state'] = route['state']
+        meter['video_side'] = route['video_side']
+        meter['audio_side'] = route['audio_side']
+        if auto_mono_side and route['state'] in ('mono-left', 'mono-right'):
+            desired = {'mono-left': 0, 'mono-right': 1}[route['state']]
+            if desired != video_input_index and route['channel_active'][desired]:
+                if switch_to_other_mono_leg():
+                    update_channel_hint()
+        return route
+
+    def switch_to_other_mono_leg():
+        """Try the probed leg while keeping its pulse history for decoding."""
+        nonlocal live_input, video_input_index, opposite_input_index
+        nonlocal decoded_through, direction_streak, auto_mono_switches
+        if not auto_mono_side or opposite_probe is None:
+            return False
+        live_input, opposite_probe.input = opposite_probe.input, live_input
+        video_input_index, opposite_input_index = (
+            opposite_input_index, video_input_index)
+        opposite_probe.reset()
+        auto_mono_switches += 1
+        decoded_through = None
+        pulse_state.tail.reset()
+        pulse_state.last_verified = None
+        direction_streak = DirectionStreak()
+        meter['playback_direction'] = None
+        meter['direction_candidate'] = None
+        meter['direction_streak'] = 0
+        selected = 'left' if video_input_index == 0 else 'right'
+        meter['mode'] = f'mono-video-auto-{selected}'
+        meter['channel_hint'] = (
+            f'probing {selected} for {mono_status_name}; right wins if both validate')
+        return True
+
+    def decode_available():
+        nonlocal latest, latest_grids, auto_gain, previous_values, direction_streak
+        nonlocal decoded_through, auto_mono_locked, profile_generation_seen
+        if input_gap.is_set():
+            # Never stitch samples across a callback drop.  Keep displaying
+            # the last good image while pulse acquisition starts over.
+            input_gap.clear()
+            live_input.reset()
+            receiver_router.reset()
+            if profile_probes is not None:
+                for probe in profile_probes:
+                    probe.reset()
+                adaptive_profile.reset_capture_timeline()
+                slice_state.tail.reset()
+                slice_state.last_verified = None
+            pulse_state.tail.reset()
+            pulse_state.last_verified = None
+            if temporal_fusion is not None:
+                temporal_fusion.reset()
+            direction_streak = DirectionStreak()
+            if opposite_probe is not None:
+                opposite_probe.reset()
+                meter['channel_hint'] = ''
+            meter['playback_direction'] = None
+            meter['direction_candidate'] = None
+            meter['direction_streak'] = 0
+            # Discard stale decoder blocks so video reacquires at the live
+            # edge. Audio is queued independently in the input callback.
+            while True:
+                try:
+                    blocks.get_nowait()
+                except queue.Empty:
+                    break
+            if not args.no_log:
+                print({'status': 'input_gap_reacquire',
+                       'dropped': meter['dropped']}, flush=True)
+            return
+        added = False
+        while True:
+            try:
+                # Blocks are private copies of the callback data; LiveInput
+                # applies the leveler's polarity to the stored audio itself.
+                block_capture_start, block = blocks.get_nowait()
+                if profile_probes is not None:
+                    probe_blocks.append((profile_probes[0].input.total,
+                                         block_capture_start, len(block)))
+                if channel_aligner is not None:
+                    before = channel_aligner.offset
+                    block = channel_aligner.process(block)
+                    meter['channel_offset'] = channel_aligner.offset
+                    if channel_aligner.offset != before and not args.no_log:
+                        print({'status': 'channel_alignment',
+                               'right_lags_left_by_samples': channel_aligner.offset},
+                              flush=True)
+                if (opposite_probe is not None and block.ndim == 2 and
+                        block.shape[1] > opposite_input_index):
+                    opposite_probe.add(
+                        block[:, opposite_input_index:opposite_input_index+1].copy())
+                if profile_probes is not None and block.ndim == 2:
+                    for index, probe in enumerate(profile_probes):
+                        if block.shape[1] > index:
+                            probe.add(block[:, index:index+1].copy())
+                if (video_input_index is not None and block.ndim == 2 and
+                        block.shape[1] > video_input_index):
+                    block = block[:, video_input_index:video_input_index+1]
+                live_input.add(block)
+                added = True
+            except queue.Empty:
+                break
+        if not added:
+            return
+        # take() judges polarity, scans only new audio for frame headers and
+        # trims to the minimal buffer (two frames at the current speed plus a
+        # guard; see animation_modem/v7_live_input.py).  It returns audio
+        # only when a packet is complete (its end marker is in), so decode
+        # cycles follow the wire, not the capture block size, and an idle or
+        # signal-free input never reaches the demodulator.
+        now = time.monotonic()
+        if opposite_probe is not None:
+            opposite_probe.scan(now)
+            update_channel_hint()
+        profile_decisions = ()
+        if profile_probes is not None:
+            profile_events = []
+            for probe in profile_probes:
+                profile_events.extend(probe.scan(now))
+            if passthrough is not None:
+                # Sampler-style gate: a packet heard on the leg being played
+                # as sound is cut from it before it reaches the speakers.
+                # The aligner delays the leading channel before the probes;
+                # the gate works on raw capture positions.
+                offset = (channel_aligner.offset
+                          if channel_aligner is not None else 0)
+                delayed = 0 if offset > 0 else 1 if offset < 0 else None
+                for event in profile_events:
+                    if event.get('packet'):
+                        start = event['position']-(
+                            abs(offset) if event['side_index'] == delayed else 0)
+                        end = start+P.PULSE_FRAME*event['scale']
+                        passthrough.gate_packet(
+                            event['side_index'], capture_position(start),
+                            capture_position(end))
+            adaptive_profile.reset_candidate_if_stale(
+                now, runtime_options.snapshot().get('freewheel_seconds', 2.0))
+            profile_decisions = adaptive_profile.observe_packets(
+                profile_events, now=now)
+            for decision in profile_decisions:
+                if decision['switched']:
+                    receiver_router.reset()
+                    slice_state.tail.reset()
+                    slice_state.last_verified = None
+                receiver_router.observe_profile_decision(decision, now=now)
+                if decision['switched'] and not args.no_log:
+                    print({'status': 'wire_profile_switch',
+                           'profile': adaptive_profile.profile_name,
+                           'video_side': decision['active_side'],
+                           'confirming_packets': adaptive_profile.REQUIRED_STREAK},
+                          flush=True)
+            if adaptive_profile.generation != profile_generation_seen:
+                previous_values = None
+                profile_generation_seen = adaptive_profile.generation
+            meter['wire_profile'] = adaptive_profile.profile_name
+            meter['profile_candidate'] = adaptive_profile.candidate_name
+            meter['profile_streak'] = adaptive_profile.streak
+            update_channel_hint()
+        audio = live_input.take(now)
+        if profile_probes is None:
+            decode_audio = audio
+            decode_input = live_input
+            decision = None
+        else:
+            decision = profile_decisions[-1] if profile_decisions else None
+            decode_input = live_input
+            decode_audio = audio
+            if decision is None or not decision['confirmed']:
+                decode_audio = None
+            elif decision['mode'] in adaptive_profile.mono_status_modes:
+                side = decision['side_index']
+                if side is None and input_channels == 1:
+                    side = 0
+                if side is not None and 0 <= side < len(profile_probes):
+                    decode_input = profile_probes[side].input
+                    decode_audio = profile_probes[side].audio
+            elif decision['mode'] in adaptive_profile.stereo_slice_modes:
+                side = (0 if adaptive_profile.preferred_side == 'left' else
+                        1 if adaptive_profile.preferred_side == 'right' else 1)
+                if side < len(profile_probes):
+                    decision['decode_side'] = side
+                    decode_input = profile_probes[side].input
+                    decode_audio = profile_probes[side].audio
+            if (decode_audio is not None and
+                    not adaptive_profile.claim(decision)):
+                decode_audio = None
+        meter['input_fps'] = decode_input.incoming_fps(now)
+        meter['polarity'] = decode_input.polarity
+        meter['auto_gain'] = decode_input.gain
+        if decode_audio is None:
+            if audio is not None:
+                live_input.decoded()
+            if profile_probes is not None and decision is not None:
+                meter['status'] = 'waiting for three valid profile statuses'
+            update_route_from_packets(now=now)
+            update_channel_hint()
+            return
+        if profile_probes is not None:
+            adaptive_profile.dispatch_mode = decision['mode']
+            adaptive_profile.dispatch_side = decision.get(
+                'decode_side', decision['side_index'])
+        pulse_hits = decode_input.pulse_hits(decode_audio)
+        if not pulse_hits:
+            if profile_probes is None:
+                decode_input.decoded()
+            elif audio is not None:
+                live_input.decoded()
+            return
+        audio_start = decode_input.total-len(decode_audio)
+        # Normally the newest hit; at a reverse-to-forward turn-around, the
+        # last reversed packet (see select_packet_hit).
+        packet_start, packet_scale, _, packet_direction = select_packet_hit(
+            pulse_hits, audio_start, decoded_through)
+        pulse_starts = decode_input.pulse_starts(decode_audio)
+        absolute_arrival = int(round(audio_start+packet_start))
+        decoded_through = absolute_arrival
+        # LiveInput levels the input before it searches for headers (a quiet
+        # capture is otherwise never found); decode with that same gain.
+        auto_gain = decode_input.gain
+        meter['auto_gain'] = auto_gain
+        decode_times.append(time.monotonic())
+        decode_cpu_start = time.thread_time()
+        try:
+            pulse_state.set_playback_direction(packet_direction)
+            options = dict(
+                diagnostics=diagnostics, input_gain=auto_gain, models=models,
+                model_factory=model_factory,
+                force_float32=args.force_float32, state=pulse_state,
+                sample_rate=capture_rate, pilot_timing=args.pilot_timing,
+                tone_equalization=args.tone_equalization)
+            if packet_direction < 0:
+                results, info = P.decode_reverse_packet(
+                    model, decode_audio, packet_start, packet_scale, **options)
+            else:
+                results, info = P.decode_pulse_stream(
+                    model, decode_audio, latest_only=True,
+                    pulse_starts=pulse_starts, **options)
+                for result in results:
+                    result.diag['playback_direction'] = 1
+                info['playback_direction'] = 1
+        except Exception as exc:
+            # Drop the damaged window and let the next retained clock history
+            # reacquire.  A single bad frame must not stop the live receiver.
+            results, info = [], {'words': 0,
+                                 'recovery_error': type(exc).__name__}
+        # Stereo slices: the other input channel carries the other half of
+        # the picture as an independent wire. Decode it too; if the channel
+        # just decoded gave nothing usable, the other one stands in for it.
+        slice_side = slice_other = None
+        if (adaptive_profile is not None and profile_probes is not None and
+                len(profile_probes) > 1 and
+                adaptive_profile.may_use_stereo_slices() and
+                adaptive_profile.dispatch_side in (0, 1) and
+                (adaptive_profile.dispatch_mode in
+                 adaptive_profile.stereo_slice_modes or
+                 any(result.diag.get('slices') for result in results))):
+            slice_side = adaptive_profile.dispatch_side
+            other_probe = profile_probes[1-slice_side]
+            if packet_direction < 0:
+                other_audio, other_origin, other_hits = other_probe.window_for(
+                    audio_start+float(packet_start))
+            else:
+                other_audio = other_probe.audio
+                other_origin = (other_probe.input.total-len(other_audio)
+                                if other_audio is not None else None)
+                other_hits = (other_probe.input.pulse_hits(other_audio)
+                              if other_audio is not None and
+                              other_probe.input is not decode_input else ())
+            if other_audio is not None and other_probe.input is not decode_input:
+                current_source = (results[-1].diag.get('source_index')
+                                  if results else None)
+                other_options = dict(
+                    input_gain=other_probe.input.gain, models=models,
+                    model_factory=model_factory,
+                    force_float32=args.force_float32, state=slice_state,
+                    sample_rate=capture_rate,
+                    pilot_timing=args.pilot_timing,
+                    tone_equalization=args.tone_equalization)
+                try:
+                    if packet_direction < 0:
+                        # Played backwards the other channel is the same
+                        # packet reversed: take its reverse hit nearest this
+                        # one in time and decode it the same way, so reverse
+                        # playback joins both channels as forward does.
+                        other_results = []
+                        backwards = [hit for hit in other_hits if hit[3] < 0]
+                        if backwards:
+                            start, scale, _, _ = min(
+                                backwards, key=lambda hit: abs(
+                                    other_origin+hit[0]-absolute_arrival))
+                            other_results, _ = P.decode_reverse_packet(
+                                model, other_audio, start, scale,
+                                **other_options)
+                        companion_matches = bool(
+                            other_results and
+                            other_results[-1].status in ('received', 'verified') and
+                            other_results[-1].diag.get('slices') and
+                            (current_source is None or
+                             other_results[-1].diag.get('source_index') == current_source))
+                        # Header scanning can miss a pulse on one M/S leg even
+                        # when the synchronous leg measured it. Reuse the
+                        # paired leg's capture-time anchor, while still asking
+                        # decode_reverse_packet to remeasure the pulse and
+                        # independently validate EOF and metadata on this leg.
+                        # A nearby but stale header can decode a different
+                        # packet; only accept the same source index on both legs.
+                        if not companion_matches:
+                            paired_start = audio_start+float(packet_start)-other_origin
+                            if 0 <= paired_start < len(other_audio):
+                                paired_results, _ = P.decode_reverse_packet(
+                                    model, other_audio, paired_start,
+                                    packet_scale, **other_options)
+                                if (paired_results and
+                                        paired_results[-1].status in ('received', 'verified') and
+                                        paired_results[-1].diag.get('slices') and
+                                        (current_source is None or
+                                         paired_results[-1].diag.get('source_index') == current_source)):
+                                    other_results = paired_results
+                    else:
+                        other_results, _ = P.decode_pulse_stream(
+                            model, other_audio, latest_only=True,
+                            pulse_starts=other_probe.input.pulse_starts(
+                                other_audio),
+                            **other_options)
+                except Exception:
+                    other_results = []
+                if (other_results and other_results[-1].diag.get('slices') and
+                        (packet_direction >= 0 or current_source is None or
+                         other_results[-1].diag.get('source_index') == current_source)):
+                    slice_other = other_results[-1]
+                    slice_other.diag['playback_direction'] = (
+                        -1 if packet_direction < 0 else 1)
+
+            def usable(candidate):
+                return candidate is not None and (
+                    candidate.status in ('received', 'verified') or
+                    candidate.diag.get('displayable'))
+
+            if slice_other is not None and usable(slice_other) and not (
+                    results and usable(results[-1])):
+                results, slice_other = [slice_other], None
+                slice_side = 1-slice_side
+        decode_cpu_seconds = time.thread_time()-decode_cpu_start
+        decode_cpu_times.append((time.monotonic(), decode_cpu_seconds))
+        meter['decode_cpu_ms'] = decode_cpu_seconds*1000.0
+        if profile_probes is None:
+            decode_input.decoded()
+        else:
+            if audio is not None:
+                live_input.decoded()
+            if decode_input is not live_input:
+                decode_input.decoded()
+        if auto_mono_side:
+            modes = [_mono_packet_status_mode(result) for result in results]
+            expected_mode = getattr(mono_wire, 'status_mode', None)
+            if expected_mode in modes:
+                auto_mono_locked = True
+                update_channel_hint()
+        if results:
+            result = results[-1]
+            independently_validated = bool(
+                result.diag.get('metadata_valid') and
+                not result.diag.get('metadata_provisional') and
+                (packet_direction < 0 or
+                 result.diag.get('eof_marker') is not None))
+            result_mode = _mono_packet_status_mode(result)
+            packet_valid = bool(
+                independently_validated and
+                result.status in ('received', 'verified'))
+            if adaptive_profile is None:
+                update_route_from_packets(
+                    result_mode, active_valid=packet_valid,
+                    now=time.monotonic())
+            elif packet_valid:
+                # Successful picture metadata is also sync evidence. Probe
+                # scheduling must not expire audio while pictures decode.
+                receiver_router.last_packet = time.monotonic()
+            confirmed_direction, direction_switched = direction_streak.observe(
+                absolute_arrival, packet_direction, independently_validated)
+            meter['playback_direction'] = confirmed_direction
+            meter['direction_candidate'] = direction_streak.candidate
+            meter['direction_streak'] = direction_streak.streak
+            if direction_switched and not args.no_log:
+                print({'status': 'playback_direction_switch',
+                       'playback_direction': confirmed_direction,
+                       'capture_position': absolute_arrival}, flush=True)
+            # Each call is gated by newly arrived audio.  The short rolling
+            # history intentionally restarts the prototype's local counter,
+            # so comparing result.counter here would suppress valid frames.
+            meter['decoded'] += 1
+            displayable = bool(result.diag.get('displayable', False))
+            meter['status'] = ('degraded' if displayable and result.status == 'lost'
+                               else result.status)
+            meter['counter'] = meter['decoded']
+            if result.diag.get('source_index') is not None:
+                meter['source_index'] = int(result.diag['source_index'])
+            meter['pulse'] = result.diag.get('pulse_confidence')
+            meter['timing_delta'] = result.diag.get('timing_delta_ppm')
+            speed = result.diag.get('playback_speed')
+            incoming_fps = decode_input.incoming_fps(time.monotonic())
+            meter['playback_speed'] = (
+                incoming_fps/P.PULSE_FPS if incoming_fps > 0 else speed)
+            meter['quality'] = (
+                f'head {result.diag.get("head_confidence", 0):.2f}/'
+                f'{result.diag.get("head_coverage", 0):.2f}')
+            loop = result.diag.get('loop')
+            if loop is not None and loop.frames > 0:
+                meter['max_index'] = loop.frames - 1
+                meter['loop'] = loop
+            candidate = result.diag.get('aspect_code', meter['aspect'])
+            if result.diag.get('metadata_valid'):
+                meter['aspect_screen'] = bool(
+                    result.diag.get('aspect_screen', False))
+            if (result.status in ('received', 'verified') and
+                    (result.diag.get('pulse_confidence') or 0) >= .45):
+                if candidate == meter['aspect']:
+                    meter['aspect_streak'] = 0
+                elif candidate == meter['aspect_candidate']:
+                    meter['aspect_streak'] += 1
+                else:
+                    meter['aspect_candidate'] = candidate
+                    meter['aspect_streak'] = 1
+                if meter['aspect_streak'] >= 3:
+                    meter['aspect'] = meter['aspect_candidate']
+                    meter['aspect_streak'] = 0
+            meter['decode_ms'] = (info.get('diagnostics') or {}).get(
+                'last_elapsed_ms')
+            if temporal_fusion is not None:
+                # Only accepted packets are averaged; a damaged or held
+                # packet is shown as decoded and starts the average again.
+                if result.status in ('received', 'verified'):
+                    result.diag['temporal_fusion'] = temporal_fusion
+                else:
+                    temporal_fusion.reset()
+            if result.status in ('received', 'verified') or displayable:
+                if adaptive_profile is not None and result.diag.get('slices'):
+                    base = models.get(result.diag.get('encoding_type'), model)
+                    halves = [adaptive_profile.slice_half(
+                        base, result, slice_side)]
+                    if (slice_other is not None and
+                            slice_other.diag.get('source_index') ==
+                            result.diag.get('source_index')):
+                        halves.append(adaptive_profile.slice_half(
+                            models.get(slice_other.diag.get('encoding_type'),
+                                       model), slice_other, 1-slice_side))
+                    values = adaptive_profile.slice_values(
+                        [half for half in halves if half is not None], result)
+                    meter['slices_shown'] = result.diag.get('slices_shown')
+                elif adaptive_profile is not None:
+                    values = adaptive_profile.values(
+                        models.get(result.diag.get('encoding_type'), model),
+                        result)
+                elif fold is not None:
+                    values = fold.values(
+                        models.get(result.diag.get('encoding_type'), model), result,
+                        metadata_confirmed=_coded_mode_matches_fold(result, fold))
+                elif mono_wire is not None:
+                    values = mono_wire.values(
+                        models.get(result.diag.get('encoding_type'), model), result)
+                else:
+                    values = P.values_from(model, result.coeffs)
+                if values is not None:
+                    result.diag.pop('temporal_fusion', None)
+                    if 'fusion_gain' in result.diag:
+                        meter['fusion_gain'] = result.diag['fusion_gain']
+                    if args.mono_compatible:
+                        noise = result.diag.get('noise') or [0.0]
+                        values = stabilize_chroma(
+                            values, previous_values,
+                            result.diag.get('display_grids', model.coder.grids),
+                            pilot_error=max(noise),
+                            coverage=result.diag.get('head_coverage'))
+                    latest = values
+                    latest_grids = result.diag.get('display_grids', model.coder.grids)
+                    if args.mono_compatible:
+                        previous_values = latest.copy()
+                    display_frames.publish(
+                        latest, latest_grids, meter['aspect'],
+                        pixel_shapes=result.diag.get('pixel_shapes'),
+                        luma_room=result.diag.get('luma_room'))
+                    shown_times.append(time.monotonic())
+                    meter['shown_index'] = result.diag.get('source_index')
+                    meter['shown_direction'] = result.diag.get('direction')
+                    # Lag: where the live loop is now (this machine's clock and
+                    # the received N, p) against the index just put on screen.
+                    if (loop is not None and loop.clocked and
+                            result.diag.get('source_index') is not None):
+                        # The recent median resolves ping-pong turns (see
+                        # loop_lag_ticks); the mean of recent readings gives
+                        # sub-tick resolution, since pictures fall at varying
+                        # points within a 33 ms tick.
+                        lag_ticks.append(P.loop_lag_ticks(
+                            result.diag['source_index'],
+                            P.loop_ticks(time.time_ns()), loop,
+                            expected=round(float(np.median(lag_ticks)))
+                            if lag_ticks else 0,
+                            direction=result.diag.get('direction')))
+                        meter['lag_ms'] = (float(np.mean(lag_ticks)) *
+                                           1000/P.LOOP_IPS)
+            if result.status in ('received', 'verified'):
+                meter['verified'] += 1
+                update_channel_hint()
+            if result.status == 'lost' and not displayable:
+                meter['lost'] += 1
+            report = {'counter': meter['decoded'], 'wire_counter': result.counter,
+                      'source_index': result.diag.get('source_index'),
+                      'status': meter['status'], 'displayable': displayable,
+                      'pulse_frames': info.get('pulse_frames'),
+                      'encoding': result.diag.get('encoding_name'),
+                      'tail_slice': result.diag.get('tail_slice'),
+                      'max_index': meter['max_index'],
+                      'lag_ms': meter['lag_ms'],
+                      'ideal_index': live_loop_position()[0],
+                      'direction': result.diag.get('direction'),
+                      'source_direction': result.diag.get('direction'),
+                      'playback_direction': packet_direction,
+                      'confirmed_playback_direction': confirmed_direction,
+                      'input_gain': round(meter['auto_gain'], 3),
+                      'right_polarity': meter['polarity'],
+                      'incoming_fps': round(meter['input_fps'], 3),
+                      'decode_cycles_per_s': round(windowed_rate(decode_times, time.monotonic()), 3),
+                      'head_confidence': result.diag.get('head_confidence'),
+                      'head_coverage': result.diag.get('head_coverage'),
+                      'timing_delta_ppm': result.diag.get('timing_delta_ppm'),
+                      'playback_speed': meter['playback_speed'],
+                      'capture_rate_hz': capture_rate,
+                      'noise': result.diag.get('noise'),
+                      'stereo_erased_symbols': result.diag.get(
+                          'stereo_erased_symbols'),
+                      'metadata_valid': result.diag.get('metadata_valid'),
+                      'skipped_frames': len(info.get('skipped_frames', [])),
+                      'recovered': info.get('recovered', False)}
+            if args.diagnostics:
+                report['diagnostics'] = info.get('diagnostics')
+            RECEIVER_GUI_STATUS.update(latest_packet=report,
+                                       decode_info=info)
+            if (args.log or args.diagnostics) and not args.no_log:
+                print(report, flush=True)
+            if args.save_dir and latest is not None:
+                args.save_dir.mkdir(parents=True, exist_ok=True)
+                values_image(latest, latest_grids).save(
+                    args.save_dir/f'v7_{meter["decoded"]:08d}.png')
+        else:
+            confirmed_direction, _ = direction_streak.observe(
+                absolute_arrival, packet_direction, False)
+            meter['playback_direction'] = confirmed_direction
+            meter['direction_candidate'] = direction_streak.candidate
+            meter['direction_streak'] = direction_streak.streak
+            if args.diagnostics and not args.no_log:
+                print({'status': 'reacquiring', **info}, flush=True)
+
+    if P.CANCEL:
+        # Compile the distortion-cancelling kernels before audio starts, so
+        # the first packets are not lost to compilation (fixes list item 28).
+        _warm = P.load_model(.1, 'box')
+        _z = np.zeros((P.F, P.N//2+1, 2), complex)
+        _h = np.zeros((P.F, P.N//2+1, 2, 2), complex)
+        _h[..., 0, 0] = _h[..., 0, 1] = _h[..., 1, 0] = 2**-.5
+        _h[..., 1, 1] = -2**-.5
+        P._cancel(_warm, _z+1e-3, _h, None)
+        P._CANCEL_STATE['votes'] = None
+    if file_input:
+        from tools.v7_wav_io import wav_blocks
+        try:
+            for block in wav_blocks(file_input):
+                if user_stop is not None and user_stop.is_set():
+                    break
+                callback(block, len(block), None, None)
+                decode_available()
+            # EOF is framing: allow the last packet to finish acquisition.
+            padding = np.zeros((1024, device_info['max_input_channels']), np.float32)
+            for _ in range(4):
+                callback(padding, len(padding), None, None)
+                decode_available()
+            if not args.no_log:
+                print(json.dumps({'status': 'wav_decoded', 'path': str(file_input),
+                                  'decoded': meter['decoded'],
+                                  'verified': meter['verified'],
+                                  'lost': meter['lost']}), flush=True)
+            return dict(meter)
+        finally:
+            if passthrough is not None:
+                passthrough.close()
+
+    try:
+        stream = sd.InputStream(samplerate=capture_rate, channels=max(selected_channels)+1,
+                                dtype='float32',
+                                device=args.device, blocksize=1024,
+                                callback=callback)
+        input_stream[0] = stream
+        if passthrough is not None:
+            passthrough.set_input_rate(float(stream.samplerate))
+        stream.start()
+        if not args.no_log:
+            print(f'V7 receive ready: input={args.device!r} '
+                  f'rate={float(stream.samplerate):g}Hz (device {float(device_info["default_samplerate"]):g}Hz) '
+                  f'channels={input_channels} ui={"headless" if args.headless else "window"} '
+                  f'bootstrap=nearest', flush=True)
+    except Exception:
+        stop.set()
+        raise
+
+    def decode_worker():
+        while True:
+            input_ready.wait()
+            input_ready.clear()
+            if stop.is_set():
+                break
+            try:
+                decode_available()
+            except Exception as exc:
+                # A damaged window must not terminate either the decoder or
+                # the UI.  The next retained pulse history can reacquire.
+                meter['status'] = f'decoder error: {type(exc).__name__}'
+                if not args.no_log:
+                    print({'status': 'decoder_exception',
+                           'error': repr(exc)}, flush=True)
+
+    decoder_thread = threading.Thread(target=decode_worker, daemon=True)
+    audio_threads.append(threading.Thread(
+        target=monitor_input_device, daemon=True,
+        name='v7-receiver-input-monitor'))
+
+    def watch_user_stop():
+        while not stop.wait(.05):
+            if user_stop is not None and user_stop.is_set():
+                input_ready.set()
+                stop.set()
+                return
+
+    audio_threads.append(threading.Thread(
+        target=watch_user_stop, daemon=True,
+        name='v7-receiver-stop-monitor'))
+    for thread in audio_threads:
+        thread.start()
+    decoder_thread.start()
+
+    try:
+        if args.headless:
+            while not stop.wait(.1):
+                pass
+        else:
+            from tools.v7_gl_viewer import run as run_gl_viewer
+            run_gl_viewer(
+                display_frames.snapshot, lambda: meter,
+                P.V7_ASPECT_RATIOS, fullscreen=args.fullscreen,
+                show_diagnostics=args.show_diagnostics,
+                diagnostics_source=display_diagnostics,
+                profile_cpu=args.profile_ui,
+                image_only=getattr(args, 'image_only', False),
+                stop_event=stop)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        stop.set()
+        input_ready.set()
+        decoder_thread.join(timeout=2)
+        for thread in audio_threads:
+            thread.join(timeout=2)
+        if passthrough is not None:
+            passthrough.close()
+        stream = input_stream[0]
+        if stream is not None:
+            try:
+                stream.stop()
+            except Exception:
+                pass
+            try:
+                stream.close()
+            except Exception:
+                pass
+    return recovery[0]
+
+
+ASPECT_LAYOUT_CHOICES = ('auto', '1:1', '4:3', '3:2', '16:9', '3:4', '2:3',
+                         '9:16')
+# Pixel encode on the aspect profile: 'robust' fits the ordinary slots,
+# 'large' adds fold guests (exact on clean links only).
+DEFAULT_PIXEL_GRID = 'robust'
+
+
+def _add_aspect_arguments(sub):
+    sub.add_argument(
+        '--aspect-layout', choices=ASPECT_LAYOUT_CHOICES, default='auto',
+        help=('aspect-fold-500 and aspect-mono-500: coefficient layout aspect '
+              '(default auto: the source aspect sent in each packet). Sender '
+              'and receiver must agree.'))
+
+
+def parser():
+    ap = argparse.ArgumentParser(description=__doc__,
+                                  formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = ap.add_subparsers(dest='mode', required=True)
+    send = sub.add_parser('send', help='capture camera/screen and transmit V7')
+    send.add_argument('--source', choices=('local', 'camera', 'screen', 'video',
+                                           'test', 'mouse-follow'),
+                      help='capture source; omitted interactively prompts for one')
+    from animation_modem.audio_common import pair
+    send.add_argument('--device', type=_device_arg,
+                       help='explicit sounddevice output, e.g. BlackHole 2ch')
+    send.add_argument('--channels', type=pair, default=(0, 1),
+                      help='1-based output pair, e.g. 3,4 (default 1,2)')
+    send.add_argument('--write', type=Path,
+                      help='export a video/test source to WAV without an audio device')
+    send.add_argument('--record', type=Path,
+                      help='record logical modem samples while sending live')
+    send.add_argument('--frames', type=int, default=0,
+                      help='exact packet limit; 0 means unlimited')
+    send.add_argument('--source-passes', type=int, default=0,
+                      help='video passes before stopping; 0 loops indefinitely')
+    send.add_argument('--no-loop', dest='source_passes', action='store_const', const=1,
+                      help='play the video once and stop')
+    send.add_argument('--rotation', '--rotate', type=int, choices=(0, 90, 180, 270),
+                      default=0, help='clockwise source rotation')
+    send.add_argument('--mirror', action='store_true', help='mirror source horizontally')
+    send.add_argument('--device-name', default=None,
+                      help='expected name of a numeric --device; when the '
+                           'index names another device, the device with this '
+                           'name is used instead')
+    send.add_argument('--device-hostapi', default=None,
+                      help='audio backend of --device-name, e.g. Core Audio')
+    send.add_argument('--fixture', type=Path, default=DEFAULT_FIXTURE,
+                      help=argparse.SUPPRESS)
+    send.add_argument('--encode-filter', choices=('nearest', 'box'),
+                      default=None,
+                      help=argparse.SUPPRESS)
+    send.add_argument(
+        '--luma-adjust', action=argparse.BooleanOptionalAction, default=None,
+        help=('on by default with Direct DCT: re-fit luma so each pixel keeps the source '
+              'brightness with the chroma the receiver will have (keeps '
+              'coloured edges from darkening or ringing; sender only)'))
+    send.add_argument(
+        '--pixel-encode', action='store_true',
+        help=('picture encode of its own (instead of Direct DCT): send '
+              'the picture area-averaged to the '
+              "wire's own pixel grid, exactly (hard pixels; pixel art at a "
+              'whole multiple of the grid passes unchanged). On '
+              'aspect-fold-500 the grid follows the picture shape (see '
+              '--pixel-grid); on fold-500 it is 40x48. Use the receiver\'s '
+              'Pixel display. Turns off the DCT enhancements and luma '
+              'adjustment.'))
+    send.add_argument(
+        '--pixel-grid', choices=('robust', 'large'), default=DEFAULT_PIXEL_GRID,
+        help=('with --pixel-encode on aspect-fold-500: robust (default) fits '
+              'the ordinary slots, e.g. 52x36 for 3:2, 58x32 for 16:9, 50x38 '
+              'for 4:3, 42x42 square; large is 60x40, 64x36, 56x42, 48x48, '
+              'whose finest detail rides as fold guests and is exact only on '
+              'a clean link. The receiver follows either.'))
+    send.add_argument(
+        '--pixel-detail', choices=('average', 'soft', 'cut', 'crisp'),
+        default='average',
+        help=('with --pixel-encode: how the frame is brought down to the '
+              'pixel grid. average: area average of the pixels (exact for '
+              'block art). soft / cut / crisp downscale inside the transform '
+              '(the source\'s own leading coefficients, weighted from an '
+              'area average\'s roll-off to its inverse): more detail per '
+              'pixel, with a faint ringing mesh next to hard edges.'))
+    send.add_argument(
+        '--luma-adjust-linear', action='store_true',
+        help=('with --luma-adjust: aim at the linear light of every source '
+              'pixel instead of the light of the block means (fine patterns '
+              'keep their brightness, thin dark outlines get lighter; about '
+              '2 ms more per 1080p frame)'))
+    send.add_argument(
+        '--clip-aware-encode', action='store_true',
+        help=('re-fit the sent luma coefficients so ringing falls into the '
+              'receiver\'s black/white clip (sender only; folded profiles)'))
+    source_path = send.add_mutually_exclusive_group()
+    source_path.add_argument('--dct-encode',
+                             action=argparse.BooleanOptionalAction,
+                             default=None,
+                             help='analyze the unprepared RGB source in the '
+                                  'V7 DCT domain (the default; '
+                                  '--no-dct-encode resizes first instead)')
+    source_path.add_argument(
+        '--perceptual-resize',
+        choices=('off', 'linear-box', 'gamma-detail', 'linear-detail'),
+        default='off', help=argparse.SUPPRESS)
+    send.add_argument('--perceptual-detail-strength', type=float, default=0.25,
+                      help=argparse.SUPPRESS)
+    send.add_argument('--dct-sharpen', choices=('off', 'taper', 'usm'),
+                      default=None, help=argparse.SUPPRESS)
+    send.add_argument('--dct-sharpen-strength', type=float, default=None,
+                      help=argparse.SUPPRESS)
+    send.add_argument('--dct-clarity', type=float, default=None,
+                      help=argparse.SUPPRESS)
+    send.add_argument('--dct-chroma-gain', type=float, default=None,
+                      help=argparse.SUPPRESS)
+    send.add_argument(
+        '--linear-preshrink', action=argparse.BooleanOptionalAction,
+        default=None,
+        help=('with --dct-encode: average the pre-shrink in linear light '
+              '(default, tools/v7_send_defaults.py); --no-linear-preshrink '
+              'averages the gamma-coded values'))
+    send.add_argument('--dct-preshrink', type=float, default=None,
+                      help=('with --dct-encode: the block-average size before '
+                            'the transform, as a multiple of the luma grid '
+                            '(1.75 to 8; default 4). Live in the GUI.'))
+    send.add_argument(
+        '--dct-kernel', default=None, metavar='NAME',
+        help=('with --dct-encode: the DCT kernel, a file in dct_kernels/ '
+              '(or another --dct-kernel-dir); "reference" is the shipped '
+              'encode. Also adjustable while sending from the GUI.'))
+    send.add_argument(
+        '--dct-kernel-param', action='append', default=None,
+        metavar='NAME=VALUE',
+        help='a parameter of the chosen kernel (repeatable)')
+    send.add_argument(
+        '--dct-kernel-dir', action='append', default=None, metavar='DIR',
+        help=('another folder of kernel files (repeatable; also '
+              '$V7_KERNEL_DIR, path-separated)'))
+    send.add_argument('--dct-aggregation', choices=(
+        'off', 'area-box', 'weighted-tent', 'weighted-cosine',
+        'weighted-gaussian'), default=None, help=argparse.SUPPRESS)
+    send.add_argument('--dct-band-profile', choices=('off', 'mid-luma',
+                      'perceptual-color'), default=None,
+                      help=argparse.SUPPRESS)
+    send.add_argument('--brightness', type=float, default=None,
+                      help='source brightness multiplier (default: 1.0 for folded profiles)')
+    send.add_argument('--gamma', type=float, default=1.0,
+                      help='source gamma; >1 lifts midtones (default: 1.0)')
+    send.add_argument('--mono-video-side', choices=('left', 'right'),
+                      default='right',
+                      help=('all-fresh mono video: send on this output leg and '
+                            'leave the other leg for audio (default: right)'))
+    send.add_argument('--source-audio', choices=('source', 'device', 'off'),
+                      default=None,
+                      help=('mono-video channel audio: embedded video soundtrack '
+                            '(mono default), selected input device, or off'))
+    send.add_argument('--source-audio-device', type=_device_arg,
+                      help='explicit input device for --source-audio device')
+    send.add_argument('--source-audio-input-side',
+                      choices=('mix', 'left', 'right'), default='mix',
+                      help='downmix both input legs or choose one (default: mix)')
+    send.add_argument('--source-audio-gain', type=float, default=1.0,
+                      help='independent source-audio gain, 0..4 (default: 1)')
+    send.add_argument('--source-audio-delay-ms', type=float, default=0.0,
+                      help='additional audio delay beyond one emitted video packet')
+    # These wire essentials remain explicit internal defaults, not user-facing
+    # toggles. The GUI and CLI always emit the current reference/pilot/EOF wire.
+    send.set_defaults(mono_sum=False, pilot_tones=True)
+    _add_aspect_arguments(send)
+    send_profile = send.add_mutually_exclusive_group()
+    send_profile.add_argument(
+        '--profile', choices=selectable_send_profiles(),
+        default=None,
+        help=('wire profile (default: aspect-fold-500): aspect-fold-500 (stereo), aspect-mono-500 (mono '
+              'video), or the nested fold under test against each: '
+              'stereo-nested and aspect-mono-nested. The receiver reads all '
+              'of them without a setting.'))
+    send_profile.add_argument('--experimental-mono-fold', action='store_true',
+                              help=argparse.SUPPRESS)
+    send_profile.add_argument('--experimental-fold', type=int, default=None,
+                               choices=(0, 500), metavar='M',
+                               help=argparse.SUPPRESS)
+    send.add_argument('--camera', type=int, default=0)
+    send.add_argument('--video-source', '--video', dest='video_source',
+                      help='local video file or FFmpeg-supported live stream URL')
+    send.add_argument('--video-live', action='store_true',
+                      help='treat an HTTP(S) source as live instead of looping it')
+    send.add_argument('--video-start', type=float, default=0.0,
+                      metavar='SECONDS',
+                      help='start a video file at this position (default: 0); '
+                           'it still repeats from the beginning')
+    send.add_argument('--image-preview-port', type=int, metavar='PORT',
+                      help=argparse.SUPPRESS)
+    send.add_argument('--display', type=int)
+    send.add_argument('--ffmpeg-input')
+    send.add_argument('--screen-backend', choices=('mss', 'ffmpeg'), default='mss',
+                      help='screen capture backend; mss avoids an FFmpeg child')
+    send.add_argument('--region')
+    send.add_argument('--capture-width', type=int, default=160,
+                      help=('FFmpeg screen/video width and initial mouse-follow '
+                            'crop width; normal camera mode uses 80x96; '
+                            '--dct-encode preserves captured dimensions'))
+    send.add_argument('--capture-filter',
+                      choices=('neighbor', 'area', 'bilinear', 'bicubic',
+                               'lanczos'),
+                      default=None,
+                       help=argparse.SUPPRESS)
+    send.add_argument('--capture-fps', '--fps', dest='capture_fps', type=float)
+    send.add_argument('--batch-frames', type=int, default=1,
+                      help=argparse.SUPPRESS)
+    send.add_argument('--speed', type=float, default=1.0,
+                       help='pitch-shifted playback speed, 0.25..4.0; speeds '
+                       'above the DAC Nyquist limit lose high-frequency detail')
+    send.add_argument('--rate', type=int,
+                      help='request an output sample rate (default: the DAC '
+                           'native rate; the V7 wire remains 48 kHz reference geometry)')
+    send.add_argument('--seconds', type=float, default=0,
+                      help='0 means until Ctrl-C')
+    send.add_argument('--no-log', dest='no_log', action='store_true',
+                      default=False, help=argparse.SUPPRESS)
+    send.add_argument('--gui-control', action='store_true',
+                      help=argparse.SUPPRESS)
+    send.add_argument('--log', dest='log', action='store_true',
+                      default=False,
+                      help='enable routine status output')
+    recv = sub.add_parser('receive', help='receive V7 audio and display it')
+    recv.add_argument('--device', type=_device_arg,
+                       help='explicit sounddevice input, e.g. BlackHole 2ch')
+    recv.add_argument('--channels', type=pair, default=None,
+                      help='1-based input pair (default first pair, or mono input)')
+    recv.add_argument('--read', type=Path,
+                      help='decode a recorded WAV without opening an audio device')
+    recv.add_argument('--audio-output-device', type=_device_arg,
+                      help='explicit output device for the non-video input leg')
+    recv.add_argument('--audio-muted', action='store_true',
+                      help='mute receiver audio passthrough')
+    recv.add_argument('--audio-volume', type=_audio_volume_arg, default=1.0,
+                      help='passthrough volume from 0 to 1 (default: 1.0, VLC unity gain)')
+    recv.add_argument('--freewheel-seconds', type=float, default=2.0,
+                      help='time without valid video packets before sync-loss status')
+    recv.add_argument('--no-sync-warning', dest='show_sync_warning',
+                      action='store_false', default=True,
+                      help='show the optional on-screen sync-loss warning')
+    recv.add_argument('--direction', choices=('auto', 'forward', 'reverse'),
+                      default='auto',
+                      help='pulse direction detection (default: auto)')
+    recv.add_argument('--fixture', type=Path, default=DEFAULT_FIXTURE)
+    recv.add_argument('--headless', action='store_true')
+    recv.add_argument('--fullscreen', action='store_true',
+                      help='start fullscreen; F toggles, Escape exits fullscreen')
+    recv.add_argument('--image-only', action='store_true',
+                      help='show only the decoded picture fullscreen; Esc exits')
+    recv.add_argument('--no-diagnostics', dest='show_diagnostics',
+                      action='store_false',
+                      help='hide the diagnostic overlay (I toggles it)')
+    recv.add_argument('--profile-ui', action='store_true',
+                      help='report viewer-thread and total process CPU every 5 s')
+    recv.add_argument('--mono-compatible', action='store_true',
+                       help='stabilize weak chroma for mono/one-leg playback')
+    recv.add_argument('--mono-video-side', choices=('auto', 'left', 'right'),
+                      default='auto',
+                      help=('mono profiles: the channel that carries the '
+                            'picture; the other is played as sound. auto '
+                            '(default) finds it from the packets, preferring '
+                            'right if both work'))
+    _add_aspect_arguments(recv)
+    recv.set_defaults(show_diagnostics=True)
+    recv.add_argument('--no-log', dest='no_log', action='store_true',
+                      default=False, help=argparse.SUPPRESS)
+    recv.add_argument('--log', dest='log', action='store_true',
+                      default=False,
+                      help='enable routine status output')
+    recv.add_argument('--save-dir', type=Path)
+    recv.add_argument('--diagnostics', action='store_true',
+                      help='print decoder stage timing and counters')
+    recv.add_argument('--decode-batch', type=int, default=1,
+                      help='new frame headers required before each decode (default: 1)')
+    recv.add_argument('--decode-history', type=int, default=1,
+                      help='frames kept after a decode; the buffer holds this '
+                           'plus one frame and a small guard (default: 1)')
+    recv.add_argument('--no-tail-memory', action='store_true',
+                      help='do not reuse tail coefficients from earlier packets')
+    recv.add_argument('--nested-smooth', type=int, default=None, metavar='PASSES',
+                      help='nested-fold pictures: passes of decoding inside '
+                           'the bounds, a work-around that smooths stair '
+                           'error (default 0: off, pictures are shown as '
+                           'decoded; 16 was the earlier default)')
+    recv.add_argument('--temporal-fusion', choices=('off', 'held'),
+                      default='off',
+                      help='average successive packets of a held picture '
+                           '(stills, pause, slow scenes) so noise stops '
+                           'softening it; a moving picture is shown as '
+                           'decoded (default: off)')
+    recv.add_argument('--force-float32', action='store_true',
+                       help='use the experimental float32/complex64 decode path')
+    recv.add_argument('--pilot-timing',
+                       choices=('baseline', 'tone-seeded', 'tone-joint',
+                                'tone-replaced'),
+                       default='tone-seeded',
+                       help='pilot timing fit (default: tone-seeded)')
+    recv.add_argument('--tone-equalization',
+                      choices=('off', 'm-reference'), default='off',
+                      help='use pilot tones as an opt-in M-path gain reference')
+    recv_profile = recv.add_mutually_exclusive_group()
+    recv_profile.add_argument('--experimental-mono-fold', action='store_true',
+                              help='receive the all-fresh mono video layout with a 500-class fold')
+    recv_profile.add_argument('--experimental-mono-colour', action='store_true',
+                              help='receive the mono colour-weighted 500-class fold (MONO_1000)')
+    recv_profile.add_argument('--experimental-fold', type=int, default=None,
+                               choices=(0, 500), metavar='M',
+                               help='unfold M luma slots using coded-pilot status (default: 500); '
+                                    '0 selects no fold. Use the sender\'s profile.')
+    receiver_tuners = {
+        'direction', 'fixture', 'profile_ui', 'mono_compatible',
+        'mono_video_side', 'decode_batch', 'decode_history',
+        'no_tail_memory', 'force_float32', 'pilot_timing',
+        'tone_equalization',
+        'experimental_mono_fold',
+        'experimental_mono_colour',
+        'experimental_fold',
+    }
+    for action in recv._actions:
+        if action.dest in receiver_tuners:
+            action.help = argparse.SUPPRESS
+    sub.add_parser('gui', help='open the receiver configuration and information GUI')
+    return ap
+
+
+if __name__ == '__main__':
+    ap = parser()
+    args = ap.parse_args()
+    if args.mode == 'send':
+        try:
+            _resolve_send_source(args)
+        except ValueError as exc:
+            ap.error(str(exc))
+        if args.rate is not None and args.rate <= 0:
+            ap.error('--rate must be positive')
+        if (not np.isfinite(args.speed) or
+                not P.MIN_PLAYBACK_SPEED <= args.speed <= P.MAX_PLAYBACK_SPEED):
+            ap.error(f'--speed must be between {P.MIN_PLAYBACK_SPEED:g} and '
+                     f'{P.MAX_PLAYBACK_SPEED:g}')
+        try:
+            run_send(args)
+        except Exception as exc:
+            ap.exit(1, f'V7 send failed: {exc}\n')
+    elif args.mode == 'gui':
+        from tools.v7_receiver_gui import main as gui_main
+        gui_main(sys.modules[__name__])
+    else:
+        run_receive(args)

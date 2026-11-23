@@ -1,0 +1,374 @@
+{
+ "clean-96k": {
+  "aspect-fold-500": {
+   "score": -14.682631671882941,
+   "shown": 4,
+   "sent": 4
+  },
+  "stereo nested": {
+   "score": -30.970122549107344,
+   "shown": 4,
+   "sent": 4
+  }
+ },
+ "lowpass-18k": {
+  "aspect-fold-500": {
+   "score": -14.621049497105108,
+   "shown": 4,
+   "sent": 4
+  },
+  "stereo nested": {
+   "score": -30.954815987126334,
+   "shown": 4,
+   "sent": 4
+  }
+ },
+ "lowpass-15k": {
+  "aspect-fold-500": {
+   "score": -14.59251239064324,
+   "shown": 4,
+   "sent": 4
+  },
+  "stereo nested": {
+   "score": -31.00809489553038,
+   "shown": 4,
+   "sent": 4
+  }
+ },
+ "lowpass-12k": {
+  "aspect-fold-500": {
+   "score": -14.795908241544627,
+   "shown": 4,
+   "sent": 4
+  },
+  "stereo nested": {
+   "score": -31.197092049603363,
+   "shown": 4,
+   "sent": 4
+  }
+ },
+ "lowpass-10k": {
+  "aspect-fold-500": {
+   "score": -15.546462984315635,
+   "shown": 4,
+   "sent": 4
+  },
+  "stereo nested": {
+   "score": -31.035419434186412,
+   "shown": 4,
+   "sent": 4
+  }
+ },
+ "hiss-45": {
+  "aspect-fold-500": {
+   "score": -24.088261857337287,
+   "shown": 4,
+   "sent": 4
+  },
+  "stereo nested": {
+   "score": -40.74666717034911,
+   "shown": 4,
+   "sent": 4
+  }
+ },
+ "hiss-40": {
+  "aspect-fold-500": {
+   "score": -25.3749282097538,
+   "shown": 4,
+   "sent": 4
+  },
+  "stereo nested": {
+   "score": -49.409496243725435,
+   "shown": 4,
+   "sent": 4
+  }
+ },
+ "hiss-35": {
+  "aspect-fold-500": {
+   "score": -32.635920252431205,
+   "shown": 4,
+   "sent": 4
+  },
+  "stereo nested": {
+   "score": -56.47462148613761,
+   "shown": 4,
+   "sent": 4
+  }
+ },
+ "wow-flutter": {
+  "aspect-fold-500": {
+   "score": -19.094728956005422,
+   "shown": 4,
+   "sent": 4
+  },
+  "stereo nested": {
+   "score": -34.64528592755488,
+   "shown": 4,
+   "sent": 4
+  }
+ },
+ "azimuth-12us": {
+  "aspect-fold-500": {
+   "score": -14.705132479701888,
+   "shown": 4,
+   "sent": 4
+  },
+  "stereo nested": {
+   "score": -30.9675254424366,
+   "shown": 4,
+   "sent": 4
+  }
+ },
+ "crosstalk-10pct": {
+  "aspect-fold-500": {
+   "score": -14.741865210361699,
+   "shown": 4,
+   "sent": 4
+  },
+  "stereo nested": {
+   "score": -30.960896713121915,
+   "shown": 4,
+   "sent": 4
+  }
+ },
+ "right-minus-4db": {
+  "aspect-fold-500": {
+   "score": -14.682645880435754,
+   "shown": 4,
+   "sent": 4
+  },
+  "stereo nested": {
+   "score": -30.970187357042683,
+   "shown": 4,
+   "sent": 4
+  }
+ },
+ "dc-hum": {
+  "aspect-fold-500": {
+   "score": -15.437170497093724,
+   "shown": 4,
+   "sent": 4
+  },
+  "stereo nested": {
+   "score": -31.255166930403934,
+   "shown": 4,
+   "sent": 4
+  }
+ },
+ "bias-leak-30k": {
+  "aspect-fold-500": {
+   "score": -14.684326342644269,
+   "shown": 4,
+   "sent": 4
+  },
+  "stereo nested": {
+   "score": -30.969987735179167,
+   "shown": 4,
+   "sent": 4
+  }
+ },
+ "soft-saturation": {
+  "aspect-fold-500": {
+   "score": -23.310166606917363,
+   "shown": 4,
+   "sent": 4
+  },
+  "stereo nested": {
+   "score": -40.85278358873442,
+   "shown": 4,
+   "sent": 4
+  }
+ },
+ "dropouts": {
+  "aspect-fold-500": {
+   "score": -14.682631671882941,
+   "shown": 4,
+   "sent": 4
+  },
+  "stereo nested": {
+   "score": -30.970122549107344,
+   "shown": 4,
+   "sent": 4
+  }
+ },
+ "nr-pumping": {
+  "aspect-fold-500": {
+   "score": -32.75738461849188,
+   "shown": 4,
+   "sent": 4
+  },
+  "stereo nested": {
+   "score": -43.24727176708487,
+   "shown": 4,
+   "sent": 4
+  }
+ },
+ "type-i": {
+  "aspect-fold-500": {
+   "score": -30.969871862462526,
+   "shown": 4,
+   "sent": 4
+  },
+  "stereo nested": {
+   "score": -50.849548617375724,
+   "shown": 4,
+   "sent": 4
+  }
+ },
+ "type-ii": {
+  "aspect-fold-500": {
+   "score": -24.242205774351987,
+   "shown": 4,
+   "sent": 4
+  },
+  "stereo nested": {
+   "score": -43.24876519543804,
+   "shown": 4,
+   "sent": 4
+  }
+ },
+ "fast-flutter": {
+  "aspect-fold-500": {
+   "score": -25.31370861879725,
+   "shown": 4,
+   "sent": 4
+  },
+  "stereo nested": {
+   "score": -41.76664928654807,
+   "shown": 4,
+   "sent": 4
+  }
+ },
+ "mains-buzz": {
+  "aspect-fold-500": {
+   "score": -38.775714478407004,
+   "shown": 4,
+   "sent": 4
+  },
+  "stereo nested": {
+   "score": -45.64622808427129,
+   "shown": 4,
+   "sent": 4
+  }
+ },
+ "highpass-300": {
+  "aspect-fold-500": {
+   "score": -22.46916523556866,
+   "shown": 4,
+   "sent": 4
+  },
+  "stereo nested": {
+   "score": -34.730471328889685,
+   "shown": 4,
+   "sent": 4
+  }
+ },
+ "lowpass-4k": {
+  "aspect-fold-500": {
+   "score": -50.29828284620319,
+   "shown": 3,
+   "sent": 4
+  },
+  "stereo nested": {
+   "score": -51.45841915835661,
+   "shown": 4,
+   "sent": 4
+  }
+ },
+ "mono-sum": {
+  "aspect-fold-500": {
+   "score": -47.08922553531599,
+   "shown": 4,
+   "sent": 4
+  },
+  "stereo nested": {
+   "score": -50.97772675261345,
+   "shown": 4,
+   "sent": 4
+  }
+ },
+ "one-leg-only": {
+  "aspect-fold-500": {
+   "score": -64.86721601618743,
+   "shown": 4,
+   "sent": 4
+  },
+  "stereo nested": {
+   "score": -55.07501614750222,
+   "shown": 4,
+   "sent": 4
+  }
+ },
+ "hiss-50": {
+  "aspect-fold-500": {
+   "score": -19.09507505378756,
+   "shown": 4,
+   "sent": 4
+  },
+  "stereo nested": {
+   "score": -35.10215808680384,
+   "shown": 4,
+   "sent": 4
+  }
+ },
+ "hiss-30": {
+  "aspect-fold-500": {
+   "score": -51.02424722869313,
+   "shown": 4,
+   "sent": 4
+  },
+  "stereo nested": {
+   "score": -60.8679351343379,
+   "shown": 4,
+   "sent": 4
+  }
+ },
+ "azimuth-50us": {
+  "aspect-fold-500": {
+   "score": -15.140971197715068,
+   "shown": 4,
+   "sent": 4
+  },
+  "stereo nested": {
+   "score": -30.96488606372572,
+   "shown": 4,
+   "sent": 4
+  }
+ },
+ "right-minus-12db": {
+  "aspect-fold-500": {
+   "score": -14.684374326566449,
+   "shown": 4,
+   "sent": 4
+  },
+  "stereo nested": {
+   "score": -30.970121604450135,
+   "shown": 4,
+   "sent": 4
+  }
+ },
+ "crosstalk-25pct": {
+  "aspect-fold-500": {
+   "score": -14.917154378080351,
+   "shown": 4,
+   "sent": 4
+  },
+  "stereo nested": {
+   "score": -30.961387679725973,
+   "shown": 4,
+   "sent": 4
+  }
+ },
+ "left-leg-only": {
+  "aspect-fold-500": {
+   "score": -64.86721601618743,
+   "shown": 4,
+   "sent": 4
+  },
+  "stereo nested": {
+   "score": -55.07501614750222,
+   "shown": 4,
+   "sent": 4
+  }
+ }
+}

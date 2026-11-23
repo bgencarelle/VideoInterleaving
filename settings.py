@@ -49,6 +49,9 @@ VSYNC = True  # or False, depending on your preference
 # Frames per Second and Images Per Second (IPS)
 IPS = 30
 FPS = 60
+# Common milliseconds subtracted from the free-running index clock. Keep this
+# equal on synchronized units; positive values backdate all of them together.
+INDEX_TIME_OFFSET_MS = 0.0
 
 # Buffer settings: The BUFFER_SIZE is derived from IPS (e.g., 15 if IPS == 60)
 TOLERANCE = 10
@@ -59,7 +62,6 @@ PINGPONG = True
 FROM_BIRTH = True
 
 # web stuff
-HTTP_MONITOR = True  # or True
 # WEB_PORT is now managed by server_config.py - do not set here
 FRAME_COUNTER_DISPLAY = True  # If the monitor is on, skip printing
 
@@ -79,21 +81,24 @@ SERVER_CAPTURE_RATE = 15
 # --- ASCII MODE SETTINGS ---
 ASCII_MODE = False
 ASCII_COLOR = True
-ASCII_COLOR_BLUR = 7  # 0 = off, odd integer = blur strength (3, 5, 7)
+ASCII_TRUECOLOR = True  # Full RGB tints; False selects the 256-colour fallback.
+ASCII_COLOR_BRIGHTNESS = 1.0  # Truecolour tint exposure, separate from glyph brightness.
+ASCII_COLOR_BLUR = 0  # Optional tint smoothing; 0 preserves source colours.
 # Independent of SERVER_CAPTURE_RATE: ascii frames are a few KB of text, so
 # the telnet/websocket rate is not the bandwidth problem the JPEG stream is.
 ASCII_FPS = 15
 ASCII_WIDTH = 60 # keep aspect ratio 3:2
 ASCII_HEIGHT = 40
+ASCII_WEB_MAX_SIZE = (120, 80)  # Live web master; terminal scales remain separate.
+ASCII_WEB_SOURCE_SIZE = None  # Enabled only in asciiweb; baked packages keep their own grid.
 ASCII_SOURCE_IMAGE_ASPECT_RATIO = 1.333333333
 JPEG_QUALITY = 60# Image quality (lower = fewer bytes per frame on slow links)
 HEADLESS_RES = (320, 400)   # Resolution for the virtual screen (web frame size)
 
-# --- SCOPE MODE (XY output via the sound card) ---
+# --- SCOPE MODE (scope waveform output via the sound card) ---
 # Scope refresh defaults to IPS. For completed vector/raster passes, one trace
 # per index maximises their finite sample budget (samples = rate / fps).
 # Stochastic is continuous: a trace is only an audio buffer, not an image.
-SCOPE_MODE = False
 SCOPE_ROW_BIAS = 1.0      # >1 trades columns for rows at constant cell count.
                           # Faces want ~1.3: their features are horizontal
                           # edges, and rows resolve those. Past ~1.6 the mouth
@@ -106,7 +111,7 @@ SCOPE_DC_COMP = None      # Hz. Cancel the output's AC coupling at this corner
                           # so flat regions of a trace do not sag. Start at 30.
                           # Costs amplitude (~26% at a 20 Hz corner, ~47% at
                           # 50 Hz), so raise the scope gain to compensate.
-SCOPE_PREVIEW_FPS = 12    # /scope/stream.mjpg frame rate. THE cpu knob for
+SCOPE_PREVIEW_FPS = 15    # /scope/stream.mjpg frame rate. THE cpu knob for
                           # the web preview, together with ?size=. Rendering
                           # runs on the request thread, so this never costs the
                           # trace deadline -- but on a Pi keep it low.
@@ -120,8 +125,17 @@ SCOPE_DEVICE = None       # audio output: name FRAGMENT ("Scarlett", "hw:1")
 SCOPE_DEVICE_SPEC = None  # transient CLI name/index before it is resolved
 SCOPE_DEVICE_RESOLVED = False
 SCOPE_ASK = False         # interactive device picker; safe only with a tty
+SCOPE_SOURCE = "bake"     # "bake" (offline XY) or "images" (runtime thumbnails)
+SCOPE_GUI = False          # optional native scope trace preview/tuning window
+SCOPE_GUI_IMAGE_ONLY = False  # start the native scope preview without controls
+SCOPE_GUI_FULLSCREEN = False   # start the native scope preview fullscreen
+SCOPE_CHANNELS = (1, 2)   # 1-based PortAudio X,Y outputs; e.g. (18, 19)
+SCOPE_LIVE_SIZE = 128     # live-image thumbnail width; bake format is unchanged
 SCOPE_FPS = None          # None -> follow IPS
 SCOPE_SAMPLES = None      # explicit samples/trace; incompatible with mix
+SCOPE_GEOMETRY_SAMPLES = None  # opt-in independent trajectory detail budget
+SCOPE_TRAVERSAL_HZ = None     # opt-in geometry traversal clock
+SCOPE_PHYSICAL_DWELL = 0.0    # opt-in physical dwell redistribution [0, 1]
 SCOPE_RENDER_MODE = "vector"  # vector | raster | stochastic | stipple | fusion
                           # Stochastic is a luminance-weighted XY walk; fusion
                           # multiplexes corresponding V/R/S entries by light.
@@ -131,9 +145,10 @@ SCOPE_INVERT = False      # inverse tone; vector approximates it through dwell v
 SCOPE_REALTIME = False    # raster-only low-latency streaming path
 # The X trigger marker is a property of the output, not a mode: shaped as a
 # ramp and parked outside the picture box it costs an XY display nothing, and
-# it is the whole requirement for single-channel Y-T viewing. On by default so
-# one signal drives both; turn it off with --no-scope-trigger.
+# it supplies the trigger for single-input Y-T viewing. On by default; turn it
+# off with --no-scope-trigger.
 SCOPE_TRIGGER = True
+SCOPE_X_ONLY = False     # open one output channel and send the X waveform only
 SCOPE_TRIGGER_US = 250.0   # marker duration; CLI override is in microseconds
 SCOPE_TRIGGER_SHAPE = "ramp"  # "ramp": moving, parked off-picture, invisible on
                           # XY. "step": the original two-dwell marker, for a

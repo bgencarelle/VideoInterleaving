@@ -11,6 +11,11 @@ _ansi_colors = [f"\033[38;5;{i}m" for i in range(256)]
 _ansi_colors[16] = "\033[38;5;235m"
 ANSI_LUT = _ansi_colors  # Keep as plain list for indexed access in row builder
 RESET_CODE = "\033[0m"
+# The xterm cube is not uniformly spaced. Flooring RGB*5/255 maps even
+# (254,254,254) to (215,215,215), dimming whites and tinting highlights.
+_ANSI_LEVELS = np.array([0, 95, 135, 175, 215, 255], dtype=np.int16)
+ANSI_CHANNEL_LUT = np.abs(np.arange(256, dtype=np.int16)[:, None]
+                          - _ANSI_LEVELS).argmin(axis=1).astype(np.uint16)
 
 def _build_gamma_lut(gamma):
     return np.array([((i / 255.0) ** gamma) * 255 for i in range(256)],
@@ -86,48 +91,42 @@ def _build_colored_rows(ansi_ids, char_array, max_rows, max_cols):
     return rows
 
 
-def to_ascii(frame):
+def to_ascii(frame, *, width=None, height=None, sampled=False):
     """
     Converts a frame to ASCII using a 'Cover' (Zoom/Crop) scaling method.
     Optimized to crop the image pixels *before* color grading for efficiency.
+    With sampled=True, input is an exact character grid already sampled from
+    the source layers: only grading, glyph selection and ANSI encoding run.
     """
     if frame is None:
         return ""
 
     # --- 1. GET CONSTRAINTS ---
-    max_cols = getattr(settings, 'ASCII_WIDTH', 90)
-    max_rows = getattr(settings, 'ASCII_HEIGHT', 60)
+    max_cols = width if width is not None else getattr(settings, 'ASCII_WIDTH', 90)
+    max_rows = height if height is not None else getattr(settings, 'ASCII_HEIGHT', 60)
     font_ratio = getattr(settings, 'ASCII_FONT_RATIO', 0.5)
 
     sat_mult = getattr(settings, 'ASCII_SATURATION', 1.0)
     contrast_mult = getattr(settings, 'ASCII_CONTRAST', 1.0)
     bright_mult = getattr(settings, 'ASCII_BRIGHTNESS', 1.0)
+    truecolor = getattr(settings, 'ASCII_TRUECOLOR', False)
 
-    # --- 2. CALCULATE GEOMETRY (COVER Scaling) ---
-    h, w = frame.shape[:2]
-
-    # Calculate scale needed to fully COVER the terminal area
-    scale_x = max_cols / w
-    scale_y = max_rows / (h * font_ratio)
-    scale = max(scale_x, scale_y)
-
-    # Calculate oversized dimensions
-    new_w = int(w * scale)
-    new_h = int(h * scale * font_ratio)
-
-    new_w = max(1, new_w)
-    new_h = max(1, new_h)
-
-    # --- 3. RESIZE AND CROP PIXELS ---
-    # Resize frame to the calculated oversized grid
-    frame_resized = cv2.resize(frame, (new_w, new_h), interpolation=cv2.INTER_NEAREST)
-
-    # Calculate offset to extract the center max_cols x max_rows area
-    x_off = (new_w - max_cols) // 2
-    y_off = (new_h - max_rows) // 2
-
-    # [CHANGE] Crop the pixel array down to the exact final size before processing
-    frame_cropped = frame_resized[y_off : y_off + max_rows, x_off : x_off + max_cols]
+    if sampled:
+        # The GL sampler has already accounted for character-cell proportions.
+        # Never resize, crop or average this grid a second time.
+        if frame.shape[:2] != (max_rows, max_cols):
+            raise ValueError('Sampled RGB grid must match ASCII dimensions')
+        frame_cropped = frame
+    else:
+        # Original cover sampling for callers supplying an ordinary RGB image.
+        h, w = frame.shape[:2]
+        scale = max(max_cols / w, max_rows / (h * font_ratio))
+        new_w = max(1, int(w * scale))
+        new_h = max(1, int(h * scale * font_ratio))
+        frame_resized = cv2.resize(frame, (new_w, new_h), interpolation=cv2.INTER_NEAREST)
+        x_off = (new_w - max_cols) // 2
+        y_off = (new_h - max_rows) // 2
+        frame_cropped = frame_resized[y_off:y_off + max_rows, x_off:x_off + max_cols]
 
     # --- Step B: Color Grading (Now on the final max_cols x max_rows pixel count) ---
     hsv = cv2.cvtColor(frame_cropped, cv2.COLOR_RGB2HSV).astype(float)
@@ -148,6 +147,15 @@ def to_ascii(frame):
     if contrast_mult != 1.0:
         hsv[:, :, 2] = np.clip((hsv[:, :, 2] - 128.0) * contrast_mult + 128.0,
                                0, 255)
+    color_tint = None
+    if truecolor and getattr(settings, 'ASCII_COLOR', False):
+        # Keep the character exposure, but preserve skin highlight differences
+        # in the RGB tint instead of clipping them with the glyph multiplier.
+        color_hsv = hsv.copy()
+        color_brightness = getattr(settings, 'ASCII_COLOR_BRIGHTNESS', 1.0)
+        if color_brightness != 1.0:
+            color_hsv[:, :, 2] = np.clip(color_hsv[:, :, 2] * color_brightness, 0, 255)
+        color_tint = cv2.cvtColor(color_hsv.astype(np.uint8), cv2.COLOR_HSV2RGB)
     if bright_mult != 1.0:
         hsv[:, :, 2] = np.clip(hsv[:, :, 2] * bright_mult, 0, 255)
     frame_boosted = cv2.cvtColor(hsv.astype(np.uint8), cv2.COLOR_HSV2RGB)
@@ -164,14 +172,17 @@ def to_ascii(frame):
         # Characters (detail) stay sharp — only the color tinting is softened.
         # 0 = off, odd integer = kernel size (3 = subtle, 5 = moderate, 7 = heavy)
         color_blur = getattr(settings, 'ASCII_COLOR_BLUR', 0)
+        color_source = color_tint if color_tint is not None else frame_boosted
         if color_blur > 0:
-            color_source = cv2.GaussianBlur(frame_boosted, (color_blur, color_blur), 0)
-        else:
-            color_source = frame_boosted
+            color_source = cv2.GaussianBlur(color_source, (color_blur, color_blur), 0)
 
-        small_frame = color_source.astype(int)
+        if truecolor:
+            from ascii_encoding import encode_rgb_rows
+            return encode_rgb_rows(color_source, char_array) + RESET_CODE
+
+        small_frame = ANSI_CHANNEL_LUT[color_source]
         r, g, b = small_frame[:,:,0], small_frame[:,:,1], small_frame[:,:,2]
-        ansi_ids = 16 + (36 * (r * 5 // 255)) + (6 * (g * 5 // 255)) + (b * 5 // 255)
+        ansi_ids = 16 + 36 * r + 6 * g + b
         rows = _build_colored_rows(ansi_ids, char_array, max_rows, max_cols)
     else:
         rows = ["".join(row) for row in char_array]

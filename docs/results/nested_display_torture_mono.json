@@ -1,0 +1,374 @@
+{
+ "clean-96k": {
+  "aspect-mono-500": {
+   "score": -38.80483533824088,
+   "shown": 4,
+   "sent": 4
+  },
+  "mono nested": {
+   "score": -38.47587232603566,
+   "shown": 4,
+   "sent": 4
+  }
+ },
+ "lowpass-18k": {
+  "aspect-mono-500": {
+   "score": -38.68131009777724,
+   "shown": 4,
+   "sent": 4
+  },
+  "mono nested": {
+   "score": -38.192228345470554,
+   "shown": 4,
+   "sent": 4
+  }
+ },
+ "lowpass-15k": {
+  "aspect-mono-500": {
+   "score": -38.94902645526139,
+   "shown": 4,
+   "sent": 4
+  },
+  "mono nested": {
+   "score": -38.05618930356515,
+   "shown": 4,
+   "sent": 4
+  }
+ },
+ "lowpass-12k": {
+  "aspect-mono-500": {
+   "score": -39.76594506195105,
+   "shown": 4,
+   "sent": 4
+  },
+  "mono nested": {
+   "score": -38.00303398814562,
+   "shown": 4,
+   "sent": 4
+  }
+ },
+ "lowpass-10k": {
+  "aspect-mono-500": {
+   "score": -40.071429989110854,
+   "shown": 4,
+   "sent": 4
+  },
+  "mono nested": {
+   "score": -38.56785325919128,
+   "shown": 4,
+   "sent": 4
+  }
+ },
+ "hiss-45": {
+  "aspect-mono-500": {
+   "score": -47.49743927255386,
+   "shown": 4,
+   "sent": 4
+  },
+  "mono nested": {
+   "score": -49.92527574521311,
+   "shown": 4,
+   "sent": 4
+  }
+ },
+ "hiss-40": {
+  "aspect-mono-500": {
+   "score": -51.12533263332225,
+   "shown": 4,
+   "sent": 4
+  },
+  "mono nested": {
+   "score": -55.07950221796707,
+   "shown": 4,
+   "sent": 4
+  }
+ },
+ "hiss-35": {
+  "aspect-mono-500": {
+   "score": -54.85435453208996,
+   "shown": 4,
+   "sent": 4
+  },
+  "mono nested": {
+   "score": -59.56950022661829,
+   "shown": 4,
+   "sent": 4
+  }
+ },
+ "wow-flutter": {
+  "aspect-mono-500": {
+   "score": -44.52663735960818,
+   "shown": 4,
+   "sent": 4
+  },
+  "mono nested": {
+   "score": -46.67900268461756,
+   "shown": 4,
+   "sent": 4
+  }
+ },
+ "azimuth-12us": {
+  "aspect-mono-500": {
+   "score": -38.80483533824088,
+   "shown": 4,
+   "sent": 4
+  },
+  "mono nested": {
+   "score": -38.47587232603566,
+   "shown": 4,
+   "sent": 4
+  }
+ },
+ "crosstalk-10pct": {
+  "aspect-mono-500": {
+   "score": -38.80482766540983,
+   "shown": 4,
+   "sent": 4
+  },
+  "mono nested": {
+   "score": -38.47581366042601,
+   "shown": 4,
+   "sent": 4
+  }
+ },
+ "right-minus-4db": {
+  "aspect-mono-500": {
+   "score": -38.80483533824088,
+   "shown": 4,
+   "sent": 4
+  },
+  "mono nested": {
+   "score": -38.47587232603566,
+   "shown": 4,
+   "sent": 4
+  }
+ },
+ "dc-hum": {
+  "aspect-mono-500": {
+   "score": -40.05379305112102,
+   "shown": 4,
+   "sent": 4
+  },
+  "mono nested": {
+   "score": -41.485037667139665,
+   "shown": 4,
+   "sent": 4
+  }
+ },
+ "bias-leak-30k": {
+  "aspect-mono-500": {
+   "score": -38.81964822313178,
+   "shown": 4,
+   "sent": 4
+  },
+  "mono nested": {
+   "score": -38.48816764710645,
+   "shown": 4,
+   "sent": 4
+  }
+ },
+ "soft-saturation": {
+  "aspect-mono-500": {
+   "score": -52.03382041878067,
+   "shown": 4,
+   "sent": 4
+  },
+  "mono nested": {
+   "score": -54.3742778428454,
+   "shown": 4,
+   "sent": 4
+  }
+ },
+ "dropouts": {
+  "aspect-mono-500": {
+   "score": -38.80483533824088,
+   "shown": 4,
+   "sent": 4
+  },
+  "mono nested": {
+   "score": -38.47587232603566,
+   "shown": 4,
+   "sent": 4
+  }
+ },
+ "nr-pumping": {
+  "aspect-mono-500": {
+   "score": -53.01801849015471,
+   "shown": 4,
+   "sent": 4
+  },
+  "mono nested": {
+   "score": -56.78061438200149,
+   "shown": 4,
+   "sent": 4
+  }
+ },
+ "type-i": {
+  "aspect-mono-500": {
+   "score": -51.92220001295298,
+   "shown": 4,
+   "sent": 4
+  },
+  "mono nested": {
+   "score": -56.83602616073957,
+   "shown": 4,
+   "sent": 4
+  }
+ },
+ "type-ii": {
+  "aspect-mono-500": {
+   "score": -51.68851880924442,
+   "shown": 4,
+   "sent": 4
+  },
+  "mono nested": {
+   "score": -53.33660469064347,
+   "shown": 4,
+   "sent": 4
+  }
+ },
+ "fast-flutter": {
+  "aspect-mono-500": {
+   "score": -50.38906186745675,
+   "shown": 4,
+   "sent": 4
+  },
+  "mono nested": {
+   "score": -53.3585307630315,
+   "shown": 4,
+   "sent": 4
+  }
+ },
+ "mains-buzz": {
+  "aspect-mono-500": {
+   "score": -56.89096271302294,
+   "shown": 4,
+   "sent": 4
+  },
+  "mono nested": {
+   "score": -59.88957066408165,
+   "shown": 4,
+   "sent": 4
+  }
+ },
+ "highpass-300": {
+  "aspect-mono-500": {
+   "score": -45.212771783879454,
+   "shown": 4,
+   "sent": 4
+  },
+  "mono nested": {
+   "score": -53.01927999202622,
+   "shown": 4,
+   "sent": 4
+  }
+ },
+ "lowpass-4k": {
+  "aspect-mono-500": {
+   "score": -56.290603630885286,
+   "shown": 4,
+   "sent": 4
+  },
+  "mono nested": {
+   "score": -67.17387909300783,
+   "shown": 4,
+   "sent": 4
+  }
+ },
+ "mono-sum": {
+  "aspect-mono-500": {
+   "score": -38.80481308964999,
+   "shown": 4,
+   "sent": 4
+  },
+  "mono nested": {
+   "score": -38.47581508847899,
+   "shown": 4,
+   "sent": 4
+  }
+ },
+ "one-leg-only": {
+  "aspect-mono-500": {
+   "score": -38.80483533824088,
+   "shown": 4,
+   "sent": 4
+  },
+  "mono nested": {
+   "score": -38.47587232603566,
+   "shown": 4,
+   "sent": 4
+  }
+ },
+ "hiss-50": {
+  "aspect-mono-500": {
+   "score": -42.7348920324893,
+   "shown": 4,
+   "sent": 4
+  },
+  "mono nested": {
+   "score": -44.928596945674435,
+   "shown": 4,
+   "sent": 4
+  }
+ },
+ "hiss-30": {
+  "aspect-mono-500": {
+   "score": -60.666327134676116,
+   "shown": 4,
+   "sent": 4
+  },
+  "mono nested": {
+   "score": -62.77432954557272,
+   "shown": 4,
+   "sent": 4
+  }
+ },
+ "azimuth-50us": {
+  "aspect-mono-500": {
+   "score": -38.80483533824088,
+   "shown": 4,
+   "sent": 4
+  },
+  "mono nested": {
+   "score": -38.47587232603566,
+   "shown": 4,
+   "sent": 4
+  }
+ },
+ "right-minus-12db": {
+  "aspect-mono-500": {
+   "score": -38.80483533824088,
+   "shown": 4,
+   "sent": 4
+  },
+  "mono nested": {
+   "score": -38.47587232603566,
+   "shown": 4,
+   "sent": 4
+  }
+ },
+ "crosstalk-25pct": {
+  "aspect-mono-500": {
+   "score": -38.80479644114929,
+   "shown": 4,
+   "sent": 4
+  },
+  "mono nested": {
+   "score": -38.475840560805565,
+   "shown": 4,
+   "sent": 4
+  }
+ },
+ "left-leg-only": {
+  "aspect-mono-500": {
+   "score": -38.80483533824088,
+   "shown": 4,
+   "sent": 4
+  },
+  "mono nested": {
+   "score": -38.47587232603566,
+   "shown": 4,
+   "sent": 4
+  }
+ }
+}

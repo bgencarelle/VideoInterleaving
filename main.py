@@ -58,6 +58,29 @@ def validate_ascii_port(port):
         sys.exit(1)
 
 
+def _set_process_title(mode):
+    """Give the running application a short, mode-specific process title."""
+    try:
+        import setproctitle
+    except ImportError:
+        # Keep an existing environment usable until its requirements are refreshed.
+        return
+    setproctitle.setproctitle(f"vi.{mode}")
+
+
+def _parse_scope_channels(value):
+    """Parse the scope's user-facing, 1-based X,Y output-channel pair."""
+    try:
+        pair = (tuple(int(part.strip()) for part in value.split(","))
+                if isinstance(value, str)
+                else tuple(int(channel) for channel in value))
+    except (TypeError, ValueError) as exc:
+        raise ValueError("scope channels must be two comma-separated integers") from exc
+    if len(pair) != 2 or min(pair) < 1 or pair[0] == pair[1]:
+        raise ValueError("scope channels must be two distinct positive channel numbers")
+    return pair
+
+
 # -----------------------------------------------------------------------------
 # CONFIGURATION OVERRIDE LOGIC
 # -----------------------------------------------------------------------------
@@ -113,8 +136,9 @@ def configure_runtime():
         type=float,
         metavar="F",
         help="ASCII grading brightness, a straight multiply on value "
-             "(default: ASCII_BRIGHTNESS, 1.0 = neutral, 0 = black). "
-             "Applies after contrast"
+              "(default: ASCII_BRIGHTNESS, 1.0 = neutral, 0 = black). "
+              "Applies after contrast; truecolour tint exposure is separately "
+              "set by ASCII_COLOR_BRIGHTNESS"
     )
 
     parser.add_argument(
@@ -130,12 +154,35 @@ def configure_runtime():
         "--dir",
         help="Path to image source folder (overrides settings.py)"
     )
+    parser.add_argument("--bake-dir", help="Unified bake package; selects the output for --mode")
 
-    parser.add_argument("--modem-allocation", metavar="NPY",
-                        help="Power allocation table from fit_allocation.py")
+    # Private handoff used only when the sender GUI owns a local-mode process.
+    parser.add_argument("--local-frame-port", type=int, help=argparse.SUPPRESS)
+    parser.add_argument("--local-frame-fps", type=float, help=argparse.SUPPRESS)
 
-    # --- Options for --mode scope (XY output on the sound card) ---
+    # --- Options for --mode scope (scope signal output on the sound card) ---
     parser.add_argument("--xy-dir", help="Baked XY libraries (default: settings.XY_DIR)")
+    parser.add_argument("--scope-source", choices=("bake", "images"),
+                        default=None,
+                        help="Scope source: baked XY libraries or images decoded "
+                             "at runtime (default: bake)")
+    parser.add_argument("--scope-channels", default=None, metavar="X,Y",
+                        help="1-based PortAudio output channels for XY, e.g. "
+                             "18,19 (default: 1,2)")
+    parser.add_argument("--scope-live-size", type=int, default=None,
+                        metavar="PX",
+                        help="Live-image thumbnail width (default: 128)")
+    parser.add_argument("--scope-gui", action=argparse.BooleanOptionalAction,
+                        default=None,
+                        help="Open the optional native live scope preview and tuner")
+    parser.add_argument("--scope-gui-image-only", "--image-only",
+                        dest="scope_gui_image_only",
+                        action=argparse.BooleanOptionalAction, default=None,
+                        help="Start the scope GUI with only the preview; click to restore controls")
+    parser.add_argument("--scope-gui-fullscreen", "--fullscreen",
+                        dest="scope_gui_fullscreen",
+                        action=argparse.BooleanOptionalAction, default=None,
+                        help="Start the scope GUI fullscreen in image-only view")
     scope_render = parser.add_mutually_exclusive_group()
     scope_render.add_argument("--scope-mode",
                               choices=("vector", "raster", "stochastic",
@@ -156,7 +203,12 @@ def configure_runtime():
                              "keeps its geometry but shifts beam dwell toward "
                              "originally dark regions. Transparent padding "
                              "stays dark. Press i to toggle live")
-    parser.add_argument("--scope-realtime", action="store_true",
+    parser.add_argument("--scope-x-only",
+                        action=argparse.BooleanOptionalAction, default=None,
+                        help="Scope: send only the X signal through a one-channel "
+                             "output for a single-input Y-T scope")
+    parser.add_argument("--scope-realtime", action=argparse.BooleanOptionalAction,
+                        default=None,
                         help="Scope: stream continuously so index changes land "
                              "within a row instead of at a trace boundary "
                              "(raster only)")
@@ -186,6 +238,10 @@ def configure_runtime():
                         help=argparse.SUPPRESS)  # deprecated: = fixed timing
     parser.add_argument("--scope-fps", type=int, help="Scope trace rate (default: IPS)")
     parser.add_argument("--scope-samples", type=int, help="Scope samples per trace")
+    parser.add_argument("--scope-geometry-samples", type=int, metavar="N",
+                        help="Baked vector/raster/stipple trajectory detail budget independent of DAC samples")
+    parser.add_argument("--scope-traversal-hz", type=float, metavar="HZ",
+                        help="Timed baked vector/raster/stipple traversal speed in cycles/second; requires trigger and one field")
     parser.add_argument("--scope-fields", type=int, metavar="N",
                         help="Scope raster: interlace. N=2 draws every other "
                              "row per trace and alternates, so the beam "
@@ -241,6 +297,8 @@ def configure_runtime():
     parser.add_argument("--scope-stipple-points", type=int, metavar="N",
                         help="Scope stipple: stable luminance-weighted image "
                              "positions before proximity ordering (default 768)")
+    parser.add_argument("--scope-physical-dwell", type=float, metavar="F",
+                        help="Redistribute fixed physical XY sample budget toward drawing segments (0=off, 1=strong; does not change preview exposure)")
     parser.add_argument("--scope-rows", type=int)
     parser.add_argument("--scope-row-bias", type=float, metavar="F",
                         help="Trade columns for rows at constant cell count. "
@@ -274,21 +332,39 @@ def configure_runtime():
                              "bandlimit, decimate. Fixes aliasing when the grid "
                              "is finer than the sample rate; on smooth content "
                              "the difference is small. 4 is plenty.")
-    parser.add_argument("--scope-list-from-images", action="store_true",
+    parser.add_argument("--scope-list-from-images",
+                        action=argparse.BooleanOptionalAction, default=None,
                         help="Build the folder manifest by scanning the images "
                              "instead of reading it from the bake. Only needed "
                              "for a bake made before manifests were supported.")
-    parser.add_argument("--scope-no-autofit", action="store_true",
+    parser.add_argument("--scope-autofit", dest="scope_autofit",
+                        action="store_true", default=None,
+                        help="Scope raster: size the grid against cells that "
+                             "survive trim (default on)")
+    parser.add_argument("--scope-no-autofit", "--no-scope-autofit",
+                        dest="scope_autofit", action="store_false", default=None,
                         help="Scope raster: size the grid to the whole frame "
                              "instead of to the cells that survive trim "
                              "(autofit is on by default and is usually a 2x "
                              "resolution win on a dark background)")
+    parser.add_argument("--no-scope-fps", dest="scope_clear_fps",
+                        action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--no-scope-samples", dest="scope_clear_samples",
+                        action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--no-scope-rows", dest="scope_clear_rows",
+                        action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--no-scope-dc-comp", dest="scope_clear_dc_comp",
+                        action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--no-scope-lowpass", dest="scope_clear_lowpass",
+                        action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--scope-mix", nargs="?", type=float, const=120.0,
                         metavar="HZ",
                         help="Scope: whole-trace mix at this rate (default "
                              "120): vector -> raster -> stochastic -> raster "
                              "-> stipple -> raster. Above flicker fusion the "
                              "phosphor sums all four renderers.")
+    parser.add_argument("--no-scope-mix", action="store_true",
+                        help="Disable a mix rate configured in settings.py")
     parser.add_argument("--scope-mix-duty", type=float, default=None,
                         help="Scope: fraction of mixed passes spent on raster "
                              "(the remainder is split equally between vector, "
@@ -313,41 +389,57 @@ def configure_runtime():
                              "a kiosk launch script.")
 
     parser.add_argument(
-        "--rebuild",
-        action="store_true",
-        help="Force a rebuild of image lists (Default: Reuse existing lists if found)"
-    )
-
-    parser.add_argument(
         "--test",
         action="store_true",
         help="Override hosts to '0.0.0.0' for network testing (default: '127.0.0.1')"
     )
 
     # Modem is independent of the XY waveform and the video/GL display stack.
+    parser.add_argument("--modem-source", choices=("bake", "images"),
+                        default="bake",
+                        help="V7 source: prebaked slabs or normal images "
+                             "encoded at runtime (default: bake)")
     parser.add_argument("--modem-dir", help="RGBA modem bake from utilities/convert_to_modem_dct.py")
     parser.add_argument("--modem-channels", default="1,2", help="1-based stereo output pair")
-    parser.add_argument("--modem-latency", default="low", help="low, high, or seconds")
+    parser.add_argument("--modem-latency", default="high",
+                        help="low, high, or seconds (default high, as the V7 "
+                             "sender: a bigger output buffer rides out the "
+                             "system slowing the app down, e.g. on another "
+                             "desktop; the image clock allows for it)")
+    parser.add_argument("--modem-block-samples", type=int, default=None,
+                        help="samples per audio callback (default 256 with "
+                             "low latency, 1024 with high)")
     parser.add_argument("--modem-time-offset-ms", type=float, default=0.0,
                         help="Additional receiver allowance; scheduled transmission is already compensated")
     parser.add_argument("--modem-receive-margin-ms", type=float, default=15.0,
                         help="Time after packet completion reserved for input/decode/GUI (default 15)")
-    parser.add_argument("--modem-prepare-ms", type=float, default=10.0,
-                        help="Minimum encoding lead before a send deadline (default 10)")
-    parser.add_argument("--modem-frames", type=int, default=0, help="0 = unlimited live / one source pass for WAV")
-    parser.add_argument("--modem-wav", help="Export a deterministic pair to PCM16 WAV instead of live playback")
-    parser.add_argument("--modem-preset", default=None,
-                        help="Wire layout, default 'wide-v3'. The receiver "
-                             "identifies it from the signal; it does not have "
-                             "to be told.")
+    parser.add_argument("--modem-prepare-ms", type=float, default=25.0,
+                        help="Minimum encoding lead before a send deadline (default 25)")
+    parser.add_argument("--modem-speed", "--speed", dest="modem_speed",
+                        type=float, default=1.0,
+                        help="V7 playback speed 0.25..4x (default 1; 1x is tape-safe). "
+                             "Above the output Nyquist limit, high-frequency detail is lost")
+    # The picture encode is the V7 sender's own, with its shipped defaults
+    # (tools/v7_send_defaults.py): what the sender GUI starts with.
     parser.add_argument("--modem-profile", default=None,
-                        help="Picture geometry to send. Defaults to the bake's "
-                             "own profile, which is the right answer unless "
-                             "you are comparing. 'color-dct' needs a bake at "
-                             "80x96 and a preset holding 2880 values, such as "
-                             "hires-v3; the receiver reads it from the header.")
+                        help="V7 wire profile (default: the sender's, "
+                             "tools/v7_send_defaults.py)")
+    parser.add_argument("--modem-pixel-encode", action="store_true",
+                        help="V7 Pixel encode instead of Direct DCT")
+    parser.add_argument("--modem-send-arg", action="append", default=[],
+                        metavar="ARG",
+                        help="Pass one more option to the V7 sender's encode, "
+                             "e.g. --modem-send-arg=--no-linear-preshrink")
+    modem_length = parser.add_mutually_exclusive_group()
+    modem_length.add_argument(
+        "--modem-frames", type=int, default=0,
+        help="Exact packet count; 0 = unlimited live / one source pass for WAV")
+    modem_length.add_argument(
+        "--modem-cycles", type=int, default=None,
+        help="Full application-clock cycles for WAV export; ping-pong cycles "
+             "include the return trip")
+    parser.add_argument("--modem-wav", help="Export a deterministic pair to PCM16 WAV instead of live playback")
     parser.add_argument("--modem-pair", help="Fixed zero-based face,float pair for inspection, e.g. 1,0")
-    parser.add_argument("-f", "--modem-numbered", action="store_true", help="Burn absolute and source-index counters into modem pixels")
     parser.add_argument("--modem-index-offset-ms", type=float, default=0.0,
         help="Shift only which image the clock returns, not when it is shown; "
              "use to align modem output with local/scope/ascii. One image is 1000/IPS ms.")
@@ -356,10 +448,51 @@ def configure_runtime():
     parser.add_argument("--modem-frame-duration", type=float, default=1.0,
                         help="Existing MIDI clock's frame scaling factor")
     args = parser.parse_args()
+    settings.LAYER_BAKE_DIR = None
+    if args.bake_dir:
+        if args.dir or args.xy_dir or args.modem_dir:
+            parser.error("--bake-dir selects the source; omit --dir/--xy-dir/--modem-dir")
+        if ((args.mode == 'scope' and args.scope_source == 'images') or
+                (args.mode == 'modem' and args.modem_source == 'images')):
+            parser.error("--bake-dir requires baked playback")
+        try:
+            from baked_layers import package_output
+            output = str(package_output(args.bake_dir, args.mode))
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            parser.error(str(exc))
+        if args.mode == 'scope':
+            if args.scope_list_from_images:
+                parser.error('--bake-dir reads its own folder manifest; omit --scope-list-from-images')
+            args.xy_dir = output
+            args.scope_source = 'bake'
+            args.scope_list_from_images = False
+        elif args.mode == 'modem':
+            args.modem_dir = output
+        else:
+            settings.LAYER_BAKE_DIR = output
+    if args.local_frame_port is not None:
+        if args.mode != "local":
+            parser.error("--local-frame-port can only be used with --mode local")
+        if not 1 <= args.local_frame_port <= 65535:
+            parser.error("--local-frame-port must be between 1 and 65535")
+    if args.local_frame_fps is not None:
+        if args.local_frame_port is None:
+            parser.error("--local-frame-fps requires --local-frame-port")
+        if (not math.isfinite(args.local_frame_fps) or
+                not 0 < args.local_frame_fps <= 1000):
+            parser.error("--local-frame-fps must be greater than 0 and at most 1000")
+    settings.LOCAL_FRAME_PORT = args.local_frame_port
+    settings.LOCAL_FRAME_FPS = (args.local_frame_fps or
+                                getattr(settings, "FPS", 30))
+    _set_process_title(args.mode)
 
     if args.mode == "modem":
         if args.modem_frames < 0:
             parser.error("Modem frame count must be nonnegative")
+        if args.modem_cycles is not None and args.modem_cycles <= 0:
+            parser.error("Modem cycle count must be positive")
+        if args.modem_cycles is not None and not args.modem_wav:
+            parser.error("--modem-cycles requires --modem-wav")
         if not math.isfinite(args.modem_time_offset_ms):
             parser.error("--modem-time-offset-ms must be finite")
         if (not math.isfinite(args.modem_receive_margin_ms) or args.modem_receive_margin_ms < 0
@@ -370,14 +503,34 @@ def configure_runtime():
             parser.error("--modem-index-offset-ms must be finite and within +/-10000")
         if not math.isfinite(args.modem_frame_duration) or args.modem_frame_duration <= 0:
             parser.error("--modem-frame-duration must be finite and positive")
+        if (not math.isfinite(args.modem_speed) or
+                not 0.25 <= args.modem_speed <= 4.0):
+            parser.error("--modem-speed must be finite and between 0.25 and 4")
+        if args.modem_clock == settings.CLIENT_MODE:
+            parser.error("--modem-clock 3 (CLIENT_MODE) is not supported by the V7 modem")
+        if args.modem_wav and args.modem_clock != settings.FREE_CLOCK:
+            parser.error("--modem-wav requires the free clock (--modem-clock 255); "
+                         "a live MIDI clock cannot drive a deterministic WAV")
         if args.scope_ask:
-            parser.error("Modem mode takes --device explicitly; use "
-                         "utilities/modem_v3_check.py live-receive --list-devices")
+            parser.error("V7 modem mode takes --device explicitly; use "
+                         "--scope-device with the selected audio device")
         # --dir names the directory to use, in this mode as in every other.
         # It is not a source tree to append a suffix to; only the fallback,
         # when no directory is given at all, derives one from IMAGES_DIR.
         if args.dir:
             settings.IMAGES_DIR = os.path.abspath(args.dir)
+        if args.modem_source == "images":
+            if args.modem_dir:
+                parser.error("--modem-dir cannot be combined with --modem-source images")
+            settings.MAIN_FOLDER_PATH = os.path.join(settings.IMAGES_DIR, "face")
+            settings.FLOAT_FOLDER_PATH = os.path.join(settings.IMAGES_DIR, "float")
+            source_name = os.path.basename(os.path.normpath(settings.IMAGES_DIR)).replace(" ", "_")
+            suffix = f"{source_name}_modem"
+            settings.PROCESSED_DIR = os.path.join(CACHE_DIR, f"folders_processed_{suffix}")
+            settings.GENERATED_LISTS_DIR = os.path.join(CACHE_DIR, f"generated_lists_{suffix}")
+            os.makedirs(LOGS_DIR, exist_ok=True)
+            settings.CLOCK_MODE = args.modem_clock
+            return args, os.path.join(LOGS_DIR, "runtime_modem.log")
         if not args.modem_dir:
             args.modem_dir = (os.path.abspath(args.dir) if args.dir
                               else settings.IMAGES_DIR + "_modem")
@@ -495,13 +648,11 @@ def configure_runtime():
 
     # 2.5. Clean up existing cache directories for this instance
     # Determine instance identifier pattern
-    if args.mode == "scope":
-        # Scope only: key the pattern on source AND mode, so two scope
-        # instances running different image trees never delete each other's
-        # lists.  source_name is computed below, so derive it locally here
-        # rather than moving upstream code around.
-        _src = os.path.basename(os.path.normpath(settings.IMAGES_DIR)).replace(" ", "_")
-        instance_pattern = f"_{_src}_{args.mode}_"
+    if args.mode == "scope" or settings.LAYER_BAKE_DIR:
+        # Scope either reads the bake manifest or validates its image-list
+        # cache itself. Deleting those directories here forced a full cache
+        # restore on every launch and made separate scope instances interfere.
+        instance_pattern = None
     elif args.mode in ("web", "local"):
         instance_pattern = f"_{args.mode}_"  # Match any port
     else:
@@ -512,7 +663,7 @@ def configure_runtime():
     script_dir = os.path.dirname(os.path.abspath(__file__))
     cache_base = os.path.join(script_dir, CACHE_DIR)
 
-    if os.path.exists(cache_base):
+    if instance_pattern is not None and os.path.exists(cache_base):
         for item in os.listdir(cache_base):
             if (item.startswith("folders_processed_") or item.startswith(
                     "generated_lists_")) and instance_pattern in item:
@@ -559,8 +710,11 @@ def configure_runtime():
         settings.SERVER_MODE = False
         config.set_mode(MODE_LOCAL)
         ports = config.get_ports()
-        print(f">> PORTS: Monitor={ports.monitor}")
-        require_ports(ports.get_all_ports())
+        if args.local_frame_port is None:
+            print(f">> PORTS: Monitor={ports.monitor}")
+            require_ports(ports.get_all_ports())
+        else:
+            print(">> LOCAL VIDEO SOURCE: HTTP monitor disabled")
         # Update settings for backward compatibility
         settings.WEB_PORT = ports.monitor
         # Local mode always uses --test flag for network monitoring
@@ -568,6 +722,83 @@ def configure_runtime():
         print(">> Local mode: Enabling --test flag for network monitoring")
 
     elif args.mode == "scope":
+        scope_source = (args.scope_source or
+                        getattr(settings, "SCOPE_SOURCE", "bake"))
+        if scope_source not in ("bake", "images"):
+            parser.error("--scope-source must be bake or images")
+        settings.SCOPE_SOURCE = scope_source
+        if args.scope_gui is not None:
+            settings.SCOPE_GUI = args.scope_gui
+        start_image_only = (getattr(settings, "SCOPE_GUI_IMAGE_ONLY", False)
+                            if args.scope_gui_image_only is None else
+                            args.scope_gui_image_only)
+        start_fullscreen = (getattr(settings, "SCOPE_GUI_FULLSCREEN", False)
+                            if args.scope_gui_fullscreen is None else
+                            args.scope_gui_fullscreen)
+        start_image_only = bool(start_image_only or start_fullscreen)
+        if ((start_image_only or start_fullscreen) and args.scope_gui is False):
+            parser.error("scope GUI startup views cannot be combined with --no-scope-gui")
+        settings.SCOPE_GUI_IMAGE_ONLY = start_image_only
+        settings.SCOPE_GUI_FULLSCREEN = bool(start_fullscreen)
+        if start_image_only or start_fullscreen:
+            settings.SCOPE_GUI = True
+        if args.scope_live_size is not None:
+            if args.scope_live_size < 16:
+                parser.error("--scope-live-size must be at least 16 pixels")
+            settings.SCOPE_LIVE_SIZE = args.scope_live_size
+        try:
+            settings.SCOPE_CHANNELS = _parse_scope_channels(
+                args.scope_channels if args.scope_channels is not None
+                else getattr(settings, "SCOPE_CHANNELS", (1, 2)))
+        except ValueError as exc:
+            parser.error(str(exc))
+
+        render_was_selected = bool(
+            args.scope_mode or args.scope_raster or args.scope_stochastic
+            or args.scope_stipple)
+        if args.scope_mode:
+            requested_render = args.scope_mode
+        elif args.scope_raster:
+            requested_render = "raster"
+        elif args.scope_stochastic:
+            requested_render = "stochastic"
+        elif args.scope_stipple:
+            requested_render = "stipple"
+        else:
+            requested_render = getattr(settings, "SCOPE_RENDER_MODE", "vector")
+        if scope_source == "images":
+            if args.scope_list_from_images:
+                parser.error("--scope-list-from-images is redundant with "
+                             "--scope-source images")
+            if not render_was_selected:
+                requested_render = "raster"
+            if requested_render not in ("vector", "raster", "stochastic", "stipple", "fusion"):
+                parser.error("Choose a supported scope renderer")
+            settings.SCOPE_RENDER_MODE = requested_render
+            if args.scope_mix is not None:
+                parser.error("--scope-mix requires baked vector geometry and "
+                             "cannot be used with --scope-source images")
+
+        geometry_samples = args.scope_geometry_samples
+        traversal_hz = args.scope_traversal_hz
+        if geometry_samples is not None or traversal_hz is not None:
+            if scope_source != "bake" or requested_render not in ("vector", "raster", "stipple"):
+                parser.error("scope geometry/traversal controls require baked vector, raster, or stipple rendering")
+            if args.scope_mix is not None:
+                parser.error("scope geometry/traversal controls cannot be combined with --scope-mix")
+            if args.scope_realtime:
+                parser.error("scope geometry/traversal controls cannot be combined with --scope-realtime")
+            if geometry_samples is not None and geometry_samples < 2:
+                parser.error("--scope-geometry-samples must be at least 2")
+            if traversal_hz is not None and (not math.isfinite(traversal_hz) or traversal_hz <= 0):
+                parser.error("--scope-traversal-hz must be finite and greater than zero")
+            if traversal_hz is not None and args.scope_trigger is False:
+                parser.error("--scope-traversal-hz requires the scope trigger; remove --no-scope-trigger")
+            if traversal_hz is not None and args.scope_fields not in (None, 1):
+                parser.error("--scope-traversal-hz requires one field")
+            if args.scope_yt_timing == "fixed" or args.scope_yt:
+                parser.error("independent geometry controls cannot be combined with fixed Y-T timing")
+
         if (args.scope_mix_duty is not None
                 and (not math.isfinite(args.scope_mix_duty)
                      or not 0.0 <= args.scope_mix_duty <= 1.0)):
@@ -581,12 +812,16 @@ def configure_runtime():
             if args.scope_mode == "fusion":
                 parser.error("--scope-mode fusion and --scope-mix are "
                              "alternative combiners; choose one")
+        if args.scope_mix is not None and args.no_scope_mix:
+            parser.error("--scope-mix and --no-scope-mix cannot be combined")
         if args.port:
             print("⚠️  WARNING: --port ignored in SCOPE mode.")
-        print(f">> MODE: SCOPE (XY audio) [{source_name}]")
+        if args.scope_x_only is not None:
+            settings.SCOPE_X_ONLY = args.scope_x_only
+        _scope_signal = "X-only mono" if settings.SCOPE_X_ONLY else "XY stereo"
+        print(f">> MODE: SCOPE ({_scope_signal}) [{source_name}]")
         settings.ASCII_MODE = False
         settings.SERVER_MODE = False
-        settings.SCOPE_MODE = True
         config.set_mode(MODE_SCOPE)
         ports = config.get_ports()
         # Deliberately NOT require_ports() here.  Scope binds nothing -- the
@@ -638,21 +873,31 @@ def configure_runtime():
             settings.SCOPE_YT_TIMING = "fixed"
             print("[SCOPE] --scope-yt is now --scope-yt-timing fixed; the "
                   "trigger marker is on by default in every mode.")
-        if args.scope_realtime:
-            settings.SCOPE_REALTIME = True
-        if args.scope_fps:
+        if args.scope_realtime is not None:
+            settings.SCOPE_REALTIME = args.scope_realtime
+        if args.scope_fps is not None:
             settings.SCOPE_FPS = args.scope_fps
+        if args.scope_clear_fps:
+            settings.SCOPE_FPS = None
         if getattr(args, "scope_fields", None) is not None:
             settings.SCOPE_FIELDS = args.scope_fields
             settings.SCOPE_FIELDS_EXPLICIT = True
-        if getattr(args, "scope_dc_comp", None):
+        if args.scope_dc_comp is not None:
             settings.SCOPE_DC_COMP = args.scope_dc_comp
+        if args.scope_clear_dc_comp:
+            settings.SCOPE_DC_COMP = None
         if getattr(args, "scope_border", None) is not None:
             settings.SCOPE_BORDER = args.scope_border
         if getattr(args, "scope_row_bias", None):
             settings.SCOPE_ROW_BIAS = args.scope_row_bias
-        if args.scope_samples:
+        if args.scope_samples is not None:
             settings.SCOPE_SAMPLES = args.scope_samples
+        if geometry_samples is not None:
+            settings.SCOPE_GEOMETRY_SAMPLES = geometry_samples
+        if traversal_hz is not None:
+            settings.SCOPE_TRAVERSAL_HZ = traversal_hz
+        if args.scope_clear_samples:
+            settings.SCOPE_SAMPLES = None
         if args.scope_trim is not None:
             settings.SCOPE_TRIM = args.scope_trim
         if args.scope_gamma is not None:
@@ -691,14 +936,22 @@ def configure_runtime():
             if args.scope_stipple_points < 8:
                 parser.error("--scope-stipple-points must be at least 8")
             settings.SCOPE_STIPPLE_POINTS = args.scope_stipple_points
-        if args.scope_rows:
+        if args.scope_physical_dwell is not None:
+            if not math.isfinite(args.scope_physical_dwell) or not 0.0 <= args.scope_physical_dwell <= 1.0:
+                parser.error("--scope-physical-dwell must be between 0 and 1")
+            settings.SCOPE_PHYSICAL_DWELL = args.scope_physical_dwell
+        if args.scope_rows is not None:
             settings.SCOPE_ROWS = args.scope_rows
-        if args.scope_no_autofit:
-            settings.SCOPE_AUTOFIT = False
-        if args.scope_list_from_images:
-            settings.SCOPE_LIST_FROM_IMAGES = True
-        if args.scope_lowpass:
+        if args.scope_clear_rows:
+            settings.SCOPE_ROWS = None
+        if args.scope_autofit is not None:
+            settings.SCOPE_AUTOFIT = args.scope_autofit
+        if args.scope_list_from_images is not None:
+            settings.SCOPE_LIST_FROM_IMAGES = args.scope_list_from_images
+        if args.scope_lowpass is not None:
             settings.SCOPE_LOWPASS = args.scope_lowpass
+        if args.scope_clear_lowpass:
+            settings.SCOPE_LOWPASS = None
         if args.scope_oversample:
             settings.SCOPE_OVERSAMPLE = args.scope_oversample
         if args.scope_min_feature is not None:
@@ -707,6 +960,8 @@ def configure_runtime():
             settings.SCOPE_SWEEP = args.scope_sweep
         if args.scope_mix is not None:
             settings.SCOPE_MIX = args.scope_mix
+        elif args.no_scope_mix:
+            settings.SCOPE_MIX = None
         if args.scope_mix_duty is not None:
             settings.SCOPE_MIX_DUTY = args.scope_mix_duty
         # Fixed row timing lives inside render_luma, so it is genuinely raster
@@ -724,8 +979,12 @@ def configure_runtime():
             # argv is decoded with surrogateescape, so a stray byte in shell
             # history arrives as a lone surrogate and breaks any later encode
             _configured_device = _scrub(_configured_device)
-            settings.SCOPE_DEVICE = _choose(ask=_configured_ask,
-                                            device=_configured_device)
+            _minimum_channels = (
+                settings.SCOPE_CHANNELS[0] if settings.SCOPE_X_ONLY else
+                max(settings.SCOPE_CHANNELS))
+            settings.SCOPE_DEVICE = _choose(
+                ask=_configured_ask, device=_configured_device,
+                min_channels=_minimum_channels)
             if settings.SCOPE_DEVICE == "null":
                 _name = "none (browser renders)"
             else:
@@ -744,10 +1003,18 @@ def configure_runtime():
             settings.SCOPE_DEVICE_RESOLVED = True
         settings.SCOPE_DEVICE_SPEC = None
         settings.SCOPE_ASK = False
-        print(f">> XY LIBRARIES: {getattr(settings, 'XY_DIR', 'images_xy')}")
+        _scope_axes = (settings.SCOPE_CHANNELS[:1] if settings.SCOPE_X_ONLY
+                       else settings.SCOPE_CHANNELS)
+        print(">> AUDIO CHANNELS: " + ",".join(map(str, _scope_axes)) +
+              " (PortAudio, 1-based)")
+        if scope_source == "images":
+            print(f">> SCOPE SOURCE: live images ({settings.IMAGES_DIR})")
+        else:
+            print(f">> XY LIBRARIES: {getattr(settings, 'XY_DIR', 'images_xy')}")
 
     elif args.mode == "ascii":
         validate_ascii_port(primary_port)
+        settings.ASCII_CLIENT_SIZING = True
         print(f">> MODE: ASCII (Telnet) [{source_name}] @ {primary_port}")
         settings.ASCII_MODE = True
         settings.SERVER_MODE = False
@@ -761,6 +1028,17 @@ def configure_runtime():
 
     elif args.mode == "asciiweb":
         # [NOTE] Validation skipped here so asciiweb can use its own reserved ports
+        settings.ASCII_WEB_SOURCE_SIZE = settings.ASCII_WEB_MAX_SIZE
+        if settings.LAYER_BAKE_DIR:
+            from ascii_rgb_layers import baked_web_source_size
+            # Older compact bakes remain native-resolution sources. Never label
+            # a 90x60 bake as 120x80 or invent missing detail by upsampling it.
+            try:
+                baked_size = baked_web_source_size(settings.LAYER_BAKE_DIR)
+            except (OSError, ValueError, TypeError) as exc:
+                parser.error(str(exc))
+            if baked_size is not None:
+                settings.ASCII_WEB_SOURCE_SIZE = baked_size
         print(f">> MODE: ASCII-WEB (WebSocket) [{source_name}]")
         settings.ASCII_MODE = True
         settings.SERVER_MODE = False
@@ -808,7 +1086,7 @@ from settings import CLOCK_MODE
 #   ascii_server        ascii                         (stdlib only)
 #   ascii_stats_server  ascii                         (stdlib only)
 #   ascii_web_server    asciiweb                      (SimpleWebSocketServer)
-#   scope_display       scope                         (numpy, sounddevice)
+#   scope_display       scope                         (numpy, sounddevice; optional GL GUI)
 #
 # Python caches modules, so importing inside a branch costs nothing on repeat.
 
@@ -891,7 +1169,7 @@ except Exception as e:
 def main(clock=CLOCK_MODE):
     if cli_args.mode == "modem":
         try:
-            from modem_display import run_modem
+            from modem_v7_display import run_modem
             run_modem(cli_args)
         except KeyboardInterrupt:
             print("\n[MODEM] Shutdown requested")
@@ -906,44 +1184,29 @@ def main(clock=CLOCK_MODE):
             if _log_file is not None:
                 _log_file.close()
         return
-    # Register cleanup handler for display resolution restoration
-    try:
-        from display_manager import _restore_display_resolution
-        atexit.register(_restore_display_resolution)
-    except ImportError:
-        pass  # display_manager may not be imported yet
+    # display_manager imports ModernGL and renderer; scope is audio-only and
+    # must not import the graphics stack on its way into the scope engine.
+    if cli_args.mode != "scope":
+        try:
+            from display_manager import _restore_display_resolution
+            atexit.register(_restore_display_resolution)
+        except ImportError:
+            pass  # display_manager may not be imported yet
 
-    # 1. Process Files (Reuse Logic)
-    lists_exist = False
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    gen_dir_full = os.path.join(script_dir, settings.GENERATED_LISTS_DIR)
+    # 1. Process Files (fresh on each startup)
 
     print(f"[MAIN] Mode={cli_args.mode} | Images={settings.IMAGES_DIR} | Cache={settings.GENERATED_LISTS_DIR}")
 
-    if os.path.exists(gen_dir_full) and os.listdir(gen_dir_full):
-        lists_exist = True
-
-    # Scope mode reads its folder manifest from the bake and never opens an
-    # image, so the image scan is pure startup cost for it.  Skipped only when
-    # the bake can actually supply the manifest; every other mode is untouched.
-    _scope_has_manifest = False
-    if cli_args.mode == "scope" and not getattr(settings, "SCOPE_LIST_FROM_IMAGES", False):
-        _xy = getattr(settings, "XY_DIR", None)
-        if _xy and os.path.isdir(_xy):
-            for _root, _dirs, _files in os.walk(_xy):
-                if "frame_starts.npy" in _files:
-                    _scope_has_manifest = True
-                    break
-
-    if _scope_has_manifest:
-        print(">> Skipping image scan: scope mode takes its manifest from the "
-              "bake (--scope-list-from-images to override)")
-    elif cli_args.rebuild or not lists_exist:
+    if cli_args.mode == "scope":
+        # The scope engine probes the bake once and initializes image lists
+        # only for a live source or a bake without a usable manifest.
+        print(f">> Scope source: {getattr(settings, 'SCOPE_SOURCE', 'bake')}")
+    elif settings.LAYER_BAKE_DIR:
+        print(f">> Independent baked layers: {settings.LAYER_BAKE_DIR}")
+    else:
         print(">> Building file lists...")
         import make_file_lists          # PIL + numpy; not needed off this path
         make_file_lists.process_files()
-    else:
-        print(f">> Skipping build. Reusing existing lists in: {settings.GENERATED_LISTS_DIR}")
 
     # 2. Launch Servers
     mode = cli_args.mode
@@ -965,15 +1228,13 @@ def main(clock=CLOCK_MODE):
         web_service.start_server(monitor=True, stream=True)
 
     elif mode == "local":
-        import web_service
-        web_service.start_server(monitor=True, stream=False)
+        if cli_args.local_frame_port is None:
+            import web_service
+            web_service.start_server(monitor=True, stream=False)
 
     elif mode == "scope":
-        # Scope is reached the same way every other mode is: over the network.
-        # It has no window and, under systemd, no tty either -- so without this
-        # there is no way to see whether it is running, what device it grabbed,
-        # or whether it is dropping traces.  Monitor only; there is no video
-        # frame to stream.
+        # Keep the web monitor available whether the optional native scope
+        # window is enabled or the process is running headless.
         #
         # NOT gated on require_ports(): run_monitor_server() runs in a daemon
         # thread and its OSError on a busy port dies in that thread.  The audio
@@ -983,10 +1244,11 @@ def main(clock=CLOCK_MODE):
         web_service.start_server(monitor=True, stream=False)
 
         # 3. Start Display Engine
+    failed = False
     try:
         if mode == "scope":
-            # Standalone, like every other mode: audio only. No GL context, no
-            # TurboJPEG, no ImageLoader, no FIFO.
+            # Graphics stay optional and are imported by scope_display only
+            # when --scope-gui is enabled. Scope never loads the video path.
             import scope_display
             scope_display.run_scope(clock)
         else:
@@ -1005,17 +1267,19 @@ def main(clock=CLOCK_MODE):
     except KeyboardInterrupt:
         print("\n[MAIN] Shutdown requested via Ctrl+C")
     except Exception as e:
+        failed = True
         print(f"\n[MAIN] CRASH DETAILS: {e}")
         traceback.print_exc()
     finally:
         print("[MAIN] Exiting...")
-        # Restore display resolution if it was changed
-        try:
-            from display_manager import _restore_display_resolution
-            _restore_display_resolution()
-        except Exception as e:
-            # Don't fail if restoration fails
-            pass
+        # Restore display resolution only for modes that can use the window
+        # manager. Scope must stay independent of graphics libraries.
+        if mode != "scope":
+            try:
+                from display_manager import _restore_display_resolution
+                _restore_display_resolution()
+            except Exception:
+                pass  # Don't fail if restoration fails
         # Ensure all output is flushed before closing
         sys.stdout.flush()
         sys.stderr.flush()
@@ -1029,6 +1293,8 @@ def main(clock=CLOCK_MODE):
                 _log_file.close()
             except Exception as e:
                 _original_stderr.write(f"⚠️  Error closing log file: {e}\n")
+    if failed:
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":

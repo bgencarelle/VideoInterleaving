@@ -1,78 +1,114 @@
 # AGENTS.md
 
-Flat, single-package Python app (no `pyproject.toml`/setup.py). Entry point is
-`main.py`. The current branch is `main` (modem — and scope inside it — was
-merged back); the mode docs (`docs/MODEM_MODE.md`, `docs/SCOPE_MODE.md`) are
-authoritative for their subsystems.
+## Project shape
 
-## Layout
+- This is a flat Python application rooted at `main.py`; run commands from the
+  repository root because imports, tests, and services assume that CWD.
+- `main.py --mode` runs one standalone mode (`web`, `ascii`, `asciiweb`, `local`,
+  `scope`, or `modem`). Keep mode-specific changes in that mode unless the task
+  explicitly crosses boundaries.
+- The baked application modem (`main.py --mode modem`) and standalone V7 live
+  sender/receiver (`tools/v7_live.py`, `vi.modem-*`) are different pipelines.
+  Read `docs/MODEM_MODE.md` for the baked mode and
+  `docs/transport_v7_spec.md` for V7 wire/live behavior.
+- `animation_modem/` is a transport package: do not add imports from app UI,
+  settings, or status modules.
+- `main.py` parses CLI arguments at module import and may exit. Tests importing
+  it must control `sys.argv` or use a subprocess. Lazy per-mode imports are
+  intentional and pinned by `tests/test_lazy_imports.py`.
+- Check the current branch and worktree before editing; preserve existing
+  unrelated changes.
+- Scope defaults and CLI parameters live in `settings.py` and `main.py`; the GUI
+  launcher assembles them in `tools/scope_launcher_gui.py`. Before scope changes,
+  read `docs/SCOPE_UPGRADE.md` and start from its latest Handoff. Treat current
+  defaults as D0; keep its charter/stages frozen and append evidence/check-ins,
+  following its Numba, realtime/headless, baseline and stage requirements.
+- Scope delivery status: S7 software validation and the user-requested S8
+  verification/release handoff are closed in `docs/SCOPE_UPGRADE.md` A062.
+  Do not restart validation sweeps or physical-device work without a new task.
 
-- Root holds the entry point, the shared core (`settings.py`, `shared_state.py`,
-  `server_config.py`, `index_calculator.py`, `folder_selector.py`), and the mode
-  engines (`image_display.py`, `web_service.py`, `ascii_*`, `scope_display.py`,
-  `modem_display.py`, ...). Imports are flat and absolute; CWD is assumed to be
-  the repo root everywhere (systemd units, scripts, and tests all rely on it).
-- `docs/` — documentation except this file and `README.md`.
-- `scripts/` — shell entry points (`setup_app.sh`, `run_app.sh`, kiosk setups).
-  They re-anchor to the repo root internally; run them from anywhere.
-- `tools/` — standalone diagnostic/inspection tools. Nothing imports them; the
-  ones that need app modules insert the repo root into `sys.path` themselves.
-- `tests/` — root-level test suites; `modem_tests/` is the modem package suite.
+## Environment and artifacts
 
-## Modes
+- Use the repository `.venv/bin/python` (Python 3.11+); it uses
+  `--system-site-packages`. Device-backed audio uses `sounddevice` over
+  PortAudio; `requirements.txt` includes modem and scope Python requirements.
+  Native libraries such as PortAudio are OS packages.
+- `xvfb-run -a` is available for GUI/GL checks that need an X display. For
+  software-rendered GL, use `xvfb-run -a env LIBGL_ALWAYS_SOFTWARE=1 ...`.
+- `./scripts/setup_app.sh` performs system setup and may configure systemd.
+  `utilities/check_modem_setup.py` verifies modem imports without opening audio.
+- No `pyproject.toml`, formatter, linter, or type checker is configured.
+- Put generated measurements, screenshots, and temporary scripts in repo-local
+  `tmp/`; it is gitignored. Never commit generated bakes (`*_xy/`, `*_modem/`).
+- Baked-source `main.py --mode scope` requires an XY bake; `--scope-source images`
+  uses runtime thumbnails instead. The baked modem mode requires a modem bake
+  with `modem.json`. Use `utilities/convert_to_xy.py` and
+  `utilities/convert_to_modem_dct.py` for the respective bakes.
 
-`main.py --mode` accepts `web | ascii | asciiweb | local | scope | modem`. Each
-mode is **standalone and owns the run**; modes never attach to each other.
-Scope needs no GL/TurboJPEG/image-loader; modem needs no ports/GL; web/ascii
-need no audio. CLI args that only mean something in another mode are reported
-as ignored (with a `⚠️`), not silently dropped.
+## Existing audio validation tooling
 
-## Environment
+- User-directed validation scope: use the existing ALSA/Pulse software loopback
+  and built-in browser/native/CPU scope visualizers. Physical/offline tests are
+  the user's separate work (see `docs/SCOPE_UPGRADE.md` A043). Do not make
+  physical hardware acquisition or scope hookup the next agent task or a
+  prerequisite for this software delivery. Use the available visual inspection
+  tools and renderer artifacts; report a disconnected browser tool precisely
+  rather than assuming the application or audio tooling is unavailable.
+- Verified in this workspace on 2026-10-07: `.venv/bin/python` imports
+  `sounddevice` 0.5.6 and loads PortAudio V19.6. The ALSA host API exposes
+  `pulse` (then index 0) and `default` (then index 1). PortAudio is available;
+  hardware scope/DAC access is a separate question. An underflow or stream
+  failure is not evidence that PortAudio is missing.
+- Reuse the existing route: PortAudio `pulse` -> PulseAudio null sink `loop`
+  -> `loop.monitor`. The verified default sink/source are `loop` and
+  `loop.monitor`; the sole sink is `module-null-sink`, stereo, 44.1 kHz.
+  Refresh these observations with `pactl info`, `pactl list short sinks`, and
+  `pactl list short sources` before output. Prefer the device name `pulse`
+  over a remembered numeric index. If routing differs, investigate the
+  existing route before proceeding.
+- Opening/reopening a test stream on this existing route is normal. Do not
+  create additional sinks/devices, load loopback modules, change defaults, or
+  reinstall audio tooling merely to run the next validation. Device-change
+  experiments need their own explicit task scope; routine tests reuse `loop`.
+- `pactl` inspects routing and `parec` captures `loop.monitor`; both are
+  installed. Reuse `parec` monitor capture rather than adding a concurrent
+  PortAudio input stream by default. The existing harness documents scheduling
+  problems observed with a second PortAudio stream.
+- Use channels 1/2 for this stereo monitor. PortAudio advertising 32 channels
+  does not establish a 24/25 monitor path. Explicit 48/96-kHz output streams
+  have run through this route, while monitor capture is 44.1 kHz. NullStream
+  (`--device null`), PortAudio-to-null-sink, and physical output are distinct
+  validation paths; label evidence accordingly.
+- Existing local harnesses: `tmp/scope_s0_harness_v3.py` (callback observation
+  and `parec` capture), `tmp/scope_s7_pa_route_case.py` (rate/block screening),
+  `tmp/scope_s7_pa_video_case.py` with `tmp/scope_s7_pa_matched_run.py`
+  (D0/integrated video through the PortAudio null-sink route),
+  `tmp/scope_s7_final_matched.py` (NullStream D0/integrated moving-video
+  comparison), and `tmp/scope_s7_software_matrix.py` (mode/settings checks).
+  Inspect and reuse them when present; they are gitignored local artifacts, not
+  guaranteed in a fresh checkout. Results and limitations are in
+  `docs/SCOPE_UPGRADE.md`, especially Appendices A059/A060. The rate-case runner
+  reuses output filenames, so preserve prior evidence or assign unique filenames
+  before repeat runs.
+- `xvfb-run`, `ffmpeg`, and `ffprobe` are also installed. Check tooling with
+  imports, enumeration, and `command -v` before declaring it unavailable.
 
-- `.venv` is created with `--system-site-packages` (needed for Tk). Always use
-  `.venv/bin/python`; on macOS the Homebrew `python-tk` must match the Python
-  version used to create the venv. `scripts/setup_app.sh` (sudo) does setup + systemd.
-- `utilities/check_modem_setup.py` verifies modem imports/bindings without
-  opening audio devices.
-- No linter, typechecker, or formatter is configured. Inline prose comments
-  explaining invariants are the norm — keep that style.
+## Modem invariants
 
-## main.py quirks
+- V7 timing acquisition is edge/pulse-counted through
+  `animation_modem/transport3.py::measure_pulses`; preserve it rather than
+  replacing it with FFT correlation. V7 packets use EOF framing by default.
+- Fold-500 carries stereo M/S data. A single raw M/S leg is not ordinary mono;
+  preserve the stereo interpretation during dropout or recovery handling.
+- On damage, display a partially decoded frame as-is; if a frame cannot be
+  decoded, hold the last good frame. Do not add a black-frame fallback.
+- Analog tape is the target medium, but synthetic channels are not tape
+  validation. Keep wire/decode design deterministic and validate real tape on
+  hardware; see `docs/transport_v7_spec.md`.
 
-- **CLI is parsed at import time**: `cli_args, log_filename = configure_runtime()`
-  runs at module scope (main.py:786). Importing `main` parses `sys.argv`,
-  patches `settings` globals, and can `sys.exit()` (e.g. busy ports). Tests that
-  import `main` must drive it via args in-process or as a subprocess.
-- **Lazy per-mode imports are an invariant** (`tests/test_lazy_imports.py` pins it):
-  a mode must only import its own dependencies, at the point of use. Do not add
-  module-level imports of heavy/optional libs to `main.py`.
-- Config flow is CLI → writes `settings.<GLOBAL>` → modules read `settings.*`
-  at runtime. No config framework. `settings.py` re-exports
-  `constantStorage/*`.
+## Tests and audio safety
 
-## Ports and caches
-
-- `server_config.py` owns port assignments: web monitor 1978 / stream 8080;
-  ascii 2323 (monitor 2324); asciiweb 2423/2424; scope 8890. `require_ports()`
-  exits on a busy port, but scope mode deliberately skips it (it binds nothing).
-  Ports 2423/2424 are reserved for asciiweb.
-- Image scan caches live in `_cache/generated_lists_<src>_<mode>_<port>/` and
-are wiped at startup; `--rebuild` forces regeneration. `logs/` holds per-run
-logs (stdout and stderr are teed there).
-
-## Bakes (all gitignored, never commit)
-
-- `*_xy/` — scope geometry, baked once by `utilities/convert_to_xy.py`. The
-  compact bake stores 128px luminance+alpha and stipple coords, not full-res
-  frames; scope runtime never opens a photo.
-- `*_modem/` — RGBA DCT slabs from `utilities/convert_to_modem_dct.py`;
-  must contain `modem.json`, else `main.py --mode modem` errors.
-- `images_sbs/` — SBS JPEGs; `*_modem/`/`*_xy/` derive from `--dir`.
-
-## Tests
-
-`unittest` style, run from the repo root (tests import `animation_modem.*`,
-`utilities.*`, and the app modules directly):
+Run from the repository root:
 
 ```bash
 .venv/bin/python -m unittest discover -s modem_tests -v
@@ -80,32 +116,50 @@ logs (stdout and stderr are teed there).
 .venv/bin/python -m unittest tests.test_ascii_converter_adjustments tests.test_ascii_scaling -v
 ```
 
-- `test_ascii_converter_adjustments` / `test_ascii_scaling` live in `tests/`,
-  outside `modem_tests/`: they pin the ascii grading knobs
-  (`--ascii-contrast`/`--ascii-brightness`/`--ascii-gamma`) and the
-  neutral-at-1.0 contrast that keeps the shipped picture byte-identical.
-- Failing on the current checkout (pre-existing, matches `.pytest_cache`):
-  `test_modem_screen` ffmpeg-failure (needs ffmpeg/live capture),
-  `test_pilot_continuity` smooth-drift steps (-0.25, 0.18),
-  `test_tape_band` mid-band-header trade.
-- Some scope tests/tools block on an audio-device prompt when run without a
-  tty or configured `--device` (e.g. `tests/test_scope_pair.py` — that one is
-  an interactive inspection tool, not a unit test). Never blanket
-  `discover -s tests` — it would collect it.
-- `tests/test_scope_stochastic.py` and `tests/test_scope_pair.py` each
-  construct a bare `Scope()` (default device = the speakers). Run them only
-  on a box where the default output is safe (e.g. BlackHole 2ch).
-- `tests/test_scope_pair.py`, `tools/spec.py`, `tools/bake_advisor.py`,
-  `tools/verify_scope_files.py` are inspection/diagnostic tools, not part of
-  the suite.
+Run a focused modem test, for example:
 
-## Independence constraints
+```bash
+.venv/bin/python -m unittest modem_tests.test_v7_live_input -v
+```
 
-- `animation_modem/` is a self-contained transport package: keep it free of
-  app imports (renderer, settings, status).
-- Audio output uses `sounddevice`; give a device by name (`--device BlackHole`)
-  or index, never assume the default. `--device null` runs scope headless
-  (browser renders the samples). Anything that opens a REAL device must use
-  `BlackHole 2ch`. BlackHole is not stock macOS: if this is a Mac and
-  BlackHole is missing, STOP and ask the user to install it
-  (`brew install blackhole-2ch`) — never let tests use the built-in speakers.
+Do not blanket-discover `tests/`: it also contains interactive scope inspection
+and audio-device-dependent tests. In particular, `tests/test_scope_pair.py` is
+an inspection tool. Use `--device null` for headless scope checks; it does not
+verify PortAudio/device behavior. Run device-backed audio tests only through an
+explicitly verified virtual/loopback route, never physical speakers.
+`server_config.py` is the source of truth for application port assignments.
+
+## Compiled arithmetic (standing rule)
+
+Per-packet and per-frame arithmetic in the V7 fold and nested-fold code is
+written as numba kernels (`@njit(cache=True)`), not as numpy or scipy
+expressions, and new work in this area uses nothing else. Favour compiled
+code for everything that runs per packet.
+
+- Kernels live in `tools/v7_sk_fold.py`. `test_modem_v7/nested_fold.py`
+  holds tables, state and decisions and calls kernels; it does no array
+  arithmetic of its own.
+- numpy arrays remain the containers kernels take and return. Convert once,
+  at table load or codec set-up (`_f8`, `np.ascontiguousarray`), never per
+  packet.
+- numpy is acceptable only for one-time set-up: loading tables, slicing a
+  stock model, building constant matrices.
+- A rewrite into kernels must be shown to change nothing: compare live
+  decodes before and after, on more than one picture and with smoothing
+  both on and off.
+- Downscale kernels (`dct_kernels/`): a kernel's per-frame `post` step calls
+  compiled routines in `animation_modem/v7_kernel_solve.py` (or the
+  `KernelContext` helpers `project`, `reduce`, `source_range`, `tame`, which
+  do). Only what is built once per setting (a gain window, a model matrix)
+  may use numpy or scipy.
+- Compiled means faster, not just "not numpy". Measure before and after.
+  Two per-frame steps stay on library code because the compiled version was
+  measured slower: `clip_aware_luma` (scipy's FFT-based DCT, ten rounds a
+  frame, about three times faster than a compiled matrix transform) and the
+  gamma power on float frames (numpy's vectorised power). Replace them only
+  with something measured faster.
+- Kernels that multiply matrices: `v7_source_dct._separable` avoids BLAS on
+  purpose (its docstring: BLAS worker threads were seen to spin and cost 3-4x
+  the useful CPU on a two-core host). The nested smoothing and the kernel
+  solves use `np.dot` inside numba, which is BLAS; on the development sandbox
+  that burned no extra CPU, but it has not been measured on the target Mac.

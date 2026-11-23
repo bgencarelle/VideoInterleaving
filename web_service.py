@@ -13,7 +13,7 @@ import sys
 import settings
 from shared_state import exchange_web
 from lightweight_monitor import monitor_data, HTML_TEMPLATE
-from server_config import get_config
+from server_config import get_config, MODE_SCOPE
 
 MAX_VIEWERS = getattr(settings, 'MAX_VIEWERS', 20)
 _hb_lock = threading.Lock()
@@ -27,6 +27,28 @@ HEADER_BOUNDARY = b'--frame\r\n'
 HEADER_NEWLINE = b'\r\n'
 HEADER_CTYPE_JPEG = b'Content-Type: image/jpeg\r\n\r\n'
 HEADER_CTYPE_WEBP = b'Content-Type: image/webp\r\n\r\n'
+
+
+class _MjpegWriter:
+    """Finish each multipart image now, not when the next picture arrives."""
+
+    def __init__(self, stream):
+        self.stream = stream
+        self.started = False
+
+    def write(self, payload, content_type=HEADER_CTYPE_JPEG):
+        if not self.started:
+            self.stream.write(HEADER_BOUNDARY)
+            self.started = True
+        self.stream.write(content_type.rstrip(b'\r\n') +
+                          b'\r\nContent-Length: ' + str(len(payload)).encode('ascii') +
+                          b'\r\n\r\n')
+        self.stream.write(payload)
+        # This delimiter ends the current part and opens the next. Its
+        # headers can arrive later; a browser need not hold this picture for
+        # another producer tick to discover where its JPEG/WebP ends.
+        self.stream.write(HEADER_NEWLINE + HEADER_BOUNDARY)
+        self.stream.flush()
 
 
 def _set_heartbeat(cid):
@@ -63,6 +85,11 @@ def _serve_static_file(handler):
     try:
         raw_path = urlparse(handler.path).path
         decoded_path = unquote(raw_path)  # Decode %2e%2e -> ..
+        if decoded_path.startswith('/ascii/static/'):
+            decoded_path = decoded_path[len('/ascii'):]
+        elif decoded_path.startswith('/asciistatic/'):
+            # Existing nginx /ascii/ -> upstream /ascii concatenates suffixes.
+            decoded_path = '/static/' + decoded_path[len('/asciistatic/'):]
         rel_path = decoded_path.lstrip('/')
 
         # Normalize path separators to forward slashes for consistency
@@ -112,6 +139,8 @@ def _serve_dynamic_template(handler):
         decoded_path = unquote(raw_path)
         # Remove leading slash and normalize
         clean_path = os.path.normpath(decoded_path.lstrip('/')).replace('\\', '/')
+        if clean_path in ('scope2', 'scope2.html', 'scope.html'):
+            clean_path = 'scope'
 
         # 2. Security: Prevent Directory Traversal
         if "/../" in f"/{clean_path}/" or clean_path.startswith(".."):
@@ -182,7 +211,7 @@ class RobustHandlerMixin:
     def log_message(self, format, *args):
         # Quiet Mode: Filter out internal stats polling and static files
         path = getattr(self, "path", "")
-        if path in ['/stats', '/data'] or path.startswith('/static/'):
+        if path in ['/stats', '/data'] or path.startswith(('/static/', '/ascii/static/', '/asciistatic/')):
             return
 
         ip = get_real_ip(self)
@@ -222,18 +251,22 @@ def _scope_opts(path):
     return size, exposure
 
 
-def _scope_jpeg(size, pts=None, quality=82, exposure=1.0):
+def _scope_jpeg(size, pts=None, quality=82, exposure=1.0, workspace=None):
     """Render the parked trace to JPEG bytes, or None if there is nothing."""
     try:
         import cv2
         from scope_out import Scope
-        from scope_bake import preview_frame
+        from scope_bake import _warm_preview_kernels, preview_frame
         if pts is None:
             Scope.want_tap(3.0)
             _, pts = Scope.read_tap()
         if pts is None:
             return None
-        img = preview_frame(pts, size=size, exposure=exposure)
+        _warm_preview_kernels()
+        kwargs = {"size": size, "exposure": exposure}
+        if workspace is not None:
+            kwargs["workspace"] = workspace
+        img = preview_frame(pts, **kwargs)
         ok, buf = cv2.imencode(".jpg", img[:, :, ::-1],
                                [cv2.IMWRITE_JPEG_QUALITY, quality])
         return buf.tobytes() if ok else None
@@ -246,7 +279,7 @@ class MonitorHandler(RobustHandlerMixin, http.server.BaseHTTPRequestHandler):
     timeout = 5
 
     def do_GET(self):
-        if self.path.startswith("/static/"):
+        if self.path.startswith(("/static/", "/ascii/static/", "/asciistatic/")):
             _serve_static_file(self)
             return
 
@@ -254,7 +287,14 @@ class MonitorHandler(RobustHandlerMixin, http.server.BaseHTTPRequestHandler):
             self.send_response(200)
             self.send_header('Content-Type', 'text/html; charset=utf-8')
             self.end_headers()
-            self.wfile.write(HTML_TEMPLATE.encode('utf-8'))
+            page = HTML_TEMPLATE
+            try:
+                if get_config().get_mode() == MODE_SCOPE:
+                    with open("templates/scope.html", "r", encoding="utf-8") as f:
+                        page = f.read()
+            except (OSError, RuntimeError):
+                pass
+            self.wfile.write(page.encode('utf-8'))
 
         elif self.path == "/data":
             self.send_response(200)
@@ -324,6 +364,10 @@ class MonitorHandler(RobustHandlerMixin, http.server.BaseHTTPRequestHandler):
 
                 content = content.replace("{{ASCII_WIDTH}}", str(cols))
                 content = content.replace("{{ASCII_HEIGHT}}", str(rows))
+                source_cols, source_rows = (getattr(settings, 'ASCII_WEB_SOURCE_SIZE', None)
+                                             or (cols, rows))
+                content = content.replace("{{ASCII_SOURCE_WIDTH}}", str(source_cols))
+                content = content.replace("{{ASCII_SOURCE_HEIGHT}}", str(source_rows))
                 content = content.replace("{{ASCII_FONT_RATIO}}", str(ratio))
                 content = content.replace("{{WEBSOCKET_PORT}}", str(ws_port))
 
@@ -360,6 +404,7 @@ class MonitorHandler(RobustHandlerMixin, http.server.BaseHTTPRequestHandler):
         except (OSError, AttributeError):
             return
         last, idle = -1, 0.0
+        writer = _MjpegWriter(self.wfile)
         # q88: below about q80 the compression pushes cells across `trim`,
         # which flips them from drawn to undrawn and reroutes the serpentine.
         # Visually harmless but it is a cliff, not a slope, so stay above it.
@@ -382,11 +427,7 @@ class MonitorHandler(RobustHandlerMixin, http.server.BaseHTTPRequestHandler):
                 if not ok:
                     continue
                 try:
-                    self.wfile.write(HEADER_BOUNDARY)
-                    self.wfile.write(HEADER_CTYPE_JPEG)
-                    self.wfile.write(buf.tobytes())
-                    self.wfile.write(HEADER_NEWLINE)
-                    self.wfile.flush()
+                    writer.write(buf.tobytes())
                 except (BrokenPipeError, ConnectionResetError,
                         ConnectionAbortedError, OSError):
                     return
@@ -418,11 +459,21 @@ class MonitorHandler(RobustHandlerMixin, http.server.BaseHTTPRequestHandler):
             return
 
         last_seq = -1
+        writer = _MjpegWriter(self.wfile)
         idle = 0.0
         try:
             from scope_out import Scope
         except Exception:
             return
+        workspace = None
+        try:
+            from scope_bake import PreviewWorkspace, _warm_preview_kernels
+            _warm_preview_kernels()
+            workspace = PreviewWorkspace(size)
+        except Exception:
+            # Older render snapshots have no reusable workspace API. The
+            # compatibility renderer still supplies the same JPEG stream.
+            pass
         try:
             while True:
                 Scope.want_tap(3.0)          # holding the connection IS the ask
@@ -435,15 +486,12 @@ class MonitorHandler(RobustHandlerMixin, http.server.BaseHTTPRequestHandler):
                     continue
                 idle = 0.0
                 last_seq = seq
-                blob = _scope_jpeg(size, pts, exposure=exposure)
+                blob = _scope_jpeg(size, pts, exposure=exposure,
+                                   workspace=workspace)
                 if blob is None:
                     continue
                 try:
-                    self.wfile.write(HEADER_BOUNDARY)
-                    self.wfile.write(HEADER_CTYPE_JPEG)
-                    self.wfile.write(blob)
-                    self.wfile.write(HEADER_NEWLINE)
-                    self.wfile.flush()
+                    writer.write(blob)
                 except (BrokenPipeError, ConnectionResetError,
                         ConnectionAbortedError, OSError):
                     return
@@ -495,7 +543,7 @@ class MonitorHandler(RobustHandlerMixin, http.server.BaseHTTPRequestHandler):
         self.send_error(404)
 
 
-def _tight_stream_socket(conn):
+def _tight_stream_socket(conn, sndbuf=32768):
     """Minimal buffering for MJPEG streams.
 
     The frame exchange (and the scope tap) only ever holds the LATEST frame,
@@ -508,7 +556,7 @@ def _tight_stream_socket(conn):
     reconnect).
     """
     try:
-        conn.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 32768)
+        conn.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, sndbuf)
         conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         conn.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
         conn.settimeout(15)
@@ -571,7 +619,9 @@ class StreamHandler(RobustHandlerMixin, http.server.BaseHTTPRequestHandler):
             _current_viewer_count += 1
         _set_heartbeat(cid)
 
-        _tight_stream_socket(self.connection)
+        # Limit transport backlog. This is a byte budget, not a guaranteed
+        # one-picture bound: encoded sizes and OS socket accounting vary.
+        _tight_stream_socket(self.connection, sndbuf=8192)
 
         self.send_response(200)
         self.send_header('Content-Type', 'multipart/x-mixed-replace; boundary=frame')
@@ -583,6 +633,7 @@ class StreamHandler(RobustHandlerMixin, http.server.BaseHTTPRequestHandler):
         # If the producer stops sending frames for >10s, we disconnect the client.
         stall_timeout = getattr(settings, "STREAM_STALL_TIMEOUT", 10.0)
         last_frame_time = time.monotonic()
+        writer = _MjpegWriter(self.wfile)
 
         try:
             while True:
@@ -625,11 +676,7 @@ class StreamHandler(RobustHandlerMixin, http.server.BaseHTTPRequestHandler):
 
                 # 3. Send Frame
                 try:
-                    self.wfile.write(HEADER_BOUNDARY)
-                    self.wfile.write(ctype)
-                    self.wfile.write(frame_data)
-                    self.wfile.write(HEADER_NEWLINE)
-                    self.wfile.flush()
+                    writer.write(frame_data, ctype)
                 except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError, OSError) as write_err:
                     # Connection closed during write - normal disconnect
                     print(f"[Stream] Client {cid}: Write error: {write_err}")

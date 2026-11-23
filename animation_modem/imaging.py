@@ -1,7 +1,7 @@
 """Image <-> value-vector conversion for the modem transport.
 
 These were living in the check utility, which put them out of reach
-of modem_display.py -- the runtime cannot import from utilities/. Nothing here
+of the application modem sender -- the runtime is self-contained. Nothing here
 touches the wire format; it is the source-coding half, shared by the tool and
 the runtime so both produce byte-identical value vectors.
 

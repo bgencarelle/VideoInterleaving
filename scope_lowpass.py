@@ -42,7 +42,9 @@ import os
 import sys
 import time
 
+from numba import njit
 import numpy as np
+from scope_numeric import circular_filter, circle_points
 
 ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
 if ROOT_DIR not in sys.path:
@@ -50,6 +52,32 @@ if ROOT_DIR not in sys.path:
 
 
 # ---------------------------------------------------------------- filters
+
+@njit(cache=True, nogil=True, fastmath=False)
+def _cascaded_one_pole_kernel(samples, state, a, b):
+    """Apply stateful one-pole sections without Python sample loops."""
+    current = samples.copy()
+    scratch = np.empty_like(current)
+    for section in range(state.shape[0]):
+        for sample in range(current.shape[0]):
+            for channel in range(current.shape[1]):
+                value = (a * state[section, channel]
+                         + b * current[sample, channel])
+                state[section, channel] = value
+                scratch[sample, channel] = value
+        previous = current
+        current = scratch
+        scratch = previous
+    return current
+
+
+def warm_cascaded_one_pole(order=4, channels=2):
+    """Warm the float64 array signature before starting audio output."""
+    state = np.zeros((max(1, int(order)), max(1, int(channels))),
+                     dtype=np.float64)
+    empty = np.empty((0, state.shape[1]), dtype=np.float64)
+    _cascaded_one_pole_kernel(empty, state, 0.0, 1.0)
+
 
 def lowpass_circular(frame, cutoff_hz, samplerate, order=4):
     """
@@ -64,13 +92,7 @@ def lowpass_circular(frame, cutoff_hz, samplerate, order=4):
     n = len(frame)
     if not cutoff_hz or cutoff_hz <= 0 or cutoff_hz >= samplerate / 2 or n < 4:
         return frame.astype(np.float32)
-    freqs = np.fft.rfftfreq(n, d=1.0 / samplerate)
-    with np.errstate(divide="ignore", over="ignore"):
-        mag = 1.0 / np.sqrt(1.0 + (freqs / float(cutoff_hz)) ** (2 * order))
-    out = np.empty_like(frame)
-    for ch in range(frame.shape[1]):
-        out[:, ch] = np.fft.irfft(np.fft.rfft(frame[:, ch]) * mag, n=n)
-    return out.astype(np.float32)
+    return circular_filter(frame, samplerate, cutoff_hz, order=order)
 
 
 class CascadedOnePole:
@@ -85,6 +107,7 @@ class CascadedOnePole:
         self.order = max(1, int(order))
         self.set_cutoff(cutoff_hz, samplerate)
         self.z = np.zeros((self.order, channels), dtype=np.float64)
+        warm_cascaded_one_pole(self.order, channels)
 
     def set_cutoff(self, cutoff_hz, samplerate):
         self.enabled = bool(cutoff_hz and 0 < cutoff_hz < samplerate / 2)
@@ -96,17 +119,10 @@ class CascadedOnePole:
     def process(self, x):
         if not self.enabled:
             return x
-        x = np.asarray(x, dtype=np.float64)
-        a, b = self.a, 1.0 - self.a
-        for s in range(self.order):
-            zs = self.z[s]
-            out = np.empty_like(x)
-            for i in range(len(x)):          # sample loop: chunks are small
-                zs = a * zs + b * x[i]
-                out[i] = zs
-            self.z[s] = zs
-            x = out
-        return x.astype(np.float32)
+        samples = np.ascontiguousarray(np.asarray(x, dtype=np.float64))
+        output = _cascaded_one_pole_kernel(
+            samples, self.z, self.a, 1.0 - self.a)
+        return output.astype(np.float32)
 
 
 def describe(cutoff_hz, samplerate, samples_per_trace, cols):
@@ -124,13 +140,12 @@ def bench_frame(n):
     """Circle plus rotating square -- known geometry, so filter effects are
     unambiguous rather than confused with content."""
     from scope_out import rasterize
-    th = np.linspace(0, 2 * np.pi, 128, endpoint=False)
-    circle = np.stack([0.7 * np.cos(th), 0.7 * np.sin(th)], axis=1)
+    circle = circle_points(128,0.7)
     circle = np.vstack([circle, circle[:1]])
     s = 0.4
     square = np.array([[-s, -s], [s, -s], [s, s], [-s, s], [-s, -s]])
     spokes = [np.array([[0, 0], [0.7 * math.cos(a), 0.7 * math.sin(a)]])
-              for a in np.linspace(0, np.pi, 5, endpoint=False)]
+               for a in (i*math.pi/5 for i in range(5))]
     return rasterize([circle, square] + spokes, n)
 
 

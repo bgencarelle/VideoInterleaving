@@ -187,6 +187,7 @@ folders_processed/folder_count_62188.txt
 /alpha.zip
 /folders_processed_web
 /_cache/
+/tmp/
 CLEANUP_SUMMARY.md
 CODE_REVIEW.md
 RENDERING_PIPELINE_ANALYSIS.md
@@ -206,5 +207,12 @@ images_xy/
 # tables, default WAV outputs (modem_v3_check write -> v3_test.wav), captured
 # receive logs. Bakes live in *_modem/ above.
 /*.wav
-/*.npy
+images_xy_compact
 /receive.jsonl
+/images_xy_compact/face/3_D#_FaceFills1/flags.npy
+/images_og/
+/images_sbs/
+/images_xy_compact/
+
+# Full-library RGB web bake (utilities/bake_ascii_rgb.py output; never commit).
+/images_rgb_web/

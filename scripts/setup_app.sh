@@ -1,7 +1,26 @@
 #!/bin/bash
 set -euo pipefail  # Better error handling: exit on error, undefined vars, pipe failures
 
-trap 'setup_status=$?; if [ "$setup_status" -ne 0 ]; then printf "Setup failed (exit %s). See the error above.\n" "$setup_status" >&2; fi' EXIT
+# Under sudo, anything this script creates in the user's checkout or home
+# (logs, the venv's hash file, __pycache__ from the import checks, the
+# systemd user directory) would otherwise be left owned by root, which then
+# breaks pip, git and `systemctl --user` for the user. Hand it all back on
+# exit -- also after a failure, and also anything an earlier sudo run left.
+repair_ownership() {
+    local user="${USERNAME:-}" group home
+    [ "$(id -u)" -eq 0 ] || return 0
+    [ -n "$user" ] && [ "$user" != root ] || return 0
+    [ "${DRY_RUN:-false}" = false ] || return 0
+    group="$(id -gn "$user" 2>/dev/null)" || return 0
+    home="$(getent passwd "$user" | cut -d: -f6)"
+    local paths=("$PROJECT_DIR")
+    for p in "$home/.config" "$home/.cache/pip"; do
+        [ -n "$home" ] && [ -e "$p" ] && paths+=("$p")
+    done
+    find "${paths[@]}" -xdev -user 0 -exec chown -h "$user:$group" {} + 2>/dev/null || true
+}
+
+trap 'setup_status=$?; repair_ownership; if [ "$setup_status" -ne 0 ]; then printf "Setup failed (exit %s). See the error above.\n" "$setup_status" >&2; fi' EXIT
 
 # --- CONFIGURATION ---
 PROJECT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)  # repo root = parent of scripts/
@@ -61,6 +80,20 @@ if [ -n "${SUDO_USER:-}" ]; then
 else
     USERNAME=$(whoami)
 fi
+
+# Run a command as the target user (a no-op wrapper when not under sudo), so
+# files it creates in the user's checkout or home belong to them.
+run_as_user() {
+    if [ "$USERNAME" = "$(whoami)" ]; then
+        "$@"
+    else
+        sudo -u "$USERNAME" -H "$@"
+    fi
+}
+
+# Undo root-owned files from an earlier sudo run before anything below runs
+# as the user (pip into a root-owned venv would fail).
+repair_ownership
 
 # --- PORT DETECTION ---
 # Default ports from server_config.py
@@ -188,7 +221,7 @@ log_info "Project Dir:     $PROJECT_DIR"
 
 # Python may be supplied by the selected package manager below.
 # Validate checkout inputs before installing anything.
-for requirement in requirements.txt requirements-modem.txt requirements-scope.txt system-requirements.txt utilities/check_modem_setup.py; do
+for requirement in requirements.txt requirements-modem.txt requirements-scope.txt system-requirements.txt utilities/check_modem_setup.py utilities/check_graphics_setup.py; do
     if [ ! -f "$PROJECT_DIR/$requirement" ]; then
         log_error "Missing $requirement; update the complete checkout"
         exit 1
@@ -234,9 +267,9 @@ detect_os() {
             case "$ID" in
                 debian|ubuntu|raspbian)
                     os="debian"
-                    pkg_manager="apt"
-                    pkg_update_cmd="apt update -qq"
-                    pkg_install_cmd="apt install -y"
+                    pkg_manager="apt-get"
+                    pkg_update_cmd="apt-get update -qq"
+                    pkg_install_cmd="apt-get install -y"
                     ;;
                 fedora|rhel|centos|rocky|almalinux)
                     os="rhel"
@@ -260,17 +293,17 @@ detect_os() {
                     echo "⚠️  WARNING: Unsupported Linux distribution: $ID" >&2
                     echo "   Attempting Debian/Ubuntu package names..." >&2
                     os="debian"
-                    pkg_manager="apt"
-                    pkg_update_cmd="apt update -qq"
-                    pkg_install_cmd="apt install -y"
+                    pkg_manager="apt-get"
+                    pkg_update_cmd="apt-get update -qq"
+                    pkg_install_cmd="apt-get install -y"
                     ;;
             esac
         else
             echo "⚠️  WARNING: Cannot detect Linux distribution. Assuming Debian/Ubuntu." >&2
             os="debian"
-            pkg_manager="apt"
-            pkg_update_cmd="apt update -qq"
-            pkg_install_cmd="apt install -y"
+            pkg_manager="apt-get"
+            pkg_update_cmd="apt-get update -qq"
+            pkg_install_cmd="apt-get install -y"
         fi
     else
         echo "❌ ERROR: Unsupported OS: $OSTYPE" >&2
@@ -309,24 +342,24 @@ get_packages_for_platform() {
             ;;
         rhel)
             # From README.md (Fedora/CentOS)
-            pkg_list="python3 python3-pip python3-devel gcc gcc-c++ make cmake pkgconfig \
-libwebp-devel libjpeg-turbo-devel SDL2-devel alsa-lib-devel portaudio python3-tkinter python3-opencv \
+            pkg_list="python3 python3-pip python3-devel python3-tkinter gcc gcc-c++ make cmake pkgconfig \
+libwebp-devel libjpeg-turbo-devel SDL2-devel alsa-lib-devel portaudio python3-opencv \
 mesa-libGL-devel mesa-libGLU-devel mesa-libEGL-devel mesa-libGLES-devel \
 libglvnd-devel glfw-devel mesa-utils \
 chrony ninja-build bind-utils certbot python3-certbot-nginx"
             ;;
         arch)
             # Arch Linux equivalents
-            pkg_list="python python-pip base-devel cmake pkg-config ninja \
-libwebp libjpeg-turbo sdl2 alsa-lib mesa glu glfw portaudio tk python-opencv ffmpeg \
+            pkg_list="python python-pip tk base-devel cmake pkg-config ninja \
+libwebp libjpeg-turbo sdl2 alsa-lib mesa glu glfw portaudio python-opencv ffmpeg \
 chrony bind-tools certbot certbot-nginx"
             ;;
         macos)
             # Package names differ by manager (MacPorts uses webp, not libwebp).
             if [ "$manager" = port ]; then
-                pkg_list="python312 py312-pip py312-numpy py312-scipy py312-Pillow py312-tkinter py312-opencv4 portaudio webp pkgconfig libsdl2 chrony libjpeg-turbo glfw ffmpeg"
+                pkg_list="python312 py312-pip py312-numpy py312-scipy py312-Pillow py312-opencv4 portaudio webp pkgconfig libsdl2 chrony libjpeg-turbo glfw ffmpeg"
             else
-                pkg_list="python@3.12 python-tk@3.12 portaudio webp pkg-config sdl2 chrony jpeg-turbo glfw ffmpeg"
+                pkg_list="python@3.12 portaudio webp pkg-config sdl2 chrony jpeg-turbo glfw ffmpeg"
             fi
             # Note: certbot on macOS is typically installed via pip or brew separately
             ;;
@@ -416,7 +449,7 @@ install_system_packages() {
         failure_count=$((failure_count + 1))
         echo "Package index update failed; attempting packages using the available index." >&2
     fi
-    if [ "$pkg_manager" = apt ]; then
+    if [ "$pkg_manager" = apt-get ]; then
         packages=$(remap_packages_for_platform "$packages")
     fi
     for package in $packages; do
@@ -463,7 +496,7 @@ NEEDS_SUDO=$(echo "$OS_INFO" | cut -d'|' -f5)
 
 echo "    OS: $OS | Package Manager: $PKG_MANAGER"
 
-# Use the interpreter belonging to the native Tk/scientific packages.
+# Use the interpreter belonging to the native scientific/image packages.
 if [ "$PKG_MANAGER" = port ]; then
     manager_executable=${PKG_INSTALL% install}
     PYTHON_BIN="$(dirname "$manager_executable")/python3.12"
@@ -556,8 +589,8 @@ PYCHECK
     fi
 
     # Check if key packages are installed
-    if ! "$VENV_DIR/bin/python" -c "import moderngl" 2>/dev/null; then
-        log_verbose "Key package 'moderngl' not found in venv"
+    if ! "$VENV_DIR/bin/python" -c "import glfw; glfw.get_version(); import moderngl, OpenGL.GL" 2>/dev/null; then
+        log_verbose "Required GLFW/ModernGL/OpenGL Python bindings are not importable"
         return 1
     fi
 
@@ -663,7 +696,7 @@ else
 
         # Store requirements hash
         if [ -f "$PROJECT_DIR/requirements.txt" ]; then
-            requirements_hash > "$VENV_DIR/.requirements_hash"
+            requirements_hash | run_as_user tee "$VENV_DIR/.requirements_hash" >/dev/null
         fi
 
         log_success "Python packages installed/updated"
@@ -680,10 +713,12 @@ if [ "$DRY_RUN" = false ]; then
             sudo -u "$USERNAME" "$VENV_DIR/bin/python" -m pip install 'opencv-python>=4.5'
         fi
     fi
-    "$VENV_DIR/bin/python" "$PROJECT_DIR/utilities/check_modem_setup.py"
-    "$VENV_DIR/bin/python" -c 'import cv2, mss; print("Scope dependencies available (OpenCV and mss).")'
+    # As the user: these imports write __pycache__ into the checkout and venv.
+    run_as_user "$VENV_DIR/bin/python" "$PROJECT_DIR/utilities/check_modem_setup.py"
+    run_as_user "$VENV_DIR/bin/python" "$PROJECT_DIR/utilities/check_graphics_setup.py"
+    run_as_user "$VENV_DIR/bin/python" -c 'import cv2, mss; print("Scope dependencies available (OpenCV and mss).")'
 else
-    log_info "[DRY-RUN] Would check modem/scope imports and install OpenCV if missing"
+    log_info "[DRY-RUN] Would check modem, graphics, and scope imports and install OpenCV if missing"
 fi
 
 # --------------------------------------------
@@ -1141,7 +1176,9 @@ EOF
         USER_SERVICE_DIR="$USER_HOME/.config/systemd/user"
         if [ "$DRY_RUN" = false ] && [ -d "$USER_HOME" ]; then
             log_info "Creating user service for local mode (better GUI compatibility)..."
-            mkdir -p "$USER_SERVICE_DIR"
+            # As the user: a root-owned ~/.config/systemd/user stops
+            # `systemctl --user enable` from creating its .wants links.
+            run_as_user mkdir -p "$USER_SERVICE_DIR"
 
             # Create user service
             cat <<EOF > "$USER_SERVICE_DIR/vi-local.service"

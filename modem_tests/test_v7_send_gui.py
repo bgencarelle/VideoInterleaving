@@ -1,0 +1,2131 @@
+"""The sender GUI builds valid CLI settings without opening an audio stream."""
+import unittest
+import signal
+import json
+from io import BytesIO
+from pathlib import Path
+import socket
+import tempfile
+import threading
+import time
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
+
+from PIL import Image
+
+from tools import v7_live
+from tools.v7_preview_protocol import pack_preview_datagram
+from tools.v7_send_gui import (FIELD_HELP, SOURCE_CHOICES, InputDevice,
+                                OutputDevice,
+                                PRIMARY_PROFILE_CHOICES, ScreenTarget, SenderGui,
+                                build_command, enumerate_screen_targets,
+                                enumerate_camera_sources, linux_camera_sources,
+                                enumerate_capture_fps, parse_capture_fps,
+                                input_devices, output_devices,
+                                parse_avfoundation_screen_sources,
+                                 parse_ffmpeg_camera_sources, pick_video_file,
+                                 device_rate_text, validate_settings,
+                                 _clipboard_text, _restore_sender_settings)
+
+
+def section_of(gui, dest):
+    """The title of the setup section that holds a setting."""
+    return next((title for title, group in gui.SECTIONS if dest in group),
+                None)
+
+
+class _Pipe:
+    """A control pipe that remembers what the GUI writes to it."""
+
+    def __init__(self):
+        self.text = ''
+
+    def write(self, text):
+        self.text += text
+
+    def flush(self):
+        pass
+
+
+class SenderKeyStub:
+    PRESS = 1
+    REPEAT = 2
+    KEY_ESCAPE = 256
+    KEY_ENTER = 257
+    KEY_TAB = 258
+    KEY_BACKSPACE = 259
+    KEY_RIGHT = 262
+    KEY_LEFT = 263
+    KEY_DOWN = 264
+    KEY_UP = 265
+    KEY_C = 67
+    KEY_I = 73
+    KEY_R = 82
+    KEY_SPACE = 32
+    KEY_A = 65
+    KEY_V = 86
+    KEY_KP_ENTER = 335
+    MOD_CONTROL = 2
+    MOD_SHIFT = 1
+
+
+class SenderGuiTests(unittest.TestCase):
+    def setUp(self):
+        self.device = OutputDevice(3, 'Test output', 2, 48000)
+        self.devices = (self.device,)
+        self.settings = {
+            'device': 3,
+            'source': 'screen',
+            'rate': None,
+            'profile': 'fold-500',
+            'mono_video_side': 'right',
+            'source_audio': 'source',
+            'source_audio_device': None,
+            'source_audio_input_side': 'mix',
+            'source_audio_gain': '1',
+            'source_audio_delay_ms': '0',
+            'speed': '1',
+            'encode_filter': 'auto',
+            'brightness': '',
+            'gamma': '1',
+            'capture_fps': '',
+            'video_source': '',
+            'video_live': False,
+            'camera': None,
+            'ffmpeg_input': '',
+            'screen_backend': 'mss',
+            'screen_target': ScreenTarget(
+                'Display 1 · 1920×1080 · (0,0)', '0,0,1920,1080'),
+            'region': '',
+            'capture_width': '160',
+            'capture_filter': 'auto',
+            'perceptual_resize': 'off',
+            'perceptual_detail_strength': '0.25',
+        }
+        self.sd = Mock()
+        self.sd.check_output_settings.return_value = None
+
+    def test_the_picker_offers_aspect_legacy_nested_and_adaptive_profiles(self):
+        self.assertEqual(
+            tuple(value for _label, value in PRIMARY_PROFILE_CHOICES),
+            ('aspect-fold-500', 'aspect-mono-500', 'aspect-mono-nested',
+             'stereo-nested', 'adaptive-mono-nested', 'adaptive-stereo-nested'))
+
+    def test_deprecated_profiles_are_refused_outside_the_test_switch(self):
+        from tools import v7_send_gui as gui
+        deprecated = ('fold-500', 'mono-colour-500', 'stereo-slices')
+        self.assertEqual(gui.DEPRECATED_PROFILES, deprecated)
+        self.assertEqual(set(v7_live.DEPRECATED_SEND_PROFILES), set(deprecated))
+        with patch.dict('os.environ', {'V7_ALLOW_DEPRECATED_PROFILES': ''}):
+            self.assertEqual(gui.valid_profiles(), v7_live.SEND_PROFILES)
+            self.assertEqual(v7_live.selectable_send_profiles(), v7_live.SEND_PROFILES)
+            for profile in deprecated:
+                with self.assertRaises(SystemExit), \
+                        patch('sys.stderr'):
+                    v7_live.parser().parse_args(
+                        ['send', '--device', 'null', '--source', 'test',
+                         '--profile', profile])
+        with patch.dict('os.environ', {'V7_ALLOW_DEPRECATED_PROFILES': '1'}), \
+                patch('sys.stderr'):
+            with self.assertRaises(SystemExit):
+                v7_live.parser().parse_args([
+                    'send', '--device', 'null', '--source', 'test',
+                    '--profile', 'mono-fold-500'])
+        with patch.dict('os.environ', {'V7_ALLOW_DEPRECATED_PROFILES': '1'}):
+            self.assertIn('fold-500', gui.valid_profiles())
+
+    def test_saved_nested_profile_migrates_only_when_old_opt_in_was_enabled(self):
+        legacy = {'profile': 'aspect-mono-nested',
+                  'matched_nested_test': False}
+        restored = {}
+        _restore_sender_settings(restored, legacy)
+        self.assertEqual(restored['profile'], 'aspect-mono-nested')
+        opted_in = {'profile': 'stereo-nested', 'matched_nested_test': True}
+        restored = {}
+        _restore_sender_settings(restored, opted_in)
+        self.assertEqual(restored['profile'], 'adaptive-stereo-nested')
+
+    def test_device_list_contains_only_output_devices_and_does_not_default(self):
+        sd = Mock()
+        sd.query_devices.return_value = [
+            {'name': 'Input only', 'max_input_channels': 2,
+             'max_output_channels': 0, 'default_samplerate': 48000},
+            {'name': 'Output', 'max_input_channels': 0,
+             'max_output_channels': 2, 'default_samplerate': 96000},
+        ]
+
+        devices = output_devices(sd)
+
+        self.assertEqual([device.name for device in devices], ['Output'])
+        self.assertEqual(devices[0].index, 1)
+        gui = SenderGui(devices)
+        self.assertIsNone(gui.settings['device'])
+
+    def test_input_device_picker_lists_only_input_capable_devices(self):
+        sd = Mock()
+        sd.query_devices.return_value = [
+            {'name': 'Input', 'max_input_channels': 2,
+             'max_output_channels': 0, 'default_samplerate': 48000},
+            {'name': 'Output', 'max_input_channels': 0,
+             'max_output_channels': 2, 'default_samplerate': 96000},
+        ]
+
+        devices = input_devices(sd)
+
+        self.assertEqual([(item.index, item.channels) for item in devices],
+                         [(0, 2)])
+        self.assertIsInstance(devices[0], InputDevice)
+
+    def test_sender_can_request_a_rate_or_follow_the_os_setting(self):
+        self.settings['rate'] = '96000'
+        command = build_command(self.settings, self.devices, self.sd)
+
+        self.assertEqual(command[command.index('--rate')+1], '96000')
+        kwargs = self.sd.check_output_settings.call_args.kwargs
+        self.assertEqual(kwargs['device'], 3)
+        self.assertEqual(kwargs['channels'], 2)
+        self.assertEqual(kwargs['samplerate'], 96000)
+        self.settings['rate'] = None
+        command = build_command(self.settings, self.devices, self.sd)
+        self.assertNotIn('--rate', command)
+        self.assertEqual(self.sd.check_output_settings.call_args.kwargs['samplerate'],
+                         self.device.default_rate)
+        self.assertEqual(device_rate_text(self.device),
+                         f'{self.device.default_rate/1000:g} kHz · OS setting')
+        self.assertEqual(device_rate_text(None), 'OS setting')
+        self.assertIn('rate', SenderGui(self.devices)._visible_fields())
+
+    def test_folded_default_builds_sender_cli_without_verbose_logging(self):
+        command = build_command(self.settings, self.devices, self.sd)
+        args = v7_live.parser().parse_args(command[2:])
+
+        self.assertEqual(args.mode, 'send')
+        self.assertEqual(args.device, 3)
+        self.assertEqual(args.source, 'screen')
+        self.assertEqual(args.profile, 'fold-500')
+        self.assertIsNone(args.experimental_fold)
+        self.assertEqual(args.encode_filter, None)
+        self.assertFalse(args.log)
+        self.assertNotIn('--rate', command)
+
+    def test_local_app_output_is_a_sender_capture_source(self):
+        self.settings['source'] = 'local'
+        command = build_command(self.settings, self.devices, self.sd)
+        args = v7_live.parser().parse_args(command[2:])
+
+        self.assertEqual(args.source, 'local')
+        self.assertIn(('VideoInterleaving local output', 'local'),
+                      SOURCE_CHOICES)
+
+    def test_image_preview_port_is_forwarded_to_sender_cli(self):
+        self.settings.update(preview='window', preview_stage='source')
+        command = build_command(
+            self.settings, self.devices, self.sd,
+            image_preview_port=54321)
+
+        position = command.index('--image-preview-port')
+        self.assertEqual(command[position+1], '54321')
+        self.assertNotIn('--image-preview-stage', command)
+
+    def test_chosen_movie_file_is_not_live_capture(self):
+        from tools.v7_capture import video_source_loops
+        movie = str(Path(__file__).parent/'fixtures'/
+                    'v7_robot_count_sync_test.mp4')
+        # The 'Treat URL as live' toggle is saved; it may still be on.
+        self.settings.update(source='video', video_source=movie,
+                             video_live=True)
+
+        command = build_command(self.settings, self.devices, self.sd)
+        args = v7_live.parser().parse_args(command[2:])
+
+        self.assertEqual(args.video_source, movie)
+        self.assertNotIn('--video-live', command)
+        self.assertFalse(args.video_live)
+        # The sender's own check accepts it as a looping file.
+        self.assertTrue(video_source_loops(
+            args.video_source, live=True if args.video_live else None))
+
+        # A stream URL keeps live capture; asking for it on a file still fails.
+        self.settings.update(video_source='rtsp://camera.example/stream')
+        self.assertIn('--video-live',
+                      build_command(self.settings, self.devices, self.sd))
+        with self.assertRaisesRegex(ValueError, 'requires a stream URL'):
+            video_source_loops(movie, live=True)
+
+    def test_selected_sample_rate_profile_and_video_path_reach_cli(self):
+        self.settings.update(source='video',
+                             video_source='https://media.example/a clip.mp4',
+                             video_live=True, preview='popout',
+                             profile='aspect-fold-500', speed='1.5')
+
+        command = build_command(self.settings, self.devices, self.sd)
+        args = v7_live.parser().parse_args(command[2:])
+
+        self.assertEqual(args.profile, 'aspect-fold-500')
+        self.assertIsNone(args.rate)
+        self.assertEqual(args.video_source,
+                         'https://media.example/a clip.mp4')
+        self.assertTrue(args.video_live)
+        self.assertNotIn('--preview', command)     # no separate player
+        self.assertEqual(args.speed, 1.5)
+
+    def test_no_preview_choice_adds_a_player_flag(self):
+        self.settings.update(source='screen', preview='popout')
+        command = build_command(self.settings, self.devices, self.sd)
+        self.assertNotIn('--preview', command)
+        self.assertNotIn('--image-preview-port', command)   # no port given
+
+    def test_mono_video_fold_profile_reaches_cli_and_uses_box_model(self):
+        self.settings.update(profile='mono-colour-500', mono_video_side='right')
+        command = build_command(self.settings, self.devices, self.sd)
+        args = v7_live.parser().parse_args(command[2:])
+
+        self.assertEqual(args.profile, 'mono-colour-500')
+        self.assertFalse(args.experimental_mono_fold)
+        self.assertEqual(args.mono_video_side, 'right')
+        self.assertIsNone(args.experimental_fold)
+        self.assertIsNone(args.encode_filter)
+        self.assertIn('--profile', command)
+        self.assertNotIn('--experimental-mono-fold', command)
+        self.assertEqual(args.source_audio, 'source')
+
+        self.settings['source_audio'] = 'off'
+        command = build_command(self.settings, self.devices, self.sd)
+        args = v7_live.parser().parse_args(command[2:])
+        self.assertEqual(args.source_audio, 'off')
+
+    def test_mono_colour_profile_reaches_sender_cli_as_a_profile_choice(self):
+        self.settings.update(profile='mono-colour-500', mono_video_side='left')
+
+        command = build_command(self.settings, self.devices, self.sd)
+        args = v7_live.parser().parse_args(command[2:])
+
+        v7_live._apply_profile_option(args)
+
+        self.assertEqual(args.profile, 'mono-colour-500')
+        self.assertEqual(args.mono_video_side, 'left')
+        self.assertTrue(args.experimental_mono_fold)
+        self.assertTrue(args.experimental_mono_colour)
+        self.assertEqual(command[command.index('--profile')+1],
+                         'mono-colour-500')
+        self.assertNotIn('--experimental-mono-colour', command)
+
+    def test_mono_video_can_route_an_explicit_audio_input_device(self):
+        audio_device = InputDevice(8, 'Loopback', 2, 48000)
+        self.settings.update(
+            profile='mono-colour-500', source='video',
+            video_source='clip.mp4', source_audio='device',
+            source_audio_device=8, source_audio_input_side='left',
+            source_audio_gain='0.7', source_audio_delay_ms='12')
+
+        command = build_command(
+            self.settings, self.devices, self.sd,
+            audio_devices=(audio_device,))
+        args = v7_live.parser().parse_args(command[2:])
+
+        self.assertEqual(args.mono_video_side, 'right')
+        self.assertEqual(args.source_audio, 'device')
+        self.assertEqual(args.source_audio_device, 8)
+        self.assertEqual(args.source_audio_input_side, 'left')
+        self.assertEqual(args.source_audio_gain, .7)
+        self.assertEqual(args.source_audio_delay_ms, 12)
+        self.sd.check_input_settings.assert_called_once()
+
+    def test_mono_video_audio_device_is_available_for_every_capture_source(self):
+        gui = SenderGui(self.devices)
+        gui.settings.update(profile='mono-colour-500', source_audio='device')
+        for _label, source in (
+                ('Camera', 'camera'), ('Screen', 'screen'),
+                ('Video', 'video'), ('Test', 'test'),
+                ('Mouse-follow', 'mouse-follow')):
+            with self.subTest(source=source):
+                gui.settings['source'] = source
+                self.assertIn('source_audio', gui._visible_fields())
+                self.assertIn('source_audio_device', gui._visible_fields())
+
+    def test_video_audio_source_and_input_pickers_are_clickable(self):
+        audio_device = InputDevice(8, 'Loopback', 2, 48000)
+        gui = SenderGui(self.devices, audio_devices=(audio_device,))
+        gui.settings.update(source='video', video_source='clip.mp4',
+                            profile='mono-colour-500')
+
+        def click(key):
+            rect = gui.hits[key]
+            position = ((rect[0]+rect[2])/2, (rect[1]+rect[3])/2)
+            glfw = SimpleNamespace(
+                MOUSE_BUTTON_LEFT=1, PRESS=1,
+                get_cursor_pos=lambda _window: position)
+            gui._on_mouse(glfw, None, 1, 1, 0)
+
+        gui._canvas((960, 720))
+        self.assertIn('field:source_audio', gui.hits)
+        click('field:source_audio')
+        self.assertEqual(gui.dropdown, 'source_audio')
+        gui._canvas((960, 720))
+        click('option:1')
+        self.assertEqual(gui.settings['source_audio'], 'device')
+
+        gui._canvas((960, 720))
+        self.assertIn('field:source_audio_device', gui.hits)
+        self.assertIn('field:source_audio_input_side', gui.hits)
+        with patch('tools.v7_send_gui.input_devices',
+                   return_value=(audio_device,)):
+            click('field:source_audio_device')
+        self.assertEqual(gui.dropdown, 'source_audio_device')
+        gui._canvas((960, 720))
+        click('option:0')
+        self.assertEqual(gui.settings['source_audio_device'], 8)
+
+        gui._canvas((960, 720))
+        click('field:source_audio_input_side')
+        self.assertEqual(gui.dropdown, 'source_audio_input_side')
+        gui._canvas((960, 720))
+        click('option:1')
+        self.assertEqual(gui.settings['source_audio_input_side'], 'left')
+
+    def test_output_picker_refreshes_hotplugged_devices_without_defaulting(self):
+        gui = SenderGui(())
+        new_device = OutputDevice(7, 'New interface', 2, 48000)
+
+        with patch('tools.v7_send_gui.output_devices',
+                   return_value=(new_device,)), \
+                patch.object(gui, '_sounddevice', return_value=object()):
+            gui._open_dropdown('device')
+
+        self.assertEqual(gui.devices, (new_device,))
+        self.assertEqual(gui._choices('device'),
+                         (('7: New interface · 2 out · 48 kHz', 7),))
+        self.assertIsNone(gui.settings['device'])
+        self.assertEqual(gui.dropdown, 'device')
+
+    def test_background_device_refresh_adds_devices_without_fallback(self):
+        gui = SenderGui(())
+        gui.settings.update(source='camera',
+                            camera='avfoundation:Disconnected camera')
+        output = OutputDevice(7, 'New interface', 2, 48000)
+        audio_input = InputDevice(8, 'New loopback', 2, 48000)
+        cameras = (('Capture card', 'avfoundation:Capture card'),)
+
+        gui._apply_device_snapshot(((output,), '', (audio_input,), '',
+                                    cameras, None))
+
+        self.assertEqual(gui._choices('device'),
+                         (('7: New interface · 2 out · 48 kHz', 7),))
+        self.assertEqual(gui._choices('source_audio_device'),
+                         (('8: New loopback · 2 in · 48 kHz', 8),))
+        self.assertIsNone(gui.settings['device'])
+        self.assertEqual(gui.settings['camera'],
+                         'avfoundation:Disconnected camera')
+        self.assertEqual(gui._choices('camera'), cameras)
+        self.assertIn('unavailable', gui.notice)
+
+    def test_advanced_downscaler_picker_is_visible_and_selectable(self):
+        gui = SenderGui(self.devices)
+        gui.settings.update(source='video', profile='fold-500',
+                            dct_encode=False)
+        gui._scroll_to('perceptual_resize')
+        gui._canvas((960, 720))
+        self.assertIn('field:perceptual_resize', gui.hits)
+
+        rect = gui.hits['field:perceptual_resize']
+        position = ((rect[0]+rect[2])/2, (rect[1]+rect[3])/2)
+        glfw = SimpleNamespace(
+            MOUSE_BUTTON_LEFT=1, PRESS=1,
+            get_cursor_pos=lambda _window: position)
+        gui._on_mouse(glfw, None, 1, 1, 0)
+        self.assertEqual(gui.dropdown, 'perceptual_resize')
+
+        gui._canvas((960, 720))
+        options = gui._choices('perceptual_resize')
+        option_index = next(index for index, item in enumerate(options)
+                            if item[1] == 'gamma-detail')
+        rect = gui.hits[f'option:{option_index}']
+        position = ((rect[0]+rect[2])/2, (rect[1]+rect[3])/2)
+        gui._on_mouse(glfw, None, 1, 1, 0)
+        self.assertEqual(gui.settings['perceptual_resize'], 'gamma-detail')
+
+    def test_pillow_encoder_filter_is_box_for_every_profile(self):
+        gui = SenderGui(self.devices)
+        # Both choices are Box, so the field is not shown at all.
+        self.assertNotIn('encode_filter', gui._visible_fields())
+        # Direct DCT encode ignores the capture scaler and width.
+        gui.settings.update(source='video', dct_encode=True)
+        self.assertNotIn('capture_filter', gui._visible_fields())
+        self.assertNotIn('capture_width', gui._visible_fields())
+        gui.settings.update(source='mouse-follow')
+        self.assertIn('capture_width', gui._visible_fields())
+        gui.settings.update(source='video', dct_encode=False)
+        self.assertIn('capture_filter', gui._visible_fields())
+        self.assertIn('capture_width', gui._visible_fields())
+        # Pixel encode is offered next to Direct DCT, not inside it, and
+        # hides the Direct DCT enhancements and the capture scaler.
+        gui.settings.update(dct_encode=False, pixel_encode=False)
+        self.assertIn('pixel_encode', gui._visible_fields())
+        gui._assign('pixel_encode', True)
+        self.assertFalse(gui.settings['dct_encode'])
+        visible = gui._visible_fields()
+        self.assertIn('pixel_encode', visible)
+        self.assertIn('pixel_detail', visible)
+        for dest in ('luma_adjust', 'linear_preshrink', 'dct_sharpen',
+                     'dct_clarity', 'dct_chroma_gain', 'dct_kernel',
+                     'capture_filter', 'capture_width'):
+            self.assertNotIn(dest, visible)
+        gui._assign('pixel_encode', False)        # back to Direct DCT
+        self.assertTrue(gui.settings['dct_encode'])
+        gui._assign('pixel_encode', True)
+        gui._assign('dct_encode', True)           # and Direct DCT turns it off
+        self.assertFalse(gui.settings['pixel_encode'])
+        gui.settings.update(pixel_encode=False, source='camera')
+        self.assertNotIn('baseline', tuple(value for _label, value in
+                                           gui._choices('profile')))
+        for profile in ('aspect-fold-500', 'fold-500', 'aspect-mono-500',
+                        'mono-colour-500'):
+            gui.settings['profile'] = profile
+            self.assertEqual(tuple(value for _label, value in
+                                   gui._choices('encode_filter')),
+                             ('auto', 'box'))
+        self.settings.update(source='video', video_source='clip.mp4',
+                             capture_filter='lanczos')
+        command = build_command(self.settings, self.devices, self.sd)
+        args = v7_live.parser().parse_args(command[2:])
+        self.assertNotIn('--baseline', command)
+        self.assertEqual(args.capture_filter, 'lanczos')
+
+    def test_mono_video_side_selector_is_visible_only_for_that_profile(self):
+        gui = SenderGui(self.devices)
+        self.assertNotIn('mono_video_side', gui._visible_fields())
+
+        gui.settings.update(profile='mono-colour-500', mono_video_side='right')
+        self.assertIn('mono_video_side', gui._visible_fields())
+        self.assertIn('source_audio', gui._visible_fields())
+        self.assertNotIn('source_audio_device', gui._visible_fields())
+        self.assertEqual(gui._value_label('mono_video_side'),
+                         'Right output · left stays clear')
+
+        gui.settings['profile'] = 'fold-500'
+        self.assertNotIn('mono_video_side', gui._visible_fields())
+        gui.settings['profile'] = 'mono-colour-500'
+        gui.settings['source_audio'] = 'device'
+        self.assertIn('source_audio_device', gui._visible_fields())
+
+    def test_mono_video_keeps_wire_defaults_and_allows_pre_resize(self):
+        self.settings.update(profile='mono-colour-500', perceptual_resize='linear-box')
+        command = build_command(self.settings, self.devices, self.sd)
+        self.assertEqual(command[command.index('--perceptual-resize')+1],
+                         'linear-box')
+
+        self.assertNotIn('--mono-sum', command)
+        self.assertNotIn('--no-pilot-tones', command)
+        self.assertNotIn('--no-eof-marker', command)
+
+    def test_the_tail_is_the_profiles_and_old_saved_tails_are_dropped(self):
+        # Fixes list items 9 and 19: no tail setting anywhere (one tail
+        # exists); a saved one is ignored.
+        import json
+        from tools.v7_send_gui import _load_sender_preferences
+        self.assertFalse(hasattr(v7_live.parser().parse_args(
+            ['send', '--device', 'null', '--source', 'test']), 'aspect_tail'))
+        v7_live._ensure_test_modem_path()
+        import aspect_fold
+        self.assertEqual(aspect_fold.AspectFoldWire().tail, 'fixed')
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp)/'prefs.json'
+            for version, saved_kernel, expected_kernel in (
+                    (4, 'reference', None),
+                    (5, 'reference', None),
+                    (5, 'lanczos', 'lanczos'),
+                    (6, 'reference', 'reference')):
+                path.write_text(json.dumps({
+                    'version': version,
+                    'settings': {'aspect_tail': 'chroma', 'source': 'test',
+                                 'dct_kernel': saved_kernel}}))
+                loaded = _load_sender_preferences(path)
+                settings = loaded.get('settings', loaded)
+                self.assertNotIn('aspect_tail', settings)
+                self.assertEqual(settings.get('source'), 'test')
+                self.assertEqual(settings.get('dct_kernel'), expected_kernel)
+
+    def test_direct_dct_encode_options_reach_the_sender_cli(self):
+        self.settings.update(profile='mono-colour-500', dct_encode=True,
+                             dct_sharpen='taper', dct_sharpen_strength='0.5',
+                             dct_clarity='0.15', dct_chroma_gain='1.1')
+        command = build_command(self.settings, self.devices, self.sd)
+        args = v7_live.parser().parse_args(command[2:])
+
+        self.assertIsNone(args.dct_encode)      # the sender's own default
+        v7_live._apply_encode_defaults(args, 500)
+        self.assertTrue(args.dct_encode)
+        self.assertEqual(v7_live._dct_encode_options(args), {
+            'sharpen': 'taper', 'sharpen_strength': .5, 'clarity': .15,
+            'chroma_gain': 1.1, 'preshrink': 4.0, 'aggregation': 'off', 'band_profile': 'off',
+            'linear_light': False, 'pixel': False,
+            'pixel_detail': 'average', 'linear_preshrink': True})
+        self.assertNotIn('--linear-preshrink', command)     # the default
+        self.assertNotIn('--no-linear-preshrink', command)
+        self.assertNotIn('--pixel-encode', command)
+        self.settings.update(pixel_encode=True, dct_encode=False)
+        command = build_command(self.settings, self.devices, self.sd)
+        args = v7_live.parser().parse_args(command[2:])
+        self.assertTrue(v7_live._dct_encode_options(args)['pixel'])
+        # Pixel encode stands alone on the command line.
+        for flag in ('--dct-encode', '--no-dct-encode', '--dct-kernel',
+                     '--no-luma-adjust'):
+            self.assertNotIn(flag, command)
+        v7_live._apply_encode_defaults(args, 500)
+        self.assertTrue(args.dct_encode)          # full-size source path
+        self.assertFalse(args.luma_adjust)
+        self.assertNotIn('--pixel-detail', command)
+        self.settings.update(pixel_detail='crisp')
+        command = build_command(self.settings, self.devices, self.sd)
+        args = v7_live.parser().parse_args(command[2:])
+        self.assertEqual(v7_live._dct_encode_options(args)['pixel_detail'],
+                         'crisp')
+        self.settings.update(pixel_detail='average')
+        # The pixel grid is an Aspect Fold 500 choice; robust is the default.
+        self.assertNotIn('--pixel-grid', command)
+        profile = self.settings['profile']
+        self.settings.update(profile='aspect-fold-500', pixel_grid='large')
+        command = build_command(self.settings, self.devices, self.sd)
+        self.assertEqual(v7_live.parser().parse_args(command[2:]).pixel_grid,
+                         'large')
+        self.settings.update(profile='fold-500')
+        self.assertNotIn(
+            '--pixel-grid', build_command(self.settings, self.devices, self.sd))
+        self.settings.update(profile=profile, pixel_grid='robust')
+        self.settings.update(pixel_encode=False, dct_encode=True)
+        self.settings.update(luma_adjust=True, linear_preshrink=False)
+        command = build_command(self.settings, self.devices, self.sd)
+        self.assertIn('--no-linear-preshrink', command)
+        args = v7_live.parser().parse_args(command[2:])
+        self.assertFalse(v7_live._dct_encode_options(args)['linear_preshrink'])
+        self.settings.update(linear_preshrink=True)
+        v7_live._send_profile(args, 500)
+
+    def test_direct_dct_is_the_default_and_only_turning_it_off_is_said(self):
+        command = build_command(self.settings, self.devices, self.sd)
+        self.assertEqual([word for word in command if 'dct' in word],
+                         ['--no-dct-encode'])
+        self.settings['dct_encode'] = True
+        command = build_command(self.settings, self.devices, self.sd)
+        self.assertFalse(any('dct' in word for word in command))
+        # Strength is sent only with a sharpen mode.
+        self.settings.update(dct_sharpen='off', dct_sharpen_strength='0.9')
+        command = build_command(self.settings, self.devices, self.sd)
+        self.assertNotIn('--dct-sharpen-strength', command)
+
+    def test_direct_dct_rejects_unsupported_combinations(self):
+        cases = (
+            ({'profile': 'fold-1000'}, 'supported wire profile'),
+            ({'perceptual_resize': 'linear-box'}, 'pre-encode downscaler'),
+            ({'dct_sharpen': 'usm', 'dct_sharpen_strength': '1.5'},
+             'between 0 and 1'),
+            ({'dct_clarity': '-0.1'}, 'between 0 and 1'),
+            ({'dct_chroma_gain': '1.5'}, 'between 1.0 and 1.3'),
+        )
+        for update, message in cases:
+            settings = dict(self.settings, dct_encode=True, **update)
+            with self.subTest(update=update):
+                with self.assertRaisesRegex(ValueError, message):
+                    validate_settings(settings, self.devices, self.sd)
+
+    def test_direct_dct_fields_are_advanced_and_exclusive_with_downscaler(self):
+        gui = SenderGui(self.devices)
+        gui.settings['device'] = 3
+        self.assertTrue(gui.settings['dct_encode'])     # the default
+        self.assertEqual(section_of(gui, 'dct_encode'), 'Picture encode')
+        self.assertIn('dct_encode', gui._visible_fields())
+        gui._assign('dct_encode', False)
+        visible = gui._visible_fields()
+        self.assertIn('dct_encode', visible)
+        self.assertNotIn('dct_sharpen', visible)
+
+        gui._assign('perceptual_resize', 'linear-box')
+        gui._assign('dct_encode', True)
+        self.assertEqual(gui.settings['perceptual_resize'], 'off')
+        visible = gui._visible_fields()
+        for dest in ('dct_sharpen', 'dct_clarity', 'dct_chroma_gain'):
+            self.assertIn(dest, visible)
+        self.assertNotIn('dct_sharpen_strength', visible)
+        self.assertNotIn('perceptual_resize', visible)
+        gui._assign('dct_sharpen', 'taper')
+        self.assertIn('dct_sharpen_strength', gui._visible_fields())
+        # (the label also says what the default is)
+        self.assertEqual(gui._value_label('dct_sharpen'),
+                         'Taper · sent band only  ·  default Off')
+
+        for profile in ('fold-500', 'aspect-mono-500', 'mono-colour-500'):
+            gui._assign('profile', profile)
+            self.assertTrue(gui.settings['dct_encode'])
+            self.assertIn('dct_encode', gui._visible_fields())
+
+    def test_direct_dct_settings_are_saved_and_restored(self):
+        from tools.v7_send_gui import (_restore_sender_settings,
+                                       _serialize_sender_settings)
+        gui = SenderGui(self.devices)
+        gui.settings.update(dct_encode=True, dct_sharpen='usm',
+                            dct_sharpen_strength='0.4', dct_clarity='0.3',
+                            dct_chroma_gain='1.2')
+        saved = json.loads(json.dumps(_serialize_sender_settings(gui.settings)))
+        restored = SenderGui(self.devices)
+        _restore_sender_settings(restored.settings, saved)
+        for key in ('dct_encode', 'dct_sharpen', 'dct_sharpen_strength',
+                    'dct_clarity', 'dct_chroma_gain'):
+            self.assertEqual(restored.settings[key], gui.settings[key])
+
+    def test_aspect_fold_options_reach_the_sender_cli_only_when_changed(self):
+        self.settings['profile'] = 'aspect-fold-500'
+        command = build_command(self.settings, self.devices, self.sd)
+        self.assertEqual(command[command.index('--profile')+1], 'aspect-fold-500')
+        self.assertNotIn('--aspect-layout', command)
+        self.assertNotIn('--aspect-tail', command)
+        self.settings.update(aspect_layout='16:9')
+        command = build_command(self.settings, self.devices, self.sd)
+        args = v7_live.parser().parse_args(command[2:])
+        self.assertEqual(args.aspect_layout, '16:9')
+        # Other profiles never forward the aspect options.
+        self.settings['profile'] = 'fold-500'
+        command = build_command(self.settings, self.devices, self.sd)
+        self.assertNotIn('--aspect-layout', command)
+
+    def test_aspect_fold_fields_are_advanced_and_profile_specific(self):
+        gui = SenderGui(self.devices)
+        gui.settings['device'] = 3
+        gui._assign('profile', 'fold-500')
+        self.assertNotIn('aspect_layout', gui._visible_fields())
+        self.assertNotIn('aspect_tail', gui._visible_fields())
+        gui._assign('profile', 'aspect-fold-500')
+        visible = gui._visible_fields()
+        self.assertIn('aspect_layout', visible)
+        self.assertNotIn('aspect_tail', visible)
+        self.assertIn('dct_encode', visible)
+        self.assertEqual(gui._value_label('aspect_layout'), 'Auto · source aspect')
+        self.assertEqual(section_of(gui, 'aspect_layout'), 'Wire profile')
+
+    def test_aspect_mono_profile_forwards_layout_and_mono_routing_only(self):
+        self.settings.update(profile='aspect-mono-500', aspect_layout='4:3',
+                             aspect_tail='luma')
+        command = build_command(self.settings, self.devices, self.sd)
+        args = v7_live.parser().parse_args(command[2:])
+        self.assertEqual(args.profile, 'aspect-mono-500')
+        self.assertEqual(args.aspect_layout, '4:3')
+        self.assertNotIn('--aspect-tail', command)
+        self.assertIn('--mono-video-side', command)
+        v7_live._apply_profile_option(args)
+        self.assertTrue(args.aspect_mono and args.experimental_mono_fold)
+
+        gui = SenderGui(self.devices)
+        gui.settings['device'] = 3
+        gui._assign('profile', 'aspect-mono-500')
+        visible = gui._visible_fields()
+        self.assertIn('aspect_layout', visible)
+        self.assertNotIn('aspect_tail', visible)
+        self.assertIn('mono_video_side', visible)
+        self.assertIn('dct_encode', visible)
+
+    def test_clip_aware_encode_is_advanced_opt_in_and_reaches_the_cli(self):
+        command = build_command(self.settings, self.devices, self.sd)
+        self.assertNotIn('--clip-aware-encode', command)
+        self.settings['clip_aware'] = True
+        command = build_command(self.settings, self.devices, self.sd)
+        self.assertTrue(v7_live.parser().parse_args(command[2:]).clip_aware_encode)
+        gui = SenderGui(self.devices)
+        gui.settings['device'] = 3
+        self.assertFalse(gui.settings['clip_aware'])
+        self.assertEqual(section_of(gui, 'clip_aware'), 'Picture encode')
+        self.assertIn('clip_aware', gui._visible_fields())
+
+    def test_a_sender_with_no_switches_is_an_untouched_gui(self):
+        def resolved(argv):
+            args = v7_live.parser().parse_args(argv)
+            v7_live._apply_profile_option(args)
+            v7_live._apply_encode_defaults(args, 500)
+            kernel = args.dct_kernel or v7_live._default_kernel_for_profile(
+                args.profile)
+            return (args.profile, args.dct_encode, args.luma_adjust, kernel,
+                    bool(args.pixel_encode), bool(args.clip_aware_encode),
+                    args.linear_preshrink,
+                    tuple(sorted(v7_live._dct_encode_options(args).items())))
+
+        gui = SenderGui(self.devices)
+        gui.settings.update(device=3, source='video', video_source='clip.mp4')
+        command = build_command(gui.settings, self.devices, self.sd)
+        bare = ['send', '--device', '3', '--source', 'video']
+        self.assertEqual(resolved(command[2:]), resolved(bare))
+        self.assertEqual(resolved(bare)[:7], (
+            'aspect-fold-500', True, True, 'viewer_solve', False, False, True))
+        # main.py --mode modem sends with the same encode: its sender
+        # arguments are only what the application was asked for.
+        import argparse
+        import modem_v7_display
+        main = modem_v7_display.send_args(argparse.Namespace())
+        v7_live._apply_profile_option(main)
+        v7_live._apply_encode_defaults(main, 500)
+        main_kernel = main.dct_kernel or v7_live._default_kernel_for_profile(
+            main.profile)
+        self.assertEqual(
+            (main.profile, main.dct_encode, main.luma_adjust, main_kernel,
+             bool(main.pixel_encode), bool(main.clip_aware_encode),
+             main.linear_preshrink,
+             tuple(sorted(v7_live._dct_encode_options(main).items()))),
+            resolved(bare))
+        for name in ('aspect-mono-500',):
+            gui.settings.update(profile=name)
+            gui.settings['dct_kernel'] = v7_live._default_kernel_for_profile(name)
+            command = build_command(gui.settings, self.devices, self.sd)
+            self.assertEqual(resolved(command[2:]),
+                             resolved(bare+['--profile', name]))
+
+    def test_luma_adjustment_is_on_with_direct_dct_and_reaches_the_cli(self):
+        gui = SenderGui(self.devices)
+        self.assertTrue(gui.settings['luma_adjust'])
+        self.assertIn('luma_adjust', gui._visible_fields())
+        gui.settings['dct_encode'] = False
+        self.assertNotIn('luma_adjust', gui._visible_fields())
+        self.settings.update(dct_encode=True, luma_adjust=True)
+        command = build_command(self.settings, self.devices, self.sd)
+        args = v7_live.parser().parse_args(command[2:])
+        v7_live._apply_encode_defaults(args, 500)
+        self.assertTrue(args.luma_adjust)
+        self.settings['luma_adjust'] = False
+        command = build_command(self.settings, self.devices, self.sd)
+        self.assertIn('--no-luma-adjust', command)
+        args = v7_live.parser().parse_args(command[2:])
+        v7_live._apply_encode_defaults(args, 500)
+        self.assertFalse(args.luma_adjust)
+
+    def test_ffmpeg_screen_input_is_forwarded_only_for_ffmpeg_capture(self):
+        self.settings.update(source='screen', screen_backend='ffmpeg',
+                             ffmpeg_input='x11grab::0.0')
+
+        command = build_command(self.settings, self.devices, self.sd)
+        args = v7_live.parser().parse_args(command[2:])
+
+        self.assertEqual(args.screen_backend, 'ffmpeg')
+        self.assertEqual(args.ffmpeg_input, 'x11grab::0.0')
+
+        self.settings['screen_target'] = ScreenTarget(
+            'Capture screen 1', display=1)
+        with self.assertRaisesRegex(ValueError, 'display from the picker'):
+            build_command(self.settings, self.devices, self.sd)
+
+    def test_camera_picker_values_and_screen_targets_map_to_sender_cli(self):
+        self.settings.update(
+            source='camera', camera='avfoundation:HDMI Capture Card',
+            screen_target=None)
+        command = build_command(self.settings, self.devices, self.sd)
+        args = v7_live.parser().parse_args(command[2:])
+        self.assertEqual(args.ffmpeg_input,
+                         'avfoundation:HDMI Capture Card')
+        self.assertNotIn('--camera', command)
+
+        self.settings.update(source='camera', camera='v4l2:/dev/video2',
+                             screen_target=None)
+        command = build_command(self.settings, self.devices, self.sd)
+        args = v7_live.parser().parse_args(command[2:])
+        self.assertEqual(args.ffmpeg_input, 'v4l2:/dev/video2')
+        self.assertNotIn('--camera', command)
+
+        self.settings.update(source='screen', screen_backend='mss',
+                             screen_target=ScreenTarget(
+                                 'Display 2', '-1920,0,1920,1080'))
+        command = build_command(self.settings, self.devices, self.sd)
+        args = v7_live.parser().parse_args(command[2:])
+        self.assertEqual(args.region, '-1920,0,1920,1080')
+
+        self.settings.update(screen_backend='ffmpeg', ffmpeg_input='',
+                             screen_target=ScreenTarget(
+                                 'Capture screen 1', display=1))
+        command = build_command(self.settings, self.devices, self.sd)
+        args = v7_live.parser().parse_args(command[2:])
+        self.assertEqual(args.display, 1)
+
+    def test_custom_camera_input_cannot_silently_override_picker_selection(self):
+        self.settings.update(
+            source='camera', camera='avfoundation:HDMI Capture Card',
+            ffmpeg_input='avfoundation:0')
+
+        with self.assertRaisesRegex(ValueError, 'camera from the picker'):
+            build_command(self.settings, self.devices, self.sd)
+
+        self.settings['camera'] = None
+        command = build_command(self.settings, self.devices, self.sd)
+        args = v7_live.parser().parse_args(command[2:])
+        self.assertEqual(args.ffmpeg_input, 'avfoundation:0')
+
+    def test_downscaler_is_forwarded_and_constrained(self):
+        self.settings.update(source='video', video_source='clip.mp4',
+                             perceptual_resize='gamma-detail',
+                             perceptual_detail_strength='0.6')
+        command = build_command(self.settings, self.devices, self.sd)
+        args = v7_live.parser().parse_args(command[2:])
+        self.assertEqual(args.perceptual_resize, 'gamma-detail')
+        self.assertEqual(args.perceptual_detail_strength, 0.6)
+
+        self.settings.update(profile='mono-colour-500')
+        command = build_command(self.settings, self.devices, self.sd)
+        self.assertEqual(command[command.index('--perceptual-resize')+1],
+                         'gamma-detail')
+
+    def test_capture_device_discovery_parsers(self):
+        cameras = linux_camera_sources(
+            ['/dev/video10', '/dev/video2', '/dev/notvideo'],
+            {'/dev/video2': 'USB Camera'})
+        self.assertEqual(cameras, (
+            ('USB Camera · /dev/video2', 'v4l2:/dev/video2'),
+            ('video10 · /dev/video10', 'v4l2:/dev/video10'),
+        ))
+
+        listing = ('[AVFoundation indev @ 0x1] AVFoundation video devices:\n'
+                   '[AVFoundation indev @ 0x1] [0] Face Camera\n'
+                   '[AVFoundation indev @ 0x1] [1] Capture Screen Pro\n'
+                   '[AVFoundation indev @ 0x1] [2] USB Screen Capture\n'
+                   '[AVFoundation indev @ 0x1] [3] Capture screen 0\n'
+                   '[AVFoundation indev @ 0x1] [4] HDMI Capture Card\n'
+                   '[AVFoundation indev @ 0x1] AVFoundation audio devices:\n'
+                   '[AVFoundation indev @ 0x1] [0] Microphone')
+        self.assertEqual(parse_ffmpeg_camera_sources(listing, 'darwin'), (
+            ('Face Camera · AVFoundation 0', 'avfoundation:Face Camera'),
+            ('Capture Screen Pro · AVFoundation 1',
+             'avfoundation:Capture Screen Pro'),
+            ('USB Screen Capture · AVFoundation 2',
+             'avfoundation:USB Screen Capture'),
+            ('HDMI Capture Card · AVFoundation 4',
+             'avfoundation:HDMI Capture Card')))
+        self.assertEqual(parse_avfoundation_screen_sources(listing), (
+            ScreenTarget('Capture screen 0', display=3),))
+
+        directshow = ('[dshow @ 0x1] DirectShow video devices\n'
+                      '[dshow @ 0x1] "USB Camera" (video)\n'
+                      '[dshow @ 0x1]   Alternative name "@device_pnp_\\\\..."\n'
+                      '[dshow @ 0x1] DirectShow audio devices\n'
+                      '[dshow @ 0x1] "Microphone" (audio)')
+        self.assertEqual(parse_ffmpeg_camera_sources(directshow, 'win32'), (
+            ('USB Camera', 'dshow:video=USB Camera'),))
+
+        # FFmpeg 7 on Windows (the owner's machine): no headings, each device
+        # tagged (video) or (audio).
+        newer = (
+            '[dshow @ 000001eeb62dea80] "TANDBERG Video" (video)\n'
+            '[dshow @ 000001eeb62dea80]   Alternative name "@device_pnp_\\\\?\\usb#vid_1f82&pid_0001&mi_00#8&14e796f9&0&0000#{65e8773d-8f56-11d0-a3b9-00a0c9223196}\\global"\n'
+            '[dshow @ 000001eeb62dea80] "OBS Virtual Camera" (video)\n'
+            '[dshow @ 000001eeb62dea80]   Alternative name "@device_sw_{860BB310-5D01-11D0-BD3B-00A0C911CE86}\\{A3FCE0F5-3493-419F-958A-ABA1250EC20B}"\n'
+            '[dshow @ 000001eeb62dea80] "Microphone (TANDBERG Audio)" (audio)\n'
+            '[dshow @ 000001eeb62dea80]   Alternative name "@device_cm_{33D9A762-90C8-11D0-BD43-00A0C911CE86}\\wave_{AB0C5EB9}"\n'
+            '[dshow @ 000001eeb62dea80] "virtual-audio-capturer" (audio)\n'
+            '[dshow @ 000001eeb62dea80] "Line In (Realtek(R) Audio)" (audio)\n'
+            '[dshow @ 000001eeb62dea80] "Stereo Mix (Realtek(R) Audio)" (audio)\n'
+            '[in#0 @ 000001eeb62de700] Error opening input: Immediate exit requested\n'
+            'Error opening input file dummy.')
+        self.assertEqual(parse_ffmpeg_camera_sources(newer, 'win32'), (
+            ('TANDBERG Video', 'dshow:video=TANDBERG Video'),
+            ('OBS Virtual Camera', 'dshow:video=OBS Virtual Camera')))
+
+    def test_linux_camera_discovery_reads_device_names_without_consuming_nodes(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            dev_root = root/'dev'
+            sys_root = root/'sys'
+            dev_root.mkdir()
+            (dev_root/'video0').touch()
+            name_path = sys_root/'video0'/'name'
+            name_path.parent.mkdir(parents=True)
+            name_path.write_text('USB Capture', encoding='utf-8')
+
+            choices = enumerate_camera_sources(
+                platform='linux', dev_root=dev_root, sys_root=sys_root)
+
+        self.assertEqual(choices, (
+            ('USB Capture · '+str(dev_root/'video0'),
+             'v4l2:'+str(dev_root/'video0')),
+        ))
+
+    def test_screen_enumeration_is_closed_after_listing_monitors(self):
+        capture = SimpleNamespace(
+            monitors=[{'left': 0, 'top': 0, 'width': 3000, 'height': 1080},
+                      {'left': 0, 'top': 0, 'width': 1920, 'height': 1080},
+                      {'left': 1920, 'top': 0, 'width': 1080, 'height': 1080}],
+            close=Mock())
+        module = SimpleNamespace(MSS=Mock(return_value=capture))
+
+        targets = enumerate_screen_targets(mss_module=module, platform='linux')
+
+        self.assertEqual(len(targets), 3)
+        self.assertEqual(targets[0].region, '0,0,3000,1080')
+        self.assertEqual(targets[2].region, '1920,0,1080,1080')
+        capture.close.assert_called_once_with()
+
+    def test_screen_target_picker_opens_and_selects_screen_targets(self):
+        gui = SenderGui(self.devices)
+        gui.settings['source'] = 'screen'
+        targets = (
+            ScreenTarget('Display 1 · 1920×1080 · (0,0)',
+                         region='0,0,1920,1080'),
+            ScreenTarget('Display 2 · 1280×720 · (1920,0)',
+                         region='1920,0,1280,720'),
+        )
+
+        with patch('tools.v7_send_gui.enumerate_screen_targets',
+                   return_value=targets):
+            gui._open_dropdown('screen_target')
+            self.assertEqual(gui.dropdown_scroll, 0)
+            self.assertEqual(
+                gui._choices('screen_target'),
+                tuple((target.label, target) for target in targets))
+            gui._on_key(SenderKeyStub, None, SenderKeyStub.KEY_DOWN, 0,
+                        SenderKeyStub.PRESS, 0)
+            gui._on_key(SenderKeyStub, None, SenderKeyStub.KEY_ENTER, 0,
+                        SenderKeyStub.PRESS, 0)
+
+        self.assertEqual(gui.settings['screen_target'], targets[1])
+        self.assertEqual(gui._value_label('screen_target'), targets[1].label)
+
+    def test_capture_picker_enumerates_only_when_opened(self):
+        gui = SenderGui(self.devices)
+        gui.settings.update(source='camera')
+        with patch('tools.v7_send_gui.enumerate_camera_sources',
+                   return_value=(('USB camera', 'v4l2:/dev/video0'),)) as list_devices:
+            self.assertEqual(gui._choices('camera'), ())
+            list_devices.assert_not_called()
+            gui._open_dropdown('camera')
+            self.assertEqual(gui._choices('camera'),
+                             (('USB camera', 'v4l2:/dev/video0'),))
+            list_devices.assert_called_once_with()
+
+    def test_empty_camera_picker_shows_a_notice_without_opening_blank_menu(self):
+        gui = SenderGui(self.devices)
+        gui.settings['source'] = 'camera'
+
+        with patch('tools.v7_send_gui.enumerate_camera_sources',
+                   return_value=()):
+            gui._open_dropdown('camera')
+
+        self.assertIsNone(gui.dropdown)
+        self.assertIn('No camera sources', gui.notice)
+
+    def test_keyboard_camera_picker_starts_at_selected_item_and_moves_focus(self):
+        gui = SenderGui(self.devices)
+        gui.settings.update(source='camera', camera='avfoundation:Camera 1')
+        choices = (('Camera 0', 'avfoundation:Camera 0'),
+                   ('Camera 1', 'avfoundation:Camera 1'),
+                   ('Capture card', 'avfoundation:Capture card'))
+
+        with patch('tools.v7_send_gui.enumerate_camera_sources',
+                   return_value=choices):
+            gui._open_dropdown('camera')
+            self.assertEqual(gui.dropdown_scroll, 1)
+            gui._on_key(SenderKeyStub, None, SenderKeyStub.KEY_ENTER, 0,
+                        SenderKeyStub.PRESS, 0)
+            self.assertEqual(gui.settings['camera'],
+                             'avfoundation:Camera 1')
+
+            gui._open_dropdown('camera')
+            gui._on_key(SenderKeyStub, None, SenderKeyStub.KEY_DOWN, 0,
+                        SenderKeyStub.PRESS, 0)
+            gui._on_key(SenderKeyStub, None, SenderKeyStub.KEY_KP_ENTER, 0,
+                        SenderKeyStub.PRESS, 0)
+
+        self.assertEqual(gui.settings['camera'],
+                         'avfoundation:Capture card')
+
+    def test_camera_start_reenumerates_and_rejects_stale_picker_values(self):
+        gui = SenderGui(self.devices)
+        gui.settings.update(source='camera', camera='avfoundation:4')
+
+        with patch('tools.v7_send_gui.enumerate_camera_sources',
+                   return_value=(('HDMI Capture Card · AVFoundation 4',
+                                  'avfoundation:HDMI Capture Card'),)) as scan, \
+                patch.object(gui, '_build_command') as build_command:
+            gui._start()
+
+        scan.assert_called_once_with()
+        build_command.assert_not_called()
+        self.assertIsNone(gui.process)
+        self.assertIn('reopen the camera picker', gui.notice)
+
+    def test_camera_start_uses_freshly_enumerated_name_selection(self):
+        gui = SenderGui(self.devices)
+        gui.settings.update(source='camera',
+                            camera='avfoundation:HDMI Capture Card')
+        child = Mock()
+        child.poll.return_value = None
+
+        with patch('tools.v7_send_gui.enumerate_camera_sources',
+                   return_value=(('HDMI Capture Card · AVFoundation 4',
+                                  'avfoundation:HDMI Capture Card'),)) as scan, \
+                patch.object(gui, '_build_command',
+                             return_value=['python', 'send']) as build_command, \
+                patch('tools.v7_send_gui.subprocess.Popen',
+                      return_value=child), \
+                patch('tools.v7_send_gui.threading.Thread') as thread:
+            gui._start()
+
+        scan.assert_called_once_with()
+        build_command.assert_called_once_with()
+        self.assertEqual(gui.page, 'live')
+        thread.return_value.start.assert_called_once_with()
+
+    def test_fractional_scroll_moves_sender_dropdown_and_zero_does_nothing(self):
+        gui = SenderGui(self.devices)
+        gui.dropdown = 'source'
+        gui.dropdown_scroll = 2
+
+        gui._on_scroll(None, 1, 0)
+        self.assertEqual(gui.dropdown_scroll, 2)
+        gui._on_scroll(None, 0, 0.5)
+
+        self.assertEqual(gui.dropdown_scroll, 1)
+
+    def test_video_and_camera_pick_controls_are_visible_and_clickable(self):
+        gui = SenderGui(self.devices)
+        gui.settings.update(source='video')
+        gui._canvas((960, 720))
+        self.assertIn('browse:video_source', gui.hits)
+        rect = gui.hits['browse:video_source']
+        position = ((rect[0]+rect[2])/2, (rect[1]+rect[3])/2)
+        glfw = SimpleNamespace(
+            MOUSE_BUTTON_LEFT=1, PRESS=1,
+            get_cursor_pos=lambda _window: position)
+        with patch('tools.v7_send_gui.pick_video_file',
+                   return_value='/media/clip.mp4'):
+            gui._on_mouse(glfw, None, 1, 1, 0)
+        self.assertEqual(gui.settings['video_source'], '/media/clip.mp4')
+
+        gui.settings.update(source='camera')
+        gui._canvas((960, 720))
+        self.assertIn('field:camera', gui.hits)
+        rect = gui.hits['field:camera']
+        position = ((rect[0]+rect[2])/2, (rect[1]+rect[3])/2)
+        with patch('tools.v7_send_gui.enumerate_camera_sources',
+                   return_value=(('USB camera', 'v4l2:/dev/video0'),)):
+            gui._on_mouse(glfw, None, 1, 1, 0)
+        self.assertEqual(gui.dropdown, 'camera')
+        self.assertEqual(gui._choices('camera'),
+                         (('USB camera', 'v4l2:/dev/video0'),))
+        gui._canvas((960, 720))
+        rect = gui.hits['option:0']
+        position = ((rect[0]+rect[2])/2, (rect[1]+rect[3])/2)
+        gui._on_mouse(glfw, None, 1, 1, 0)
+        self.assertEqual(gui.settings['camera'], 'v4l2:/dev/video0')
+
+    def test_video_source_accepts_control_v_and_command_v_paste(self):
+        gui = SenderGui(self.devices)
+        gui.settings['source'] = 'video'
+        gui.selected = 'video_source'
+        gui.editing = True
+
+        for modifier in (SenderKeyStub.MOD_CONTROL, 8):
+            with self.subTest(modifier=modifier):
+                gui.edit_buffer = 'old-url'
+                clipboard = Mock(
+                    return_value='https://example.test/clip.mp4')
+                glfw = SimpleNamespace(
+                    PRESS=SenderKeyStub.PRESS,
+                    REPEAT=SenderKeyStub.REPEAT,
+                    KEY_ENTER=SenderKeyStub.KEY_ENTER,
+                    KEY_KP_ENTER=SenderKeyStub.KEY_KP_ENTER,
+                    KEY_ESCAPE=SenderKeyStub.KEY_ESCAPE,
+                    KEY_BACKSPACE=SenderKeyStub.KEY_BACKSPACE,
+                    KEY_A=SenderKeyStub.KEY_A,
+                    KEY_V=SenderKeyStub.KEY_V,
+                    MOD_CONTROL=SenderKeyStub.MOD_CONTROL,
+                    MOD_SUPER=8,
+                    get_version=lambda: (3, 4, 0),
+                    get_clipboard_string=clipboard)
+
+                gui._on_key(glfw, None, glfw.KEY_A, 0, glfw.PRESS, modifier)
+                self.assertEqual(gui.edit_buffer, '')
+                window = object()
+                gui._on_key(glfw, window, glfw.KEY_V, 0, glfw.PRESS, modifier)
+
+                self.assertEqual(gui.edit_buffer,
+                                 'https://example.test/clip.mp4')
+                clipboard.assert_called_once_with(None)
+                gui._on_key(glfw, None, glfw.KEY_ENTER, 0,
+                            glfw.PRESS, modifier)
+                self.assertEqual(gui.settings['video_source'],
+                                 'https://example.test/clip.mp4')
+                gui.editing = True
+
+    def test_right_click_pastes_into_video_source_field(self):
+        gui = SenderGui(self.devices)
+        gui.settings['source'] = 'video'
+        gui._canvas((960, 720))
+        rect = gui.hits['field:video_source']
+        position = ((rect[0]+rect[2])/2, (rect[1]+rect[3])/2)
+        clipboard = Mock(return_value=b'https://example.test/clip.mp4')
+        glfw = SimpleNamespace(
+            MOUSE_BUTTON_LEFT=1, MOUSE_BUTTON_RIGHT=2, PRESS=1,
+            get_cursor_pos=lambda _window: position,
+            get_version=lambda: (3, 4, 0),
+            get_clipboard_string=clipboard)
+
+        gui._on_mouse(glfw, object(), glfw.MOUSE_BUTTON_RIGHT,
+                      glfw.PRESS, 0)
+
+        self.assertTrue(gui.editing)
+        self.assertEqual(gui.selected, 'video_source')
+        self.assertEqual(gui.edit_buffer, 'https://example.test/clip.mp4')
+        clipboard.assert_called_once_with(None)
+
+    def test_clipboard_read_keeps_window_argument_for_legacy_glfw(self):
+        window = object()
+        clipboard = Mock(return_value='clipboard text')
+        glfw = SimpleNamespace(
+            get_version=lambda: (3, 3, 8),
+            get_clipboard_string=clipboard)
+
+        self.assertEqual(_clipboard_text(glfw, window), 'clipboard text')
+        clipboard.assert_called_once_with(window)
+
+    def test_clipboard_read_falls_back_to_window_when_null_lookup_is_empty(self):
+        window = object()
+        clipboard = Mock(side_effect=(None, 'clipboard text'))
+        glfw = SimpleNamespace(
+            get_version=lambda: (3, 4, 0),
+            get_clipboard_string=clipboard)
+
+        self.assertEqual(_clipboard_text(glfw, window), 'clipboard text')
+        self.assertEqual(clipboard.call_args_list, [
+            unittest.mock.call(None), unittest.mock.call(window)])
+
+    def test_capture_fps_dropdown_uses_rates_reported_by_camera_driver(self):
+        output = ('Interval: Discrete 0.033s (30.000 fps)\n'
+                  'Interval: Discrete 0.017s (59.940 fps)\n')
+        self.assertEqual(parse_capture_fps(output), (30.0, 59.94))
+        run = Mock(return_value=SimpleNamespace(stdout=output, stderr=''))
+        choices = enumerate_capture_fps(
+            'camera', 'v4l2:/dev/video2', platform='linux',
+            which=lambda name: '/usr/bin/v4l2-ctl'
+            if name == 'v4l2-ctl' else None, run=run)
+        self.assertEqual(choices, (
+            ('Source default', ''), ('30 fps', '30.0'),
+            ('59.94 fps', '59.94')))
+        run.assert_called_once_with(
+            ['/usr/bin/v4l2-ctl', '--list-formats-ext', '--device',
+             '/dev/video2'], capture_output=True, text=True,
+            encoding='utf-8', errors='replace', timeout=10, check=False)
+
+    def test_pixel_choices_open_as_dropdowns(self):
+        gui = SenderGui(self.devices)
+        gui.settings.update(profile='aspect-fold-500', dct_encode=False,
+                            pixel_encode=True)
+        for dest in ('pixel_detail', 'pixel_grid'):
+            self.assertIn(dest, gui.DROPDOWN_FIELDS)
+            self.assertGreater(len(gui._choices(dest)), 1)
+            gui._open_dropdown(dest)
+        gui.settings.update(profile='fold-500')
+        self.assertNotIn('pixel_grid', gui._visible_fields())
+
+    def test_capture_fps_is_a_basic_gui_dropdown(self):
+        gui = SenderGui(self.devices)
+        gui.settings['source'] = 'camera'
+        gui.settings['camera'] = 'v4l2:/dev/video2'
+        with patch('tools.v7_send_gui.enumerate_capture_fps', return_value=(
+                ('Source default', ''), ('30 fps', '30'))):
+            gui._open_dropdown('capture_fps')
+        self.assertIn('capture_fps', gui._visible_fields())
+        self.assertEqual(gui._choices('capture_fps'),
+                         (('Source default', ''), ('30 fps', '30')))
+
+        self.settings['capture_fps'] = '30'
+        command = build_command(self.settings, self.devices, self.sd)
+        self.assertEqual(command[command.index('--capture-fps')+1], '30.0')
+
+    def test_native_video_picker_returns_selected_path(self):
+        run = Mock(return_value=SimpleNamespace(
+            returncode=0, stdout='/media/clips/a movie.mp4\n', stderr=''))
+        which = lambda name: '/usr/bin/zenity' if name == 'zenity' else None
+
+        selected = pick_video_file(platform='linux', which=which, run=run)
+
+        self.assertEqual(selected, '/media/clips/a movie.mp4')
+        args = run.call_args.args[0]
+        self.assertEqual(args[0], '/usr/bin/zenity')
+        self.assertIn('--file-selection', args)
+
+    def test_native_video_picker_cancel_and_missing_picker_are_handled(self):
+        cancel = Mock(return_value=SimpleNamespace(
+            returncode=1, stdout='', stderr=''))
+        which = lambda name: '/usr/bin/zenity' if name == 'zenity' else None
+        self.assertIsNone(pick_video_file(platform='linux', which=which, run=cancel))
+
+        with self.assertRaisesRegex(RuntimeError, 'Install zenity or kdialog'):
+            pick_video_file(platform='linux', which=lambda _name: None,
+                            run=cancel)
+
+    def test_profile_default_and_explicit_filter_are_validated(self):
+        self.settings['profile'] = 'mono-colour-500'
+        self.settings['encode_filter'] = 'auto'
+        result = validate_settings(self.settings, self.devices, self.sd)
+        self.assertEqual(result['encode_filter'], 'box')
+
+        self.settings.update(profile='fold-500', encode_filter='nearest')
+        with self.assertRaisesRegex(ValueError, 'require the Box'):
+            build_command(self.settings, self.devices, self.sd)
+
+    def test_values_from_hidden_mono_audio_controls_do_not_block_other_profiles(self):
+        self.settings.update(
+            source='test', profile='fold-500', mono_video_side='invalid',
+            source_audio='invalid', source_audio_input_side='invalid',
+            source_audio_gain='not a number', source_audio_delay_ms='invalid')
+
+        command = build_command(self.settings, self.devices, self.sd)
+        args = v7_live.parser().parse_args(command[2:])
+
+        self.assertEqual(args.profile, 'fold-500')
+        self.assertFalse(any(option in command for option in (
+            '--source-audio', '--source-audio-gain',
+            '--source-audio-delay-ms')))
+
+    def test_disabled_mono_audio_ignores_its_hidden_tuning_fields(self):
+        self.settings.update(
+            source='test', profile='mono-colour-500', source_audio='off',
+            source_audio_input_side='invalid', source_audio_gain='invalid',
+            source_audio_delay_ms='invalid')
+
+        command = build_command(self.settings, self.devices, self.sd)
+        args = v7_live.parser().parse_args(command[2:])
+
+        self.assertEqual(args.source_audio, 'off')
+        self.assertNotIn('--source-audio-gain', command)
+        self.assertNotIn('--source-audio-delay-ms', command)
+
+    def test_missing_device_source_video_path_and_unsupported_output_are_errors(self):
+        for update, message in (
+                ({'device': None}, 'Select an audio output device'),
+                ({'source': None}, 'Choose a capture source'),
+                ({'source': 'video'}, 'Set a video file path')):
+            settings = dict(self.settings)
+            settings.update(update)
+            with self.subTest(message=message), self.assertRaisesRegex(
+                    ValueError, message):
+                validate_settings(settings, self.devices, self.sd)
+
+        self.sd.check_output_settings.side_effect = RuntimeError('unsupported')
+        with self.assertRaisesRegex(ValueError, 'cannot open'):
+            validate_settings(self.settings, self.devices, self.sd)
+
+    def test_invalid_speed_and_screen_region_are_rejected(self):
+        self.settings['speed'] = '5'
+        with self.assertRaisesRegex(ValueError, 'Speed must be between'):
+            validate_settings(self.settings, self.devices, self.sd)
+
+        self.settings.update(speed='1', region='1,2,0,4')
+        with self.assertRaisesRegex(ValueError, 'Screen region'):
+            validate_settings(self.settings, self.devices, self.sd)
+
+    def test_slices_profiles_reach_the_sender_cli(self):
+        self.settings.update(profile='stereo-slices', aspect_layout='16:9')
+        command = build_command(self.settings, self.devices, self.sd)
+        args = v7_live.parser().parse_args(command[2:])
+        v7_live._apply_profile_option(args)
+        self.assertEqual(args.slices, 'stereo')
+        self.assertEqual(args.aspect_layout, '16:9')
+        self.assertNotIn('--mono-video-side', command)
+        self.assertNotIn('--aspect-tail', command)
+        with self.assertRaises(SystemExit):
+            v7_live.parser().parse_args(
+                ['send', '--profile', 'mono-slices'])
+
+    def test_profile_picker_lists_every_profile_and_aspect_fold_default(self):
+        gui = SenderGui(self.devices)
+        self.assertEqual(gui.settings['profile'], 'aspect-fold-500')
+        self.assertTrue(gui.settings['dct_encode'])
+        self.assertFalse(hasattr(gui, 'advanced'))
+        expected = ('aspect-fold-500', 'aspect-mono-500', 'aspect-mono-nested',
+                    'stereo-nested', 'adaptive-mono-nested',
+                    'adaptive-stereo-nested')
+        self.assertEqual(tuple(value for _label, value in
+                               gui._choices('profile')), expected)
+        parser = v7_live.parser()
+        send = parser._subparsers._group_actions[0].choices['send']
+        option_strings = {option for action in send._actions
+                          for option in action.option_strings}
+        self.assertNotIn('--mono-sum', option_strings)
+        self.assertNotIn('--pilot-tones', option_strings)
+        self.assertNotIn('--no-pilot-tones', option_strings)
+        self.assertNotIn('--eof-marker', option_strings)
+        self.assertTrue(send.get_default('pilot_tones'))
+        self.assertIsNone(send.get_default('eof_marker'))
+        self.assertFalse(send.get_default('mono_sum'))
+        send_help = send.format_help()
+        self.assertIn('--profile', send_help)
+        self.assertNotIn('--baseline', send_help)
+        self.assertNotIn('--experimental-fold', send_help)
+        self.assertNotIn('--no-eof-marker', send_help)
+
+    def test_gui_hides_irrelevant_source_fields_and_renders_canvas(self):
+        gui = SenderGui(self.devices)
+        gui.settings.update(device=3, source='screen')
+        visible = gui._visible_fields()
+        self.assertEqual(section_of(gui, 'screen_backend'), 'Capture')
+        self.assertIn('screen_target', visible)
+        self.assertNotIn('video_source', visible)
+        self.assertIn('preview', visible)
+        self.assertNotIn('video_preview', visible)
+        self.assertNotIn('image_preview', visible)
+        self.assertNotIn('camera', visible)
+        self.assertIn('screen_backend', visible)        # advanced section
+        gui.settings['source'] = 'camera'
+        self.assertNotIn('screen_backend', gui._visible_fields())
+        gui.settings['source'] = 'screen'
+
+        image = gui._canvas((960, 720))
+        self.assertEqual(image.size, (960, 720))
+        self.assertIn('start_stop', gui.hits)
+
+        gui.settings.update(source='video', profile='fold-500',
+                            video_source='clip.mp4')
+        gui.page = 'setup'
+        self.assertIn('video_source', gui._visible_fields())
+        self.assertIn('preview', gui._visible_fields())
+        self.assertNotIn('camera', gui._visible_fields())
+        self.assertNotIn('screen_target', gui._visible_fields())
+        gui._canvas((960, 720))
+        self.assertIn('browse:video_source', gui.hits)
+        gui.page = 'live'
+        self.assertEqual(gui._canvas((960, 720)).size, (960, 720))
+        self.assertEqual(gui._canvas((720, 480)).size, (720, 480))
+
+    def test_live_canvas_renders_selected_source_or_resized_preview(self):
+        gui = SenderGui(self.devices)
+        gui.page = 'live'
+        gui.settings['preview'] = 'window'
+        gui.settings['preview_stage'] = 'source'
+        gui.preview_image = Image.new('RGB', (80, 96), (90, 120, 150))
+        gui.preview_counter = 18
+        gui.preview_aspect = 5
+        gui.preview_stage = 'source'
+        gui.preview_handoff_ns = 1
+        source = Image.new('RGB', (640, 480), (30, 60, 90))
+        resized = Image.new('RGB', (80, 96), (90, 120, 150))
+        gui.preview_stage_frames = {
+            'source': (source, 18, 5, 1),
+            'resized': (resized, 18, 5, 1),
+        }
+
+        self.assertEqual(gui._canvas((960, 720)).size, (960, 720))
+        self.assertIn('preview_stage:source', gui.hits)
+        self.assertIn('preview_stage:resized', gui.hits)
+        rect = gui.hits['preview_stage:source']
+        position = ((rect[0]+rect[2])/2, (rect[1]+rect[3])/2)
+        glfw = SimpleNamespace(
+            MOUSE_BUTTON_LEFT=1, PRESS=1,
+            get_cursor_pos=lambda _window: position)
+        gui._on_mouse(glfw, None, 1, 1, 0)
+        self.assertEqual(gui.settings['preview_stage'], 'source')
+        self.assertIs(gui.preview_image, source)
+
+    def test_preview_receiver_retains_both_stages_for_live_selection(self):
+        gui = SenderGui(self.devices)
+        process = object()
+        receiver = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        receiver.bind(('127.0.0.1', 0))
+        receiver.settimeout(.1)
+        sender = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        gui.process = process
+        gui._preview_socket = receiver
+        reader = threading.Thread(
+            target=gui._read_image_preview, args=(process, receiver),
+            daemon=True)
+        reader.start()
+        try:
+            for stage, color in (('source', (20, 40, 60)),
+                                 ('resized', (120, 140, 160))):
+                encoded = BytesIO()
+                Image.new('RGB', (32, 24), color).save(
+                    encoded, format='JPEG')
+                sender.sendto(pack_preview_datagram(
+                    42, 5, time.monotonic_ns(), stage, encoded.getvalue()),
+                    receiver.getsockname())
+
+            deadline = time.monotonic()+2
+            while (time.monotonic() < deadline and
+                   set(gui.preview_stage_frames) != {'source', 'resized'}):
+                time.sleep(.01)
+
+            self.assertEqual(set(gui.preview_stage_frames),
+                             {'source', 'resized'})
+            self.assertEqual(gui.preview_stage, 'resized')
+            gui._assign('preview_stage', 'source')
+            self.assertEqual(gui.preview_counter, 42)
+            pixel = gui.preview_image.getpixel((0, 0))
+            self.assertTrue(all(abs(actual-expected) <= 5
+                                for actual, expected in
+                                zip(pixel, (20, 40, 60))))
+        finally:
+            gui.process = None
+            gui._close_preview_socket()
+            reader.join(timeout=1)
+            sender.close()
+
+    def test_preview_worker_error_is_propagated_to_the_live_panel(self):
+        gui = SenderGui(self.devices)
+        gui.events.put(('line', json.dumps({
+            'status': 'image_preview_error',
+            'message': 'ValueError: invalid frame',
+        })))
+
+        gui._drain_events()
+
+        self.assertEqual(gui.preview_error, 'ValueError: invalid frame')
+
+    def test_invalid_preview_jpeg_reports_decode_error_to_live_panel(self):
+        gui = SenderGui(self.devices)
+        process = object()
+        receiver = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        receiver.bind(('127.0.0.1', 0))
+        receiver.settimeout(.1)
+        sender = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        gui.process = process
+        gui._preview_socket = receiver
+        reader = threading.Thread(
+            target=gui._read_image_preview, args=(process, receiver),
+            daemon=True)
+        reader.start()
+        try:
+            sender.sendto(pack_preview_datagram(
+                43, 2, time.monotonic_ns(), 'source', b'invalid jpeg'),
+                receiver.getsockname())
+            deadline = time.monotonic()+2
+            while time.monotonic() < deadline and gui.events.empty():
+                time.sleep(.01)
+            gui._drain_events()
+            self.assertIn('decoding source preview image', gui.preview_error)
+        finally:
+            gui.process = None
+            gui._close_preview_socket()
+            reader.join(timeout=1)
+            sender.close()
+
+    def test_image_preview_receiver_lifecycle_follows_sender_process(self):
+        gui = SenderGui(self.devices)
+        gui.settings.update(device=3, source='screen', preview='window',
+                            preview_stage='resized')
+        child = Mock()
+        child.poll.return_value = None
+
+        with patch.object(gui, '_build_command',
+                          return_value=['python', 'send']) as build_command, \
+                patch('tools.v7_send_gui.subprocess.Popen',
+                      return_value=child), \
+                patch('tools.v7_send_gui.threading.Thread'):
+            gui._start()
+
+        build_command.assert_called_once()
+        port = build_command.call_args.kwargs['image_preview_port']
+        self.assertIsNotNone(gui._preview_socket)
+        self.assertEqual(gui._preview_socket.getsockname(),
+                         ('127.0.0.1', port))
+        gui.events.put(('exit', 0))
+        gui._drain_events()
+        self.assertIsNone(gui._preview_socket)
+
+    def test_live_change_source_stops_then_opens_source_picker(self):
+        gui = SenderGui(self.devices)
+        gui.page = 'live'
+        gui.process = object()
+        gui.settings.update(source='video', video_source='clip.mp4',
+                            preview='popout', camera='camera-one')
+        gui._canvas((960, 720))
+        rect = gui.hits['change_source']
+        position = ((rect[0]+rect[2])/2, (rect[1]+rect[3])/2)
+        glfw = SimpleNamespace(
+            MOUSE_BUTTON_LEFT=1, PRESS=1,
+            get_cursor_pos=lambda _window: position)
+
+        with patch.object(gui, '_stop') as stop:
+            gui._on_mouse(glfw, None, 1, 1, 0)
+
+        stop.assert_called_once()
+        self.assertTrue(gui.change_source_after_stop)
+        gui.events.put(('exit', 0))
+        gui._drain_events()
+
+        self.assertEqual(gui.page, 'setup')
+        self.assertEqual(gui.selected, 'source')
+        self.assertEqual(gui.dropdown, 'source')
+        gui._assign('source', 'screen')
+        self.assertEqual(gui.settings['video_source'], 'clip.mp4')
+        self.assertEqual(gui.settings['preview'], 'popout')
+        self.assertEqual(gui.settings['camera'], 'camera-one')
+
+    def test_sender_preferences_restore_last_settings_and_stable_devices(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary)/'sender.json'
+            output = OutputDevice(3, 'Stable output', 2, 48000, 'Test API')
+            audio = InputDevice(8, 'Stable input', 2, 44100, 'Test API')
+            gui = SenderGui((output,), audio_devices=(audio,),
+                            preference_path=path)
+            gui.settings.update(
+                device=3, source='video', video_source='clip with spaces.mp4',
+                preview='window', video_live=False, profile='fold-500',
+                preview_stage='source',
+                source_audio='device', source_audio_device=8,
+                source_audio_input_side='right')
+            gui._persist_preferences()
+
+            restored = SenderGui(
+                (OutputDevice(17, 'Stable output', 2, 96000, 'Test API'),),
+                audio_devices=(InputDevice(
+                    23, 'Stable input', 2, 48000, 'Test API'),),
+                preference_path=path, restore_preferences=True)
+
+        self.assertEqual(restored.settings['device'], 17)
+        self.assertEqual(restored.settings['source_audio_device'], 23)
+        self.assertEqual(restored.settings['source'], 'video')
+        self.assertEqual(restored.settings['video_source'],
+                         'clip with spaces.mp4')
+        self.assertEqual(restored.settings['preview'], 'window')
+        self.assertFalse(restored.settings['video_live'])
+        self.assertEqual(restored.settings['preview_stage'], 'source')
+        self.assertIsNone(restored.process)
+
+    def test_v1_preferences_keep_soundtrack_default_and_migrate_preview(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary)/'sender.json'
+            path.write_text(json.dumps({
+                'version': 1,
+                'settings': {'encoded_preview': True,
+                             'source_audio': 'source'},
+            }), encoding='utf-8')
+            gui = SenderGui(self.devices, preference_path=path,
+                            restore_preferences=True)
+
+        self.assertEqual(gui.settings['preview'], 'window')
+        self.assertEqual(gui.settings['preview_stage'], 'resized')
+        self.assertEqual(gui.settings['source_audio'], 'source')
+
+    def test_v2_off_soundtrack_default_migrates_to_enabled(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary)/'sender.json'
+            path.write_text(json.dumps({
+                'version': 2,
+                'settings': {'profile': 'mono-colour-500',
+                             'encode_filter': 'nearest',
+                             'source_audio': 'off'},
+            }), encoding='utf-8')
+            gui = SenderGui(self.devices, preference_path=path,
+                            restore_preferences=True)
+
+        # Version 4 reset the profile and Direct DCT encode to the new
+        # defaults; other saved settings are kept.
+        self.assertEqual(gui.settings['profile'], 'aspect-fold-500')
+        self.assertTrue(gui.settings['dct_encode'])
+        self.assertEqual(gui.settings['encode_filter'], 'auto')
+        self.assertEqual(gui.settings['source_audio'], 'source')
+
+    def test_unavailable_saved_output_is_not_replaced_by_a_default(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary)/'sender.json'
+            path.write_text(json.dumps({
+                'version': 1,
+                'settings': {'source': 'video',
+                             'video_source': 'clip.mp4'},
+                'output_device': {'name': 'Missing output',
+                                  'hostapi': 'Missing API'},
+                'source_audio_device': None,
+            }), encoding='utf-8')
+            gui = SenderGui(self.devices, preference_path=path,
+                            restore_preferences=True)
+
+        self.assertIsNone(gui.settings['device'])
+        self.assertIn('Missing output', gui.notice)
+        self.assertEqual(gui.settings['source'], 'video')
+        self.assertEqual(gui.settings['video_source'], 'clip.mp4')
+        self.assertIsNone(gui.process)
+
+    def test_malformed_saved_device_identity_is_ignored(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary)/'sender.json'
+            path.write_text(json.dumps({
+                'version': 1, 'settings': {'source': 'test'},
+                'output_device': 'not-a-device-identity',
+            }), encoding='utf-8')
+            gui = SenderGui(self.devices, preference_path=path,
+                            restore_preferences=True)
+
+        self.assertIsNone(gui.settings['device'])
+        self.assertEqual(gui.settings['source'], 'test')
+        self.assertIsNone(gui.process)
+
+    def test_corrupt_sender_preferences_fall_back_to_setup_defaults(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary)/'sender.json'
+            path.write_text('{broken', encoding='utf-8')
+            gui = SenderGui(self.devices, preference_path=path,
+                            restore_preferences=True)
+
+        self.assertIsNone(gui.settings['source'])
+        self.assertEqual(gui.settings['preview'], 'off')
+        self.assertIsNone(gui.process)
+
+    def test_start_runs_cli_as_child_and_stop_requests_graceful_interrupt(self):
+        gui = SenderGui(self.devices)
+        gui.settings.update(device=3, source='screen')
+        child = Mock()
+        child.poll.return_value = None
+
+        with (patch.object(gui, '_build_command', return_value=['python', 'send']),
+              patch('tools.v7_send_gui.subprocess.Popen', return_value=child) as popen,
+              patch('tools.v7_send_gui.threading.Thread') as thread):
+            gui._start()
+            self.assertIs(gui.process, child)
+            self.assertEqual(gui.page, 'live')
+            self.assertEqual(popen.call_args.args[0], ['python', 'send'])
+            self.assertTrue(popen.call_args.kwargs['start_new_session'])
+            thread.return_value.start.assert_called_once()
+
+            gui._stop()
+
+        child.send_signal.assert_called_once_with(signal.SIGINT)
+        self.assertTrue(gui.stop_requested)
+
+    def test_sender_exit_updates_live_state_and_allows_another_start(self):
+        gui = SenderGui(self.devices)
+        gui.process = Mock()
+        gui.events.put(('line', 'V7 send stopped after 12 frames'))
+        gui.events.put(('exit', 0))
+
+        gui._drain_events()
+
+        self.assertIsNone(gui.process)
+        self.assertEqual(gui.notice, 'Sender stopped.')
+        self.assertEqual(gui.lines, ['V7 send stopped after 12 frames'])
+
+    def test_brightness_and_gamma_can_be_updated_while_sender_runs(self):
+        gui = SenderGui(self.devices)
+        control = Mock()
+        gui.process = SimpleNamespace(stdin=control)
+        gui.selected = 'brightness'
+        gui.settings['brightness'] = '1.25'
+        gui.settings['gamma'] = '0.8'
+        gui.edit_buffer = '1.25'
+        gui.editing = True
+
+        gui._finish_edit()
+
+        payload = json.loads(control.write.call_args.args[0])
+        self.assertEqual(payload, {'brightness': 1.25, 'gamma': 0.8})
+        control.flush.assert_called_once_with()
+
+    def test_live_sender_accepts_valid_tone_updates_and_rejects_bad_values(self):
+        controls = v7_live.LiveToneControls(1.0, 1.0)
+        self.assertTrue(controls.update('{"brightness":1.3,"gamma":0.9}'))
+        self.assertEqual(controls.snapshot(),
+                         {'brightness': 1.3, 'gamma': 0.9})
+        self.assertFalse(controls.update('{"brightness":0}'))
+        self.assertFalse(controls.update('not json'))
+        self.assertEqual(controls.snapshot(),
+                         {'brightness': 1.3, 'gamma': 0.9})
+
+
+class SenderGuiButtonLayoutTests(unittest.TestCase):
+    """On/off settings are buttons on a grid; the page is named sections."""
+
+    SIZE = (960, 720)
+
+    def setUp(self):
+        self.devices = (OutputDevice(3, 'Test output', 2, 48000),)
+
+    def _gui(self, **settings):
+        gui = SenderGui(self.devices)
+        gui.settings.update(device=3, source='video',
+                            video_source='clip.mp4', **settings)
+        return gui
+
+    def _click(self, gui, key):
+        rect = gui.hits[key]
+        position = ((rect[0]+rect[2])/2, (rect[1]+rect[3])/2)
+        glfw = SimpleNamespace(
+            MOUSE_BUTTON_LEFT=1, PRESS=1,
+            get_cursor_pos=lambda _window: position)
+        gui._on_mouse(glfw, None, 1, 1, 0)
+
+    def _all_hits(self, gui):
+        """Every setting's hit rectangle, gathered by scrolling the page."""
+        found = {}
+        for scroll in range(len(gui._setup_items(self.SIZE[0]))):
+            gui.scroll = scroll
+            gui._canvas(self.SIZE)
+            found.update((key, rect) for key, rect in gui.hits.items()
+                         if key.startswith('field:'))
+        gui.scroll = 0
+        return found
+
+    def test_every_boolean_setting_is_a_button_and_a_click_flips_only_it(self):
+        from tools.v7_send_gui import BOOL_FIELDS
+        seen = set()
+        # Some switches hide others, so cover them over two states.
+        for state in ({}, {'luma_adjust': False, 'pixel_encode': False}):
+            for dest in BOOL_FIELDS:
+                gui = self._gui(**state)
+                if dest not in gui._visible_fields():
+                    continue
+                seen.add(dest)
+                gui._scroll_to(dest, self.SIZE)
+                gui._canvas(self.SIZE)
+                rect = gui.hits[f'field:{dest}']
+                # A button, not a full-width row: several share a line.
+                self.assertLess(rect[2]-rect[0], self.SIZE[0]//2)
+                self.assertGreaterEqual(rect[0], 0)
+                self.assertLessEqual(rect[2], self.SIZE[0])
+                before = dict(gui.settings)
+                self._click(gui, f'field:{dest}')
+                changed = {key for key in before
+                           if gui.settings[key] != before[key]}
+                # Pixel encode and Direct DCT are the two full-size encodes:
+                # turning one on turns the other off.
+                partner = {'pixel_encode': 'dct_encode',
+                           'dct_encode': 'pixel_encode'}.get(dest)
+                changed.discard(partner)
+                self.assertEqual(changed, {dest}, dest)
+                self.assertEqual(gui.settings[dest], not before[dest])
+                self.assertIsNone(gui.dropdown)
+                self.assertFalse(gui.editing)
+                gui._canvas(self.SIZE)
+                self._click(gui, f'field:{dest}')
+                self.assertEqual(gui.settings, before)
+        self.assertEqual(seen, set(BOOL_FIELDS))
+
+    def test_cells_share_lines_and_do_not_overlap(self):
+        gui = self._gui()
+        items = gui._setup_items(self.SIZE[0])
+        lines = [payload for kind, payload in items if kind == 'line']
+        self.assertTrue(any(len(line) > 1 for line in lines))
+        hits = self._all_hits(gui)
+        gui._canvas(self.SIZE)
+        rects = [rect for key, rect in gui.hits.items()
+                 if key.startswith('field:')]
+        for index, first in enumerate(rects):
+            for second in rects[index+1:]:
+                self.assertFalse(
+                    first[0] < second[2] and second[0] < first[2] and
+                    first[1] < second[3] and second[1] < first[3],
+                    (first, second))
+        self.assertEqual({key.split(':', 1)[1] for key in hits},
+                         set(gui._visible_fields()))
+        # A narrower window wraps to fewer cells per line.
+        self.assertLess(gui._columns(640), gui._columns(960))
+
+    def test_keyboard_still_reaches_and_flips_a_button(self):
+        gui = self._gui()
+        gui.selected = 'dct_encode'
+        gui._on_key(SenderKeyStub, None, SenderKeyStub.KEY_ENTER, 0,
+                    SenderKeyStub.PRESS, 0)
+        self.assertFalse(gui.settings['dct_encode'])
+        gui._on_key(SenderKeyStub, None, SenderKeyStub.KEY_RIGHT, 0,
+                    SenderKeyStub.PRESS, 0)
+        self.assertTrue(gui.settings['dct_encode'])
+        # Down walks every setting in page order and keeps it on the page.
+        gui.selected = gui._visible_fields()[0]
+        for expected in gui._visible_fields()[1:]:
+            gui._on_key(SenderKeyStub, None, SenderKeyStub.KEY_DOWN, 0,
+                        SenderKeyStub.PRESS, 0)
+            self.assertEqual(gui.selected, expected)
+            gui._canvas(self.SIZE)
+            self.assertIn(f'field:{expected}', gui.hits)
+
+    def test_settings_are_named_sections_without_a_toggle(self):
+        gui = self._gui()
+        gui._canvas(self.SIZE)
+        self.assertNotIn('advanced', gui.hits)
+        items = gui._setup_items(self.SIZE[0])
+        headers = [payload for kind, payload in items if kind == 'header']
+        self.assertEqual(headers[0], 'Live controls')
+        self.assertNotIn('Advanced', headers)
+        self.assertEqual(headers, [title for title, _shown in
+                                   gui._setup_sections()])
+        shown = {dest for kind, payload in items if kind == 'line'
+                 for dest, _column, _span in payload}
+        self.assertEqual(shown, set(gui._visible_fields()))
+        for dest in ('dct_encode', 'clip_aware', 'dct_sharpen',
+                     'aspect_layout', 'dct_clarity'):
+            self.assertIn(dest, shown)
+        hits = self._all_hits(gui)
+        for dest in shown:
+            self.assertIn(f'field:{dest}', hits)
+        # Non-boolean settings keep their control type.
+        gui._scroll_to('dct_sharpen', self.SIZE)
+        gui._canvas(self.SIZE)
+        self._click(gui, 'field:dct_sharpen')
+        self.assertEqual(gui.dropdown, 'dct_sharpen')
+        gui.dropdown = None
+        gui._scroll_to('dct_clarity', self.SIZE)
+        gui._canvas(self.SIZE)
+        self._click(gui, 'field:dct_clarity')
+        self.assertTrue(gui.editing)
+
+    def test_setup_page_scrolls_by_line_when_it_does_not_fit(self):
+        size = (720, 480)
+        gui = self._gui()
+        gui.width, gui.height = size
+        items = gui._setup_items(size[0])
+        room = gui._setup_room(size)
+        top = gui._max_scroll(items, room)
+        self.assertGreater(top, 0)
+        gui._on_scroll(None, 0, -1)
+        self.assertEqual(gui.scroll, 1)
+        for _ in range(len(items)):
+            gui._on_scroll(None, 0, -1)
+        self.assertEqual(gui.scroll, top)
+        gui._canvas(size)
+        bottom = size[1]-gui._footer_height(size[0])
+        for key, rect in gui.hits.items():
+            if key.startswith('field:'):
+                self.assertLessEqual(rect[3], bottom)
+
+    def test_typical_setups_keep_kernel_tuning_reachable(self):
+        for source in ('video', 'camera', 'screen', 'test'):
+            for profile in ('aspect-fold-500', 'fold-500'):
+                with self.subTest(source=source, profile=profile):
+                    gui = self._gui()
+                    gui._assign('profile', profile)
+                    gui.settings['source'] = source
+                    items = gui._setup_items(self.SIZE[0])
+                    max_scroll = gui._max_scroll(
+                        items, gui._setup_room(self.SIZE))
+                    if gui.settings['dct_kernel'] == 'reference':
+                        gui._scroll_to('dct_kernel', self.SIZE)
+                        gui._canvas(self.SIZE)
+                        self.assertIn('field:dct_kernel', gui.hits)
+                    else:
+                        self.assertGreaterEqual(max_scroll, 0)
+                        target = gui._kernel_param_fields()[-1]
+                        gui._scroll_to(target, self.SIZE)
+                        gui._canvas(self.SIZE)
+                        self.assertIn(f'field:{target}', gui.hits)
+
+    def test_every_setting_is_in_exactly_one_section(self):
+        names = [dest for _title, group in SenderGui.SECTIONS
+                 for dest in group]
+        self.assertEqual(len(names), len(set(names)))
+        # Everything the page offered before the sections still has a place.
+        before = (
+            'output_mode', 'wav_path', 'channels', 'rate', 'frames', 'seconds',
+            'source_passes', 'rotation', 'mirror', 'luma_adjust_linear',
+            'device', 'source', 'video_source', 'preview', 'video_live',
+            'camera', 'screen_target', 'source_audio', 'source_audio_device',
+            'source_audio_input_side', 'source_audio_gain',
+            'source_audio_delay_ms', 'capture_fps', 'profile',
+            'aspect_layout', 'mono_video_side', 'brightness', 'gamma',
+            'speed', 'perceptual_resize', 'perceptual_detail_strength',
+            'dct_encode', 'pixel_encode', 'pixel_detail',
+            'pixel_grid', 'luma_adjust', 'linear_preshrink', 'dct_sharpen',
+            'dct_sharpen_strength', 'dct_clarity', 'dct_chroma_gain',
+            'dct_kernel', 'dct_preshrink', 'clip_aware', 'screen_backend', 'region', 'ffmpeg_input',
+            'capture_width', 'capture_filter')
+        self.assertEqual(set(names), set(before))
+
+    def test_grid_collapses_to_one_column_in_a_narrow_window(self):
+        gui = self._gui()
+        self.assertEqual(gui._columns(960), 3)
+        self.assertEqual(gui._columns(720), 2)
+        self.assertEqual(gui._columns(400), 1)
+        for kind, payload in gui._setup_items(400):
+            if kind == 'line':
+                self.assertEqual(len(payload), 1)
+                self.assertEqual(payload[0][2], 1)
+
+    def test_live_section_holds_only_what_changes_while_sending(self):
+        self.assertEqual(SenderGui.LIVE_FIELDS, ('brightness', 'gamma'))
+        self.assertEqual(dict(SenderGui.SECTIONS)['Live controls'],
+                         ('brightness', 'gamma'))
+        gui = self._gui()
+        self.assertEqual(gui._setup_sections()[0][0], 'Live controls')
+        self.assertFalse(any(gui._locked(dest)
+                             for dest in gui._visible_fields()))
+        gui.process = SimpleNamespace(stdin=_Pipe())
+        for dest in gui._visible_fields():
+            # The DCT kernel, its parameters and the DCT strengths are live too.
+            live = (dest in ('brightness', 'gamma', 'dct_kernel', 'dct_sharpen',
+                             'dct_sharpen_strength', 'dct_clarity',
+                             'dct_chroma_gain', 'dct_preshrink')
+                    or dest.startswith('kp:'))
+            self.assertEqual(gui._locked(dest), not live)
+        notes = [payload for kind, payload in gui._setup_items(self.SIZE[0])
+                 if kind == 'note']
+        self.assertEqual(notes, ['Stop to change the settings below'])
+
+    def test_locked_settings_only_report_while_sending_and_live_ones_edit(self):
+        gui = self._gui()
+        gui.process = SimpleNamespace(stdin=_Pipe())
+        gui._canvas(self.SIZE)
+        self._click(gui, 'field:source')
+        self.assertIsNone(gui.dropdown)
+        self.assertIn('locked', gui.notice)
+        gui._canvas(self.SIZE)
+        self._click(gui, 'field:dct_encode')
+        self.assertTrue(gui.settings['dct_encode'])
+        self._click(gui, 'field:gamma')
+        self.assertTrue(gui.editing)
+        self.assertEqual(gui.selected, 'gamma')
+
+    def test_live_page_edits_brightness_and_gamma_next_to_the_picture(self):
+        pipe = _Pipe()
+        gui = self._gui()
+        gui.process = SimpleNamespace(stdin=pipe)
+        gui.page = 'live'
+        gui._canvas(self.SIZE)
+        self.assertIn('field:brightness', gui.hits)
+        self.assertIn('field:gamma', gui.hits)
+        self._click(gui, 'field:gamma')
+        self.assertTrue(gui.editing)
+        gui.edit_buffer = ''
+        for character in '1.2':
+            gui._on_char(None, ord(character))
+        gui._on_key(SenderKeyStub, None, SenderKeyStub.KEY_ENTER, 0,
+                    SenderKeyStub.PRESS, 0)
+        self.assertEqual(json.loads(pipe.text.splitlines()[-1]),
+                         {'brightness': 1.0, 'gamma': 1.2})
+        self.assertFalse(gui.editing)
+
+    def test_footer_shows_the_selected_help_until_a_notice_needs_it(self):
+        gui = self._gui()
+        gui.selected = 'speed'
+        self.assertEqual(gui._footer_content()[0], FIELD_HELP['speed'])
+        gui.notice = 'Camera discovery failed'
+        self.assertEqual(gui._footer_content()[0], 'Camera discovery failed')
+        gui.selected = 'gamma'
+        # a tweakable setting's help also names its default
+        self.assertEqual(gui._footer_content()[0],
+                         FIELD_HELP['gamma']+' Default: 1. Delete puts it back.')
+        gui.sender_device_lost = True
+        self.assertEqual(gui._footer_content()[0], gui.notice)
+        gui.sender_device_lost = False
+        gui.device_error = 'No audio output devices are available.'
+        self.assertEqual(gui._footer_content()[0], gui.device_error)
+
+    def test_a_tab_click_repaints_at_once(self):
+        gui = self._gui()
+        gui.page = 'live'
+        for key, page in (('setup', 'setup'), ('live', 'live')):
+            gui._canvas(self.SIZE)
+            gui.dirty = False
+            self._click(gui, key)
+            self.assertEqual(gui.page, page)
+            self.assertTrue(gui.dirty, key)
+
+    def test_toolbar_has_start_beside_the_tabs_and_no_close_button(self):
+        gui = self._gui()
+        gui._canvas(self.SIZE)
+        self.assertNotIn('close', gui.hits)
+        self.assertEqual(gui.hits['setup'][0], 12)
+        self.assertEqual(gui.hits['start_stop'][0], gui.hits['live'][2]+8)
+        gui.page = 'live'
+        gui._canvas(self.SIZE)
+        self.assertIn('change_source', gui.hits)
+
+    def test_settings_that_must_match_the_receiver_are_tagged(self):
+        self.assertEqual(SenderGui.MATCH_FIELDS, ('aspect_layout',))
+        for dest in SenderGui.MATCH_FIELDS:
+            self.assertNotIn('match', SenderGui._button_label(
+                self._gui(), dest).lower())
+
+    def test_aspect_layout_is_in_wire_profile_for_aspect_profiles_and_reaches_cli(self):
+        sd = Mock()
+        sd.check_output_settings.return_value = None
+        for profile in ('aspect-fold-500', 'aspect-mono-500',
+                        'stereo-slices'):
+            with self.subTest(profile=profile):
+                gui = self._gui(profile=profile)
+                self.assertEqual(section_of(gui, 'aspect_layout'),
+                                 'Wire profile')
+                self.assertIn('aspect_layout', gui._visible_fields())
+                gui._scroll_to('aspect_layout', self.SIZE)
+                gui._canvas(self.SIZE)
+                self._click(gui, 'field:aspect_layout')
+                self.assertEqual(gui.dropdown, 'aspect_layout')
+                choices = gui._choices('aspect_layout')
+                self.assertEqual(
+                    tuple(value for _label, value in choices),
+                    ('auto', '1:1', '4:3', '3:2', '16:9', '3:4', '2:3',
+                     '9:16'))
+                gui._canvas(self.SIZE)
+                index = next(index for index, item in enumerate(choices)
+                             if item[1] == '16:9')
+                self._click(gui, f'option:{index}')
+                self.assertEqual(gui.settings['aspect_layout'], '16:9')
+                command = build_command(gui.settings, self.devices, sd)
+                self.assertEqual(
+                    command[command.index('--aspect-layout')+1], '16:9')
+        for profile in ('fold-500', 'mono-colour-500'):
+            with self.subTest(profile=profile):
+                gui = self._gui(profile=profile)
+                self.assertNotIn('aspect_layout', gui._visible_fields())
+                gui._canvas(self.SIZE)
+                self.assertNotIn('field:aspect_layout',
+                                 self._all_hits(gui))
+
+    def test_build_command_is_unchanged_for_a_fixed_settings_dict(self):
+        # Captured from build_command at 3c18b3bad, before the layout change.
+        settings = {
+            'device': 3, 'source': 'screen', 'rate': None,
+            'profile': 'aspect-fold-500', 'mono_video_side': 'right',
+            'source_audio': 'source', 'source_audio_device': None,
+            'source_audio_input_side': 'mix', 'source_audio_gain': '1',
+            'source_audio_delay_ms': '0', 'speed': '1.25',
+            'encode_filter': 'auto', 'brightness': '1.1', 'gamma': '0.9',
+            'capture_fps': '30', 'video_source': '', 'preview': 'window',
+            'video_live': False, 'camera': None,
+            'ffmpeg_input': '', 'screen_backend': 'mss',
+            'screen_target': ScreenTarget(
+                'Display 1 · 1920×1080 · (0,0)', '0,0,1920,1080'),
+            'region': '', 'capture_width': '160', 'capture_filter': 'auto',
+            'perceptual_resize': 'off', 'perceptual_detail_strength': '0.25',
+            'dct_encode': True, 'clip_aware': True, 'luma_adjust': True,
+            'linear_preshrink': False, 'pixel_encode': False,
+            'pixel_detail': 'average', 'pixel_grid': 'robust',
+            'dct_sharpen': 'taper', 'dct_sharpen_strength': '0.5',
+            'dct_clarity': '0.15', 'dct_chroma_gain': '1',
+            'aspect_layout': '16:9',
+        }
+        sd = Mock()
+        sd.check_output_settings.return_value = None
+        command = build_command(settings, self.devices, sd, python='python',
+                                image_preview_port=5005)
+        self.assertEqual(command[0], 'python')
+        self.assertEqual(Path(command[1]).parts[-2:], ('tools', 'v7_live.py'))
+        self.assertEqual(command[2:], [
+            'send', '--device', '3', '--source', 'screen', '--profile',
+            'aspect-fold-500', '--aspect-layout', '16:9',
+            '--speed', '1.25', '--brightness', '1.1', '--gamma',
+            '0.9', '--dct-sharpen', 'taper',
+            '--dct-sharpen-strength', '0.5', '--dct-clarity', '0.15',
+            '--dct-kernel', 'viewer_solve',
+            '--no-linear-preshrink', '--clip-aware-encode',
+            '--capture-fps', '30.0', '--screen-backend', 'mss',
+            '--region=0,0,1920,1080', '--capture-width', '160',
+            '--gui-control', '--image-preview-port', '5005',
+            '--device-name', 'Test output'])
+
+    def test_old_preferences_with_an_advanced_flag_still_load(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary)/'sender.json'
+            path.write_text(json.dumps({
+                'version': 5,
+                'advanced': True,
+                'settings': {'advanced': True, 'source': 'video',
+                             'profile': 'aspect-mono-500',
+                             'aspect_layout': '4:3', 'clip_aware': True,
+                             'video_source': 'clip.mp4'},
+                'output_device': {'name': 'Test output', 'hostapi': ''},
+            }), encoding='utf-8')
+            gui = SenderGui(self.devices, preference_path=path,
+                            restore_preferences=True)
+            self.assertEqual(gui.settings['device'], 3)
+            self.assertEqual(gui.settings['profile'], 'aspect-mono-500')
+            self.assertEqual(gui.settings['dct_kernel'], 'viewer_solve')
+            self.assertEqual(gui.settings['aspect_layout'], '4:3')
+            self.assertTrue(gui.settings['clip_aware'])
+            self.assertNotIn('advanced', gui.settings)
+            self.assertEqual(gui._canvas(self.SIZE).size, self.SIZE)
+            gui._persist_preferences()
+            saved = json.loads(path.read_text(encoding='utf-8'))
+        self.assertEqual(saved['version'], 6)
+        self.assertNotIn('advanced', saved['settings'])
+        self.assertEqual(saved['settings']['aspect_layout'], '4:3')
+
+
+if __name__ == '__main__':
+    unittest.main()

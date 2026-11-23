@@ -1,0 +1,110 @@
+"""Choose the coefficients that look best *through* the viewer's upscaler."""
+from functools import lru_cache
+
+import numpy as np
+from PIL import Image
+from scipy.fft import idct          # set-up only: the model matrices
+
+from animation_modem.v7_kernel_solve import (forward_plane, inverse_plane,
+                                             masked_gram_solve)
+
+LABEL = 'Visibility sharpen'
+HELP = ('The default: sharpens what the receiver shows by the amount tuned for '
+        'each profile. It models the last enlargement before the screen '
+        '(`viewer`: 0 bilinear, 1 bicubic, 2 nearest) and solves, by a few '
+        'conjugate-gradient steps, for the sent coefficients whose enlarged '
+        'picture is closest to the ideal enlargement of the band, limited to '
+        'the coefficients the wire carries; `luma_mix` sets how much of that '
+        'is used. Halos can then be moved back inside the source range.')
+PARAMS = {
+    'viewer': (0, 0, 2, 1, '0 bilinear, 1 bicubic, 2 nearest', True),
+    'iterations': (10, 1, 40, 1, 'conjugate-gradient steps', True),
+    'lam': (0.5, 0.0, 1.0, 0.005, 'pull toward the plain coefficients (bigger = gentler)'),
+    'up': (4, 2, 6, 1, 'model lattice: viewer pixels per sent pixel', True),
+    'tame': (4, 0, 20, 1, 'halo clean-up rounds after the solve (0 = off)', True),
+}
+PROFILE_DEFAULTS = {
+    'aspect-mono-500': {'luma_mix': 0.25, 'tame': 0},
+    'aspect-fold-500': {'luma_mix': 0.2, 'tame': 0},
+}
+_FILTERS = (Image.Resampling.BILINEAR, Image.Resampling.BICUBIC,
+            Image.Resampling.NEAREST)
+
+
+@lru_cache(maxsize=64)
+def _resample_matrix(n, m, method):
+    """(m x n) matrix of PIL's own resize along one axis."""
+    matrix = np.empty((m, n), np.float64)
+    for index in range(n):
+        line = np.zeros((1, n), np.float32)
+        line[0, index] = 1.0
+        out = Image.fromarray(line, 'F').resize((m, 1), method)
+        matrix[:, index] = np.asarray(out)[0]
+    matrix.setflags(write=False)
+    return matrix
+
+
+@lru_cache(maxsize=32)
+def _model(viewer, rows, cols, sent_rows, sent_cols, up):
+    """My, Mx: coefficient -> viewer-shown picture, per axis."""
+    def axis(n, sent):
+        reduce_ = _resample_matrix(n, sent, Image.Resampling.BOX)
+        enlarge = _resample_matrix(sent, sent*up, _FILTERS[int(viewer)])
+        basis = idct(np.eye(n), axis=0, norm='ortho')
+        return _product(enlarge, reduce_, basis)
+    return axis(rows, sent_rows), axis(cols, sent_cols)
+
+
+@lru_cache(maxsize=32)
+def _ideal(rows, cols, sent_rows, sent_cols, up):
+    """Per-axis map: coefficient -> ideal band-limited enlargement."""
+    def axis(n, sent):
+        target = sent*up
+        padded = np.zeros((target, n))
+        padded[:n, :] = np.eye(n)*np.sqrt(target/n)
+        return np.ascontiguousarray(idct(padded, axis=0, norm='ortho'))
+    return axis(rows, sent_rows), axis(cols, sent_cols)
+
+
+@lru_cache(maxsize=32)
+def _normal(viewer, rows, cols, sent_rows, sent_cols, up):
+    """The solve's fixed matrices, on the coefficient grid: M'M per axis and
+    M'T / T'M (viewer model against ideal enlargement).  The viewer-sized
+    pictures themselves are never formed per frame."""
+    my, mx = _model(viewer, rows, cols, sent_rows, sent_cols, up)
+    iy, ix = _ideal(rows, cols, sent_rows, sent_cols, up)
+    return tuple(np.ascontiguousarray(_product(*pair), np.float64) for pair in
+                 ((my.T, my), (mx.T, mx), (my.T, iy), (ix.T, mx)))
+
+
+# numpy on Apple Silicon (Accelerate) can raise false divide/overflow
+# warnings from a plain matrix product. These one-time products are checked
+# for finite values instead, so a real fault still stops with an error.
+def _product(*matrices):
+    with np.errstate(divide='ignore', over='ignore', invalid='ignore'):
+        result = matrices[0]
+        for matrix in matrices[1:]:
+            result = result @ matrix
+    if not np.isfinite(result).all():
+        raise FloatingPointError('viewer_solve: matrix product is not finite')
+    return np.ascontiguousarray(result)
+
+
+def post(grid, ctx, viewer, iterations, lam, up, tame):
+    if ctx.plane:
+        return grid
+    rows, cols = grid.shape
+    sent_rows, sent_cols = ctx.sent
+    mask = ctx.weights
+    transforms = ctx.transforms
+    c0 = forward_plane(np.ascontiguousarray(grid, np.float64), transforms[0],
+                       transforms[3])*mask
+    # The picture an ideal receiver shows is what the viewer should show:
+    # minimise |M c - T c0|^2 + lam |c - c0|^2 over the sent coefficients.
+    c = masked_gram_solve(c0, mask, *_normal(int(viewer), rows, cols, sent_rows,
+                                             sent_cols, int(up)),
+                          float(lam), int(iterations))
+    shown = inverse_plane(c, transforms[1], transforms[2])
+    if int(tame) > 0 and ctx.reference is not None:
+        shown = ctx.tame(shown, tame)
+    return shown
