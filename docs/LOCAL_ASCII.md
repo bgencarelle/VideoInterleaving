@@ -172,15 +172,26 @@ the picture is wide. Receipts are dithered (Floyd-Steinberg), sent as
 raster lines (GS v 0), then fed `PRINTER_FEED_LINES` (10) blank lines and
 cut.
 
-Dense pictures are the hard case for the TM-T88V: it wants a 24 V supply
-of at least 2 A, and a picture with large dark areas draws the most
-current. A printer that resets part way through loses its place in the
-picture and prints the rest of the data as text (rolls of garbage). So
-pictures print slowly (`PRINTER_SPEED`, 2 of 1-13: fewer dots heated at
-once), black burns at most `PRINTER_INK` (85%) of its dots, and the
-picture goes in 32-line bands, so after a reset at most one band (2.3 KB)
-can turn to garbage before the next band's header starts a fresh picture
-command. If a printer still resets on dark pictures, check its supply.
+A receipt that stops part way and turns into rolls of junk with no cut
+has lost its place in the picture: the rest of the data is read as text,
+and some of that text swallows the cut. Three things keep it in place:
+
+- No picture byte is a DLE (0x10). The TM-T88V acts on real-time
+  commands (DLE EOT, DLE ENQ, DLE DC4) wherever their bytes appear,
+  picture data included, and one of them clears its buffers. A byte that
+  would be 0x10 (one dot alone in eight) is left white.
+- Each job starts with 4 KB of NULs, which complete any command an earlier
+  broken job left open; an idle printer ignores them.
+- The picture goes in 32-line bands, and after each one the printer is
+  asked for its status (GS r 1) and answers when it has processed
+  everything before it. Only then does the next band go, so the printer
+  holds at most one band and a print that stops is stopped between bands.
+  A printer that never answers is sent to without waiting (logged once).
+
+Dense pictures also draw the most current, and the TM-T88V wants a 24 V
+supply of at least 2 A, so pictures print slowly (`PRINTER_SPEED`, 2 of
+1-13: fewer dots heated at once) and black burns at most `PRINTER_INK`
+(85%) of its dots.
 
 `--printer text` (asciilocal) prints the characters on screen in the
 printer's own font B instead: 64 columns, a 9 x 18-dot cell (the screen's

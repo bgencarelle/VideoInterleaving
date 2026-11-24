@@ -965,7 +965,7 @@ Environment=PYTHONUNBUFFERED=1
 $ENV_DISPLAY
 $ENV_BLOCK
 ExecStart=$VENV_DIR/bin/python -O main.py --mode asciilocal --test
-Restart=on-failure
+Restart=always
 RestartSec=3
 StandardOutput=append:$PROJECT_DIR/vi-asciilocal.log
 StandardError=append:$PROJECT_DIR/vi-asciilocal.log
@@ -1105,7 +1105,7 @@ Environment=PYTHONUNBUFFERED=1
 $ENV_DISPLAY
 $ENV_BLOCK
 ExecStart=$VENV_DIR/bin/python -O main.py --mode local --test
-Restart=on-failure
+Restart=always
 RestartSec=3
 StandardOutput=append:$PROJECT_DIR/vi-local.log
 StandardError=append:$PROJECT_DIR/vi-local.log
@@ -1297,7 +1297,7 @@ Environment=PYTHONUNBUFFERED=1
 $ENV_DISPLAY
 $ENV_BLOCK
 ExecStart=$VENV_DIR/bin/python -O main.py --mode local --test
-Restart=on-failure
+Restart=always
 RestartSec=3
 StandardOutput=append:$PROJECT_DIR/vi-local.log
 StandardError=append:$PROJECT_DIR/vi-local.log

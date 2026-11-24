@@ -5,7 +5,8 @@ import unittest
 import numpy as np
 
 from thermal_printer import (DoubleTap, FramePrinter, blank_unseen, fit_to_paper,
-                             frame_to_escpos, ink_to_escpos, paper_indices, screen_to_ink)
+                             FLUSH, STATUS, frame_to_escpos, ink_to_escpos, paper_indices,
+                             raster_bands, screen_to_ink)
 
 GLYPHS = np.array(list('M8a. ') + ['C'])       # palette 'M8a. ' (densest first) + a phrase letter
 PALETTE = 5
@@ -52,7 +53,7 @@ class PaperTests(unittest.TestCase):
     def test_escpos_resets_picks_font_b_prints_and_cuts_after_feeding(self):
         base = np.full((2, 3), 0)
         data = frame_to_escpos(base, base, GLYPHS, PALETTE, 64)
-        self.assertTrue(data.startswith(b'\x1b@'))
+        self.assertTrue(data.startswith(FLUSH + b'\x1b@'))
         self.assertIn(b'\x1bM\x01', data)
         self.assertIn(b'\x1b3\x90', data)                      # 18 dots x 8: 3 columns, 8x size
         self.assertIn(b'\x1d!\x77', data)
@@ -87,16 +88,25 @@ class ScreenTests(unittest.TestCase):
         ink[0, 0] = True                           # the very first dot
         data = ink_to_escpos(ink)
         speed = b'\x1d(K\x02\x002\x02'          # GS ( K fn 50: speed level 2
-        self.assertTrue(data.startswith(b'\x1b@' + speed + b'\x1dv0\x00\x48\x00\x20\x00'))  # 72 bytes x 32 rows
-        self.assertEqual(data[2 + 7 + 8], 0x80)     # leftmost dot is the high bit
+        self.assertTrue(data.startswith(FLUSH + b'\x1b@' + speed + b'\x1dv0\x00\x48\x00\x20\x00'))  # 72 bytes x 32 rows
+        self.assertEqual(data[len(FLUSH) + 2 + 7 + 8], 0x80)     # leftmost dot is the high bit
         self.assertEqual(data.count(b'\x1dv0\x00\x48\x00'), 10)   # 9 bands of 32 + one of 12
         self.assertIn(b'\x1dv0\x00\x48\x00\x0c\x00', data)
         self.assertTrue(data.endswith(b'\x1bd\x0a\x1dV\x00'))   # 10 lines, then the cut
-        self.assertEqual(len(data), 2 + 7 + 10 * 8 + 300 * 72 + 6)
+        self.assertEqual(len(data), len(FLUSH) + 2 + 7 + 10 * 8 + 300 * 72 + 6)
+
+    def test_no_picture_byte_is_a_real_time_command(self):
+        ink = np.zeros((64, 576), bool)
+        ink[:, 3::8] = True                        # 0x10 in every byte: DLE
+        pieces = raster_bands(ink)
+        self.assertEqual(len(pieces), 1 + 2 + 1)   # start, two bands, feed and cut
+        for band in pieces[1:3]:
+            self.assertNotIn(0x10, band[8:])
+        self.assertTrue(pieces[-1].endswith(b'\x1dV\x00'))
 
     def test_speed_can_be_left_to_the_printer(self):
         self.assertTrue(ink_to_escpos(np.zeros((8, 576), bool), speed=None)
-                        .startswith(b'\x1b@\x1dv0'))
+                        .startswith(FLUSH + b'\x1b@\x1dv0'))
 
     def test_a_band_lost_to_a_reset_costs_at_most_one_band(self):
         from thermal_printer import RASTER_BAND
@@ -104,17 +114,56 @@ class ScreenTests(unittest.TestCase):
 
 
 class SendTests(unittest.TestCase):
-    def test_a_slow_printer_is_never_given_up_on_mid_picture(self):
+    def _sock(self, answer=b'\x00'):
         from unittest import mock
-        import thermal_printer
         sock = mock.MagicMock()
         sock.__enter__.return_value = sock
+        sock.recv.side_effect = answer
+        return sock
+
+    def _send(self, printer, pieces, sock):
+        from unittest import mock
+        import thermal_printer
         with mock.patch.object(thermal_printer.socket, 'create_connection',
                                return_value=sock) as connect:
-            FramePrinter('printer')._send_tcp(b'data')
+            printer._send_tcp(pieces)
+        return connect
+
+    def test_a_slow_printer_is_never_given_up_on_mid_picture(self):
+        sock = self._sock(lambda n: b'\x00')
+        connect = self._send(FramePrinter('printer'), b'data', sock)
         self.assertEqual(connect.call_args.kwargs['timeout'], 5)     # connecting: short
-        sock.settimeout.assert_called_once_with(300)                 # sending: long
-        sock.sendall.assert_called_once_with(b'data')
+        self.assertEqual(sock.settimeout.call_args_list[-1].args, (300,))  # sending: long
+        self.assertEqual([c.args[0] for c in sock.sendall.call_args_list], [STATUS, b'data' + STATUS])
+
+    def test_each_band_waits_for_the_printer(self):
+        sock = self._sock(lambda n: b'\x00')
+        self._send(FramePrinter('printer'), [b'a', b'b', b'c'], sock)
+        self.assertEqual([c.args[0] for c in sock.sendall.call_args_list],
+                         [STATUS, b'a' + STATUS, b'b' + STATUS, b'c' + STATUS])
+        self.assertEqual(sock.recv.call_count, 4)
+
+    def test_a_printer_that_never_answers_is_sent_to_without_waiting(self):
+        import socket
+        sock = self._sock(socket.timeout())
+        printer = FramePrinter('printer')
+        self._send(printer, [b'a', b'b'], sock)
+        self.assertFalse(printer.paced)
+        self.assertEqual([c.args[0] for c in sock.sendall.call_args_list], [STATUS, b'a', b'b'])
+
+    def test_a_printer_that_stops_answering_is_left_between_bands(self):
+        import socket
+        answers = iter([b'\x00', b'\x00', socket.timeout()])
+
+        def recv(n):
+            answer = next(answers)
+            if isinstance(answer, Exception):
+                raise answer
+            return answer
+        sock = self._sock(recv)
+        with self.assertRaises(OSError):
+            self._send(FramePrinter('printer'), [b'a', b'b', b'c'], sock)
+        self.assertEqual(sock.sendall.call_count, 3)                 # c never sent
 
 
 class SchedulingTests(unittest.TestCase):
@@ -153,7 +202,7 @@ class SchedulingTests(unittest.TestCase):
     def test_screen_pixels_print_on_their_own_thread(self):
         self.assertTrue(self.printer.print_screen(np.zeros((20, 10, 3), np.uint8)))
         self.assertTrue(self.done.wait(2))
-        self.assertTrue(self.sent[0].startswith(b'\x1b@\x1d(K'))
+        self.assertTrue(self.sent[0][0].startswith(FLUSH + b'\x1b@\x1d(K'))
 
     def test_one_print_at_a_time(self):
         self.printer._busy.acquire()
@@ -166,7 +215,7 @@ class SchedulingTests(unittest.TestCase):
         base = np.full((2, 3), 0)
         self.assertTrue(self.printer.print_text((base, base, GLYPHS, PALETTE)))
         self.assertTrue(self.done.wait(2))
-        self.assertIn(b'MMM', self.sent[0])
+        self.assertIn(b'MMM', self.sent[0][0])
 
 
 class DoubleTapTests(unittest.TestCase):

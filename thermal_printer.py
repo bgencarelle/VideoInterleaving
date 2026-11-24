@@ -30,6 +30,13 @@ import math
 import numpy as np
 
 ESC, GS = b'\x1b', b'\x1d'
+DLE = 0x10
+# Every job starts with NULs: a printer left part way into a command by an
+# earlier, broken job (waiting for picture bytes it never got) has that
+# command filled with blanks, so this job's own commands are read as
+# commands. An idle printer ignores NULs.
+FLUSH = b'\x00' * 4096
+STATUS = GS + b'r\x01'        # GS r 1: answered once everything before it is processed
 FONT_B_DOTS = (9, 17)          # TM-T88V font B, dots wide x high
 LINE_DOTS = 18                 # 9 x 18 cells: the 0.5 the frame is sampled with
 
@@ -96,6 +103,7 @@ def frame_to_escpos(base, shown, glyphs, palette_size, columns=64, feed_lines=10
     text = '\n'.join(lines).encode('cp437', 'replace')
     size = (scale - 1) << 4 | (scale - 1)              # GS ! : width and height multiple
     return b''.join([
+        FLUSH,
         ESC + b'@',                                    # reset to defaults
         ESC + b'a\x01',                                # centre a narrow frame
         ESC + b'M\x01',                                # font B
@@ -149,21 +157,33 @@ def print_speed(level):
     return GS + b'(K\x02\x002' + bytes([max(1, min(13, int(level)))])
 
 
-def ink_to_escpos(ink, feed_lines=10, speed=2):
-    """ESC/POS raster (GS v 0) for an ink mask, in small bands, at a low
-    print speed (fewer dots heated at once, so less peak current), then a
-    feed and a cut."""
+def raster_bands(ink, feed_lines=10, speed=2):
+    """ESC/POS for an ink mask as a list of pieces: the start, one raster
+    (GS v 0) band each, then the feed and cut. Sent one piece at a time,
+    the printer is never left part way into a picture.
+
+    The TM-T88V acts on real-time commands (DLE EOT, DLE ENQ, DLE DC4)
+    wherever their bytes turn up, picture data included; one of them can
+    clear its buffers mid-picture, after which the rest of the picture is
+    read as text: rolls of junk and no cut. So no picture byte is a DLE
+    (0x10, one dot alone in eight): that dot is left white."""
     rows, width = ink.shape
     packed = np.packbits(ink, axis=1)              # MSB first: the leftmost dot
+    packed[packed == DLE] = 0
     row_bytes = packed.shape[1]
-    out = [ESC + b'@', print_speed(speed)]
+    out = [FLUSH + ESC + b'@' + print_speed(speed)]
     for top in range(0, rows, RASTER_BAND):
         band = packed[top:top + RASTER_BAND]
         out.append(GS + b'v0\x00' + bytes([row_bytes & 255, row_bytes >> 8,
-                                           len(band) & 255, len(band) >> 8]))
-        out.append(band.tobytes())
+                                           len(band) & 255, len(band) >> 8])
+                   + band.tobytes())
     out.append(feed_and_cut(feed_lines))
-    return b''.join(out)
+    return out
+
+
+def ink_to_escpos(ink, feed_lines=10, speed=2):
+    """The whole of raster_bands as one string of bytes."""
+    return b''.join(raster_bands(ink, feed_lines, speed))
 
 
 class DoubleTap:
@@ -210,6 +230,7 @@ class FramePrinter:
         self.wanted = False
         self.next_at = self.clock() + self.rng.uniform(*self.every)
         self.printed = 0
+        self.paced = True                  # False once the printer is found not to answer GS r
 
     # When ---------------------------------------------------------------------
     def request(self):
@@ -233,7 +254,7 @@ class FramePrinter:
     def print_screen(self, rgb):
         """The window's pixels (rows top-down, RGB uint8)."""
         size = f"{rgb.shape[1]}x{rgb.shape[0]} px"
-        return self._submit(lambda: ink_to_escpos(
+        return self._submit(lambda: raster_bands(
             screen_to_ink(rgb, self.dots, self.rotate, self.ink),
             self.feed_lines, self.speed), size)
 
@@ -247,9 +268,9 @@ class FramePrinter:
         base, shown = base.copy(), shown.copy()
         colours = None if colours is None else colours.copy()
         size = f"{base.shape[1]}x{base.shape[0]} characters"
-        return self._submit(lambda: frame_to_escpos(
+        return self._submit(lambda: [frame_to_escpos(
             base, shown, glyphs, palette_size, self.columns, self.feed_lines,
-            colours=colours, dark=self.dark, respell=self.respell), size)
+            colours=colours, dark=self.dark, respell=self.respell)], size)
 
     def _submit(self, build, size):
         if not self._busy.acquire(blocking=False):
@@ -270,11 +291,40 @@ class FramePrinter:
         threading.Thread(target=run, name='frame-printer', daemon=True).start()
         return True
 
-    def _send_tcp(self, data):
+    def _send_tcp(self, pieces):
+        """Send a job's pieces, each followed by GS r 1, waiting for the
+        printer's answer before the next: the printer has then processed
+        everything sent, so it never holds more than a band, and a printer
+        that stops answering is left between bands, never mid-picture.
+        One that never answers GS r is sent to without waiting."""
+        if isinstance(pieces, (bytes, bytearray)):
+            pieces = [pieces]
         # A short wait to connect, then a long one to send: a dark picture
-        # makes the printer slow itself down, and giving up mid-picture
-        # leaves it waiting for the rest, so it prints the next job as
-        # garbage. Only a printer gone for minutes is given up on.
+        # makes the printer slow itself down. Only a printer gone for
+        # minutes is given up on.
         with socket.create_connection((self.host, self.port), timeout=5) as sock:
+            if self.paced:
+                # Ask once with nothing to print: a printer that answers at
+                # all answers at once.
+                sock.settimeout(10)
+                try:
+                    self._answer(sock, STATUS)
+                except socket.timeout:
+                    self.paced = False
+                    print("[PRINTER] The printer does not answer status requests; "
+                          "sending without waiting")
             sock.settimeout(300)
-            sock.sendall(data)
+            for piece in pieces:
+                if not self.paced:
+                    sock.sendall(piece)
+                    continue
+                try:
+                    self._answer(sock, piece + STATUS)
+                except socket.timeout:
+                    raise OSError("the printer stopped answering mid-print") from None
+
+    @staticmethod
+    def _answer(sock, data):
+        sock.sendall(data)
+        if not sock.recv(64):
+            raise OSError("the printer closed the connection")
