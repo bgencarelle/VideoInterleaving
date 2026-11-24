@@ -64,6 +64,10 @@ def register_callbacks(window, state):
             elif key == glfw.KEY_M:
                 state.mirror = 0 if state.mirror else 1
                 state.needs_update = True  # Mirror mode
+            elif key == glfw.KEY_P:
+                request = getattr(state, 'print_request', None)
+                if request is not None:
+                    request()              # --printer: print the next drawn frame
 
     def on_window_size(win, width, height):
         if state.fullscreen:

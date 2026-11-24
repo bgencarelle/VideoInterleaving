@@ -58,7 +58,9 @@ Two drivers set it:
 - **Mouse and keys:** as the browser. Each wheel notch scales the row
   count by the same proportion (about 16%); `+`/`-` move one whole row;
   `0` resets. Changes are instant. Touching them takes over from the
-  random driver; `0` hands control back.
+  random driver; `0` hands control back, and so does leaving them alone for
+  `LOCAL_ASCII_MANUAL_TIMEOUT` (30 s; 0 stays manual until `0`), from
+  whatever size it is at.
 - **Random** (`LOCAL_ASCII_ZOOM = 'random'`): built like the folder
   selector. It starts at the home size, picks when the folders leave
   their rest zone (and again each time they do, once the size has been
@@ -92,8 +94,8 @@ The finest grid can be set per run: `--mode asciilocal --ascii-grid 200x120`
 ## Small letters
 
 Small letters cover little of their cells, so the eye averages them with the
-black between them and the picture goes dark. Two arguments counter it, both
-off by default:
+black between them and the picture goes dark. Two arguments counter it
+(defaults 0.8 and 0.5; 0 turns either off):
 
 - `--ascii-glow F` (0-1): under the letters, each cell's colour at its own
   brightness, blended across neighbouring cells (a texture one texel per
@@ -106,7 +108,9 @@ off by default:
   only where letters are drawn smaller than the atlas, more the smaller they
   get; at the very smallest sizes 1 turns letters into solid blocks.
 
-Example: `--mode asciilocal --ascii-glow 0.6 --ascii-strokes 0.5`.
+The defaults are the ASCII service's starting point, equal to
+`--mode asciilocal --ascii-grid 160x120 --ascii-glow .8 --ascii-strokes .5`,
+so `--mode asciilocal` alone gives that look.
 
 ## The biography
 
@@ -131,27 +135,89 @@ size. The browser viewer resamples the server's master grid itself, so
 there `runs` and `reveal` read only at the master size; other sizes pick
 every few letters.
 
+## Receipt printer
+
+What is drawn in the window can be printed, in `--mode local` and
+`--mode asciilocal` alike:
+
+- **P** prints the frame to the computer's own default printer: whatever
+  CUPS has as its default on Linux and macOS (`lpstat -d`, sent with `lp
+  -o fit-to-page`), the default printer on Windows. With no system printer
+  it goes to the receipt printer when `--printer` is on; otherwise P is
+  ignored. On paper the screen's black background is the white page and
+  the frame prints in greyscale (`PRINTER_PAPER = 'black'`: in colour, as
+  on screen); a landscape window turns to run down the page.
+- `--printer` drives the register's Epson TM-T88V (MICROS-branded,
+  Ethernet interface, raw ESC/POS on port 9100): random prints
+  `PRINTER_EVERY` apart (2-15 min; `--print-every 2-15` in minutes) and a
+  **double tap** on the touchscreen (or a double click). Without the flag a
+  stray tap prints nothing.
+
+```bash
+python main.py --mode local --printer
+python main.py --mode asciilocal --printer --print-every 2-15
+python main.py --mode asciilocal --printer text
+```
+
+It is a thermal printer, so it prints dots. By default (`--printer`,
+`screen`) the window itself is printed: right after a frame is drawn the
+loop reads the window's pixels back, and the printer thread turns them
+grey, fits them to the paper's 576 dots (a landscape window turns to run
+along the paper, `PRINTER_ROTATE`), dithers them (Floyd-Steinberg) and
+sends them as raster lines, then cuts. Whatever is drawn prints: photos,
+the ASCII picture, a rotated or mirrored window.
+
+`PRINTER_PAPER = 'white'` (default) treats the screen's black background as
+the white paper, so the picture prints like a greyscale image on paper:
+what is bright on screen becomes ink. On these frames that is 2-9% ink.
+`'black'` prints exactly as on screen, dark as ink, and a mostly-black
+frame comes out 94-98% solid.
+
+`--printer text` (asciilocal) prints the characters on screen in the
+printer's own font B instead: 64 columns, a 9 x 18-dot cell (the screen's
+0.5), background left blank, cells too dark to see on screen
+(`PRINTER_DARK`) left out, the `--ascii-bio` phrase spelled again after
+any shrinking so words stay whole, narrow frames magnified to fill the
+width.
+
+Converting and sending run on their own thread, one print at a time; a
+printer that is off or unreachable only logs a warning. The register
+reaches it at `PRINTER_HOST` (172.18.35.171, the address it kept from the
+restaurant) through the NetworkManager connection `printer`: `enp1s0`,
+172.18.35.180/27, no gateway, so internet stays on Wi-Fi. That connection
+returns at every boot.
+
 ## Settings (settings.py)
 
 | Setting | Default | Meaning |
 |---|---|---|
+| `PRINTER` | False | `--printer`: random prints and the double tap on the receipt printer (P prints without it, to the system printer) |
+| `PRINTER_MODE` | `'screen'` | `'screen'`: the window's pixels; `'text'`: the ASCII characters (`--printer text`) |
+| `PRINTER_HOST` / `PRINTER_PORT` | `172.18.35.171` / 9100 | The receipt printer's address |
+| `PRINTER_EVERY` | `(120, 900)` | Seconds between random prints; `--print-every` in minutes |
+| `PRINTER_PAPER` | `'white'` | Black background is the paper (bright prints as ink, greyscale); `'black'`: as on screen |
+| `PRINTER_DOTS` | 576 | Screen: dots across (80 mm paper) |
+| `PRINTER_ROTATE` | `'auto'` | Screen: turn a landscape window to run along the paper; None prints it across |
+| `PRINTER_COLUMNS` | 64 | Text: font B columns on 80 mm paper |
+| `PRINTER_DARK` | 32 | Text: cells darker than this on screen print blank; 0 prints all |
 | `LOCAL_ASCII_DECODE_ROW_PX` | 4 | JPEG decode keeps at least this many pixels per finest row (1/2-1/8 size); 0 = full size |
 | `LOCAL_ASCII_SHAPE` | `'picture'` | Grid shape: `'picture'` (whole image, as large as the window allows), `'window'` (fills it, image cropped), `'grid'` (browser's, letterboxed) |
-| `LOCAL_ASCII_GRID` | None | Master (finest) grid `(cols, rows)`; `--ascii-grid` sets it. None = 120x80 x multiplier. `'picture'`/`'window'` use only its rows |
+| `LOCAL_ASCII_GRID` | `(160, 120)` | Master (finest) grid `(cols, rows)`; `--ascii-grid` overrides. None = 120x80 x multiplier. `'picture'`/`'window'` use only its rows |
 | `LOCAL_ASCII_MULTIPLIER` | 1 | Master = 120x80 x this, when no grid is given |
 | `LOCAL_ASCII_MULTIPLY` | `'fine'` | `'fine'`: only the finest end grows; `'all'`: coarsest and default sizes grow by as much as the master |
 | `LOCAL_ASCII_ROWS` | `(None, None)` | Allowed row range; None = 10 / the master's rows |
 | `LOCAL_ASCII_HOME_ROWS` | None | Size at rest and after reset; None = `ASCII_HEIGHT` |
+| `LOCAL_ASCII_MANUAL_TIMEOUT` | 30 | Seconds after the last wheel/key zoom before random zoom resumes; 0 = until `0` |
 | `LOCAL_ASCII_ZOOM` | `'random'` | `'random'` or `'manual'` |
 | `LOCAL_ASCII_WALK_RATE` | 0 | Mouse/keys: rows per second toward a new size; 0 instant, as the browser |
 | `LOCAL_ASCII_RANDOM_TRANSITION` | `(0.5, 3.0)` | Random driver: seconds each change takes, drawn per change, eased; `(0, 0)` jumps |
 | `LOCAL_ASCII_HOLD` | `(2.0, 20.0)` | Random driver: seconds between changes, at least / at most, counted from each pick |
 | `LOCAL_ASCII_CROSSFADE` | False | Cross-fade neighbouring grid sizes mid-change instead of stepping |
 | `LOCAL_ASCII_LINE_SPACING` | 1.05 | As the web viewer |
-| `LOCAL_ASCII_GLOW` | 0 | `--ascii-glow`: neighbouring cells' colour under small letters |
+| `LOCAL_ASCII_GLOW` | 0.8 | `--ascii-glow`: neighbouring cells' colour under small letters |
 | `LOCAL_ASCII_GLOW_FROM` | 32 | Cell height (pixels) where the glow starts |
 | `LOCAL_ASCII_GLOW_FULL` | 8 | Cell height (pixels) from which it is at full strength |
-| `LOCAL_ASCII_STROKES` | 0 | `--ascii-strokes`: keep small letters bright |
+| `LOCAL_ASCII_STROKES` | 0.5 | `--ascii-strokes`: keep small letters bright |
 | `LOCAL_ASCII_FONT` | `static/fonts/century-schoolbook/CenturySchoolbookBold.ttf` | Path to any TTF/OTF/WOFF2 Pillow can open, from the repo root or absolute |
 
 The range is a look decision: set it by eye on the display it runs on.

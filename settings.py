@@ -95,11 +95,12 @@ ASCII_SOURCE_IMAGE_ASPECT_RATIO = 1.333333333
 
 # --- Local ASCII display (--mode asciilocal) ---
 LOCAL_ASCII = False              # Set by --mode asciilocal.
-LOCAL_ASCII_GRID = None          # Finest grid (cols, rows), e.g. (200, 120); --ascii-grid 200x120. None = ASCII_WEB_MAX_SIZE x multiplier.
+LOCAL_ASCII_GRID = (160, 120)    # Finest grid (cols, rows); --ascii-grid 160x120 overrides. None = ASCII_WEB_MAX_SIZE x multiplier. Starting point for the ASCII service.
 LOCAL_ASCII_MULTIPLIER = 1       # Local master = ASCII_WEB_MAX_SIZE x this (2 -> 240x160). Sampled on this machine only.
 LOCAL_ASCII_MULTIPLY = 'fine'    # 'fine': only the finest end grows; 'all': coarsest and default sizes scale too.
 LOCAL_ASCII_ROWS = (None, None)  # Allowed row range (min, max); None = 10 / the master's rows.
 LOCAL_ASCII_HOME_ROWS = None     # Size at rest and after reset; None = ASCII_HEIGHT.
+LOCAL_ASCII_MANUAL_TIMEOUT = 30  # Seconds after the last wheel/key zoom before random zoom takes over again; 0 = stay manual until 0 is pressed.
 LOCAL_ASCII_ZOOM = 'random'      # 'random': folder-selector-style driver; 'manual': wheel and keys only.
 LOCAL_ASCII_WALK_RATE = 0        # Mouse/keys: rows per second toward a new size; 0 jumps straight there, as the browser does.
 LOCAL_ASCII_RANDOM_TRANSITION = (0.5, 3.0)  # Random driver: each change takes a random time in this range (s), drawn per change, eased; (0, 0) jumps.
@@ -107,11 +108,25 @@ LOCAL_ASCII_HOLD = (2.0, 20.0)   # Random driver: at least / at most this long (
 LOCAL_ASCII_CROSSFADE = False    # True: mid-change, cross-fade the two neighbouring grid sizes (smoother, but less text-mode). False: step a whole grid at a time.
 LOCAL_ASCII_LINE_SPACING = 1.05  # As the web viewer's default.
 LOCAL_ASCII_DECODE_ROW_PX = 4   # JPEGs decode at 1/2-1/8 size while keeping this many pixels per finest row (only the grid is sampled); 0 = full size.
+# --- Receipt printer (--printer: local and asciilocal) ---
+# The MICROS-branded Epson TM-T88V (C31CA85A6001) on its Ethernet interface,
+# raw ESC/POS on port 9100. The register reaches it through the NetworkManager
+# connection "printer" (enp1s0, 172.18.35.180/27, no gateway).
+PRINTER = False                  # Set by --printer. P prints without it: to the system's default printer (CUPS / Windows), else to this receipt printer when --printer is on.
+PRINTER_MODE = 'screen'          # 'screen': the window's pixels, dithered (any local mode). 'text': the ASCII characters (asciilocal); --printer text.
+PRINTER_HOST = '172.18.35.171'   # The receipt printer --printer drives (random prints, double tap; P too when there is no system printer).
+PRINTER_PORT = 9100
+PRINTER_EVERY = (120, 900)       # Seconds between random prints (2-15 min); --print-every 2-15 sets it in minutes.
+PRINTER_DOTS = 576               # 'screen': dots across (576 on 80 mm paper).
+PRINTER_ROTATE = 'auto'          # 'screen': 'auto' turns a landscape window to run along the paper; None prints it across.
+PRINTER_PAPER = 'white'          # 'screen': 'white': the screen's black background is the white paper, so screen-bright prints as ink, like a greyscale image on paper. 'black': exactly as on screen (dark -> ink; mostly-black frames print nearly solid).
+PRINTER_COLUMNS = 64             # 'text': 80 mm paper in font B (576 dots / 9).
+PRINTER_DARK = 32                # 'text': cells drawn darker than this on screen (0-255, brightest colour channel) print blank, as the eye barely sees them; 0 prints every character.
 LOCAL_ASCII_SHAPE = 'picture'    # Grid shape: 'picture' (whole image, as large as the window allows), 'window' (fills it, image cropped), 'grid' (browser's 3:2, letterboxed).
-LOCAL_ASCII_GLOW = 0.0           # --ascii-glow: neighbouring cells' colour under small letters (0 off, 1 full).
+LOCAL_ASCII_GLOW = 0.8           # --ascii-glow: neighbouring cells' colour under small letters (0 off, 1 full). Starting point for the ASCII service.
 LOCAL_ASCII_GLOW_FROM = 32       # Glow starts when cells are this many pixels high...
 LOCAL_ASCII_GLOW_FULL = 8        # ...and is at full strength from this height down.
-LOCAL_ASCII_STROKES = 0.0        # --ascii-strokes: keep small letters bright (0 averaged as before, 1 brightest pixel).
+LOCAL_ASCII_STROKES = 0.5        # --ascii-strokes: keep small letters bright (0 averaged as before, 1 brightest pixel). Starting point for the ASCII service.
 LOCAL_ASCII_FONT = 'static/fonts/century-schoolbook/CenturySchoolbookBold.ttf'  # or 'static/fonts/schoolbook-mono/InterleaveSchoolbookMono-Black.woff2' (monospaced, weight 900, as on the web)
 JPEG_QUALITY = 60# Image quality (lower = fewer bytes per frame on slow links)
 HEADLESS_RES = (320, 400)   # Resolution for the virtual screen (web frame size)

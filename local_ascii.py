@@ -128,6 +128,10 @@ class Zoom:
         self._rng = random.Random()
         self._last = time.monotonic()
         self._random = {}
+        # After the wheel or keys, the random driver takes over again once
+        # they have been left alone this long (0: manual until 0 is pressed).
+        self.manual_timeout = max(0.0, float(_setting('LOCAL_ASCII_MANUAL_TIMEOUT', 30)))
+        self._manual_at = None
 
     def dims(self, rows):
         """Grid (cols, rows) for a row count: the browser's mapping, or, when
@@ -155,24 +159,28 @@ class Zoom:
         return [(self.dims(low), 1.0 - part), (self.dims(low + 1), part)]
 
     # Manual control ---------------------------------------------------------
-    def nudge(self, steps):
-        """Keys, as the browser: one whole row from where the size is now."""
+    def _take_over(self):
         self.driver = 'manual'
         self._move = None
+        self._manual_at = time.monotonic()
+
+    def nudge(self, steps):
+        """Keys, as the browser: one whole row from where the size is now."""
+        self._take_over()
         here = math.ceil(self.rows) if steps < 0 else math.floor(self.rows)
         self.target = max(self.low, min(self.high, here + steps))
 
     def scale(self, factor):
         """Wheel, as the browser: the row count times a factor, so each notch
         changes the size by the same proportion at every size."""
-        self.driver = 'manual'
-        self._move = None
+        self._take_over()
         self.target = max(float(self.low), min(float(self.high), self.rows * factor))
 
     def reset(self):
         self.driver = 'random' if _setting('LOCAL_ASCII_ZOOM', 'random') == 'random' else 'manual'
         self.target = self.home
         self._move = None
+        self._manual_at = None
         self._random.clear()
 
     # Per loop ----------------------------------------------------------------
@@ -180,6 +188,11 @@ class Zoom:
         """Advance the driver and the walk; True when the picture must be redrawn."""
         now = time.monotonic()
         elapsed, self._last = now - self._last, now
+        if (self.driver == 'manual' and self._manual_at is not None and self.manual_timeout > 0
+                and now - self._manual_at >= self.manual_timeout
+                and _setting('LOCAL_ASCII_ZOOM', 'random') == 'random'):
+            # Left alone long enough: random again, from the size it is at.
+            self.driver, self._manual_at = 'random', None
         if self.driver == 'random':
             picked = update_zoom_selection(index, self, self._random)
             if picked is not None and picked != self.target:
@@ -521,6 +534,8 @@ class LocalAsciiDisplay:
         self.glyphs = None
         self.colours = None
         self.dirty = True
+        # What draw() last showed, for --printer text.
+        self.on_screen = None
         print(f"[ASCII-LOCAL] Master grid {self.master[0] if not self.fill else 'N'}x"
               f"{self.master[1]}, shaped to the {self.shape}; "
               f"rows {self.zoom.low}-{self.zoom.high}, home {self.zoom.home}; "
@@ -707,7 +722,13 @@ class LocalAsciiDisplay:
                 data = np.empty(rows * cols, self.instance_dtype)
                 # --ascii-bio spells on the grid as shown, after resampling,
                 # so the phrase reads at every zoom size.
-                data['glyph'] = ascii_converter.apply_bio(glyphs.astype(np.int64)).ravel()
+                base = glyphs.astype(np.int64)
+                shown = ascii_converter.apply_bio(base)
+                data['glyph'] = shown.ravel()
+                if weight >= .5:
+                    # The frame as it is on screen, for --printer text.
+                    self.on_screen = (base, shown, ascii_converter.GLYPHS,
+                                      len(ascii_converter.CHARS), colours)
                 data['colour'] = colours.reshape(-1, 3)
                 self.instances.write(data.tobytes())
                 self.program['viewport'].value = (float(width), float(height))

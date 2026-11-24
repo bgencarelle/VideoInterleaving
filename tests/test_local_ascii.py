@@ -155,6 +155,44 @@ class ZoomTests(unittest.TestCase):
         zoom.nudge(1)
         self.assertEqual(zoom.target, 41)
 
+    def test_random_takes_over_again_after_the_wheel_is_left_alone(self):
+        clock = [100.0]
+        with mock.patch.object(local_ascii.time, 'monotonic', lambda: clock[0]), \
+                mock.patch.object(local_ascii, 'update_zoom_selection', lambda *a: None):
+            with settings(LOCAL_ASCII_MANUAL_TIMEOUT=30):
+                zoom = Zoom(COARSE, DEFAULT, MASTER)
+                zoom.scale(1.5)
+                clock[0] += 29
+                zoom.update(0)
+                self.assertEqual(zoom.driver, 'manual')
+                zoom.nudge(1)                      # touching it again restarts the wait
+                clock[0] += 29
+                zoom.update(0)
+                self.assertEqual(zoom.driver, 'manual')
+                clock[0] += 2
+                zoom.update(0)
+                self.assertEqual(zoom.driver, 'random')
+
+    def test_no_timeout_stays_manual(self):
+        clock = [100.0]
+        with mock.patch.object(local_ascii.time, 'monotonic', lambda: clock[0]):
+            with settings(LOCAL_ASCII_MANUAL_TIMEOUT=0):
+                zoom = Zoom(COARSE, DEFAULT, MASTER)
+                zoom.scale(1.5)
+                clock[0] += 1000
+                zoom.update(0)
+                self.assertEqual(zoom.driver, 'manual')
+
+    def test_manual_setting_never_goes_random(self):
+        clock = [100.0]
+        with mock.patch.object(local_ascii.time, 'monotonic', lambda: clock[0]):
+            with settings(LOCAL_ASCII_ZOOM='manual', LOCAL_ASCII_MANUAL_TIMEOUT=30):
+                zoom = Zoom(COARSE, DEFAULT, MASTER)
+                zoom.scale(1.5)
+                clock[0] += 1000
+                zoom.update(0)
+                self.assertEqual(zoom.driver, 'manual')
+
     def test_zero_walk_rate_jumps(self):
         zoom = self.make(LOCAL_ASCII_ZOOM='manual')
         zoom.nudge(-30)

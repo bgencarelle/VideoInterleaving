@@ -160,6 +160,22 @@ def configure_runtime():
     )
 
     parser.add_argument(
+        "--printer",
+        nargs="?",
+        const="screen",
+        choices=("screen", "text"),
+        help="--mode local / asciilocal: print what is on screen to the receipt "
+             "printer (PRINTER_HOST) at random times, on P and on a double tap. "
+             "screen (default): the window's pixels; text: the ASCII characters"
+    )
+
+    parser.add_argument(
+        "--print-every",
+        metavar="MIN-MAX",
+        help="--printer: minutes between random prints, e.g. 2-15 (default PRINTER_EVERY)"
+    )
+
+    parser.add_argument(
         "--ascii-grid",
         metavar="COLSxROWS",
         help="--mode asciilocal: finest grid, e.g. 200x120 (default "
@@ -674,6 +690,22 @@ def configure_runtime():
             if cols < 15 or rows < 10:
                 parser.error("--ascii-grid must be at least 15x10 (the coarsest size)")
             settings.LOCAL_ASCII_GRID = (cols, rows)
+    if args.printer is not None or args.print_every is not None:
+        if args.mode != "local":                   # asciilocal runs as local from here
+            print("⚠️  --printer / --print-every ignored: they apply to --mode local and "
+                  "asciilocal. Each mode in VideoInterleaving runs standalone.")
+        else:
+            settings.PRINTER = True
+            if args.printer is not None:
+                settings.PRINTER_MODE = args.printer
+            if args.print_every is not None:
+                try:
+                    low, high = (float(v) for v in args.print_every.replace(':', '-').split('-'))
+                except ValueError:
+                    parser.error("--print-every takes minutes as MIN-MAX, e.g. 2-15")
+                if not (0 < low <= high):
+                    parser.error("--print-every needs 0 < MIN <= MAX")
+                settings.PRINTER_EVERY = (low * 60, high * 60)
     if args.ascii_bio is not None:
         if args.mode in ("ascii", "asciiweb") or settings.LOCAL_ASCII:
             settings.ASCII_BIO = args.ascii_bio

@@ -504,6 +504,7 @@ def run_display(clock_source=CLOCK_MODE):
     # Local ASCII (--mode asciilocal): the window shows the ASCII
     # picture as glyphs instead of the images themselves.
     local_ascii = None
+    frame_printer = None
     if getattr(settings, 'LOCAL_ASCII', False):
         if is_headless or not has_gl or renderer.using_legacy_gl():
             print("⚠️  [ASCII-LOCAL] Needs a local window with OpenGL 3.3 / GLES 3; "
@@ -520,6 +521,80 @@ def run_display(clock_source=CLOCK_MODE):
                 print(f"[ASCII-LOCAL] JPEG decode at {local_scale[0]}/{local_scale[1]} size "
                       f"(source {source_image_size[0]}x{source_image_size[1]})")
     local_ascii_window = window
+
+    # Printing what is drawn in the window. P prints the frame to the
+    # system's default printer (CUPS / Windows); with none, to the receipt
+    # printer when --printer is on; otherwise it is ignored. --printer drives
+    # the receipt printer (PRINTER_HOST): random prints and a double tap.
+    # The loop takes a request right after drawing a frame and reads the
+    # window back then; printing runs on its own thread.
+    printer_wanted = getattr(settings, 'PRINTER', False)
+    can_read_window = not is_headless and has_gl and not renderer.using_legacy_gl()
+    print_key = {'wanted': False, 'busy': threading.Lock()}
+    if can_read_window:
+        def request_key_print():
+            print_key['wanted'] = True
+        state.print_request = request_key_print
+    elif printer_wanted:
+        print("⚠️  [PRINTER] Needs a local window with OpenGL 3.3 / GLES 3; not printing")
+    if can_read_window and printer_wanted and getattr(settings, 'PRINTER_HOST', None):
+        from thermal_printer import DoubleTap, FramePrinter
+        printer_mode = getattr(settings, 'PRINTER_MODE', 'screen')
+        if printer_mode == 'text' and local_ascii is None:
+            print("⚠️  [PRINTER] 'text' prints the ASCII display's characters "
+                  "(--mode asciilocal); printing the screen instead")
+            printer_mode = 'screen'
+        frame_printer = FramePrinter(
+            getattr(settings, 'PRINTER_HOST', '172.18.35.171'),
+            getattr(settings, 'PRINTER_PORT', 9100),
+            getattr(settings, 'PRINTER_EVERY', (120, 900)),
+            mode=printer_mode,
+            dots=getattr(settings, 'PRINTER_DOTS', 576),
+            rotate=getattr(settings, 'PRINTER_ROTATE', 'auto'),
+            invert=getattr(settings, 'PRINTER_PAPER', 'white') == 'white',
+            columns=getattr(settings, 'PRINTER_COLUMNS', 64),
+            dark=getattr(settings, 'PRINTER_DARK', 32),
+            respell=ascii_converter.apply_bio)
+        low, high = frame_printer.every
+        print(f"[PRINTER] Receipt printer {frame_printer.host}:{frame_printer.port} ({printer_mode}): "
+              f"every {low / 60:g}-{high / 60:g} min and on a double tap")
+
+        def attach_printer(win, tap=DoubleTap()):
+            def on_mouse_button(w, button, action, mods):
+                # Touchscreen taps arrive as left clicks.
+                if button == glfw.MOUSE_BUTTON_LEFT and action == glfw.PRESS:
+                    x, y = glfw.get_cursor_pos(w)
+                    if tap.press(time.monotonic(), x, y):
+                        frame_printer.request()
+            glfw.set_mouse_button_callback(win, on_mouse_button)
+        attach_printer(window)
+
+    def read_window():
+        fb_w, fb_h = glfw.get_framebuffer_size(window)
+        pixels = renderer.ctx.screen.read(viewport=(0, 0, fb_w, fb_h),
+                                          components=3, alignment=1)
+        return np.frombuffer(pixels, np.uint8).reshape(fb_h, fb_w, 3)[::-1]
+
+    def print_key_frame(rgb, text_frame):
+        """P: the system's default printer, else the receipt printer."""
+        try:
+            from system_printer import print_frame
+            printed = print_frame(rgb, paper=getattr(settings, 'PRINTER_PAPER', 'white'),
+                                  rotate=getattr(settings, 'PRINTER_ROTATE', 'auto'))
+            if printed:
+                print(f"[PRINTER] Frame sent to the system printer '{printed}'")
+            elif frame_printer is not None:
+                if frame_printer.mode == 'text':
+                    frame_printer.print_text(text_frame)
+                else:
+                    frame_printer.print_screen(rgb)
+            else:
+                print("[PRINTER] P: no system printer and no --printer; nothing printed")
+        except Exception as exc:                   # printing must never stop the display
+            print(f"⚠️  [PRINTER] Could not print the frame: {exc}")
+        finally:
+            print_key['busy'].release()
+    printer_window = window
 
     if has_gl and not isinstance(res0[0], str):
         main_texture = upload_layer(res0[0])
@@ -627,6 +702,9 @@ def run_display(clock_source=CLOCK_MODE):
                 if local_ascii is not None and window is not local_ascii_window:
                     local_ascii.attach(window)
                     local_ascii_window = window
+                if frame_printer is not None and window is not printer_window:
+                    attach_printer(window)
+                    printer_window = window
 
             prev = index
             index, _ = update_index(png_paths_len, PINGPONG)
@@ -855,6 +933,21 @@ def run_display(clock_source=CLOCK_MODE):
 
                     except Exception as e:
                         print(f"[CAPTURE ERROR] {e}")
+
+            # The frame just drawn, read back before it is shown.
+            if (render_now and print_key['wanted']
+                    and print_key['busy'].acquire(blocking=False)):
+                print_key['wanted'] = False
+                threading.Thread(target=print_key_frame, name='key-print', daemon=True,
+                                 args=(read_window(),
+                                       local_ascii.on_screen if local_ascii else None)).start()
+            if frame_printer is not None:
+                frame_printer.tick()
+                if render_now and frame_printer.take():
+                    if frame_printer.mode == 'text':
+                        frame_printer.print_text(local_ascii.on_screen)
+                    else:
+                        frame_printer.print_screen(read_window())
 
             if not is_headless and render_now and glfw:
                 swap_started = time.monotonic()
