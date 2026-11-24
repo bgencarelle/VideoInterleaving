@@ -108,6 +108,13 @@ parse_args() {
                     args="$args --mode asciilocal --dir ${SBS_DIR:-images_sbs}"
                     mode_specified=true
                     ;;
+                --scopelocal)
+                    # The scope on the sound card's default output and on
+                    # this screen, fullscreen. Pass --device NAME to choose
+                    # the output.
+                    args="$args --mode scopelocal"
+                    mode_specified=true
+                    ;;
                 --scope)
                     # --device null: no sound card is used or required. The
                     # samples are generated for browsers to render on their

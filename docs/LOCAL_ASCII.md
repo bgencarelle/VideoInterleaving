@@ -257,16 +257,16 @@ pip Pillow and Debian's are). Without the font it uses Pillow's default font.
 
 The local window modes run as user services, written by
 `scripts/setup_app.sh` to `~/.config/systemd/user/`: `vi-local`
-(`--mode local`) and `vi-asciilocal` (`--mode asciilocal` with the
+(`--mode local`), `vi-asciilocal` (`--mode asciilocal` with the
 settings.py defaults, the same as `--ascii-grid 160x120 --ascii-glow .8
---ascii-strokes .5`). They draw on the logged-in user's desktop, so they
+--ascii-strokes .5`) and `vi-scopelocal` (`--mode scopelocal`, below). They draw on the logged-in user's desktop, so they
 are user services only, managed as that user without sudo:
 
     systemctl --user enable --now vi-asciilocal
     systemctl --user status vi-asciilocal
     tail -f vi-asciilocal.log            # in the project folder
 
-Both take the screen, so they conflict: starting one stops the other.
+Each takes the screen, so they conflict: starting one stops the others.
 Setup removes any old system units of the same names (backed up under
 `/etc/systemd/system/videointerleaving-backups`), which would otherwise
 start a second window that takes the screen and the keyboard; one that was
@@ -278,3 +278,19 @@ up (`StartLimitIntervalSec=0`).
 For receipts, set `PRINTER = True` in settings.py rather than adding
 `--printer` to the unit: setup rewrites the unit files, and settings.py
 survives that.
+
+## Local scope (--mode scopelocal)
+
+`--mode scopelocal` is scope mode with its native trace preview fullscreen
+and image-only: the XY signal goes to the sound card, and the screen shows
+the trace it draws. It is the same as `--mode scope --scope-gui
+--scope-gui-fullscreen --scope-source images`: pictures are decoded from the
+image folders at runtime, so no XY bake is needed (`--scope-source bake` or
+`--bake-dir` still choose a bake). Every other scope option applies as in
+scope mode. The output is the default audio device unless `--device NAME`
+or `SCOPE_DEVICE` in settings.py names another; `--device null` draws on
+screen only. Click the preview to bring back the tuning controls.
+
+    python main.py --mode scopelocal
+    systemctl --user enable --now vi-scopelocal
+

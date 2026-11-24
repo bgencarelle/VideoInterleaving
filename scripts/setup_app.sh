@@ -912,7 +912,7 @@ Environment=XAUTHORITY=$XAUTH_PATH"
         log_info "Existing vi-asciiweb.service found"
     fi
 
-    # The local window modes (vi-local, vi-asciilocal) are user services
+    # The local window modes (vi-local, vi-asciilocal, vi-scopelocal) are user services
     # only: they draw on the desktop of the user who is logged in, which a
     # system service cannot reliably reach. They are managed with
     # `systemctl --user` as that user, never with sudo. A system unit of the
@@ -920,12 +920,14 @@ Environment=XAUTHORITY=$XAUTH_PATH"
     # takes the screen and the keyboard, so setup removes it.
     # vi-asciilocal is --mode asciilocal with the settings.py defaults
     # (160x120 grid, glow .8, strokes .5). For receipts set PRINTER = True in
-    # settings.py (setup rewrites these files). The two conflict: starting
-    # one stops the other.
+    # settings.py (setup rewrites these files). vi-scopelocal is
+    # --mode scopelocal: the scope on the sound card's default output (set
+    # SCOPE_DEVICE in settings.py for another) and its trace fullscreen on
+    # this screen. They conflict: starting one stops the others.
     USER_HOME=$(getent passwd "$USERNAME" 2>/dev/null | cut -d: -f6 || true)
     USER_HOME=${USER_HOME:-/home/$USERNAME}
     USER_SERVICE_DIR="$USER_HOME/.config/systemd/user"
-    LOCAL_UNITS="vi-local vi-asciilocal"
+    LOCAL_UNITS="vi-local vi-asciilocal vi-scopelocal"
 
     # systemctl --user for the target user, also when this script runs under
     # sudo (plain `systemctl --user` there would talk to root's manager).
@@ -941,13 +943,13 @@ Environment=XAUTHORITY=$XAUTH_PATH"
         fi
     }
 
-    # gui_unit NAME MODE DESCRIPTION OTHER
+    # gui_unit NAME MODE DESCRIPTION: the others in LOCAL_UNITS conflict
     gui_unit() {
         cat <<UNIT
 [Unit]
 Description=$3
 After=graphical-session.target
-Conflicts=$4.service
+Conflicts=$(for other in $LOCAL_UNITS; do [ "$other" = "$1" ] || printf '%s.service ' "$other"; done)
 StartLimitIntervalSec=0
 
 [Service]
@@ -965,8 +967,9 @@ StandardError=append:$PROJECT_DIR/$1.log
 WantedBy=default.target
 UNIT
     }
-    local_unit() { gui_unit vi-local local "VideoInterleaving (Local GUI)" vi-asciilocal; }
-    asciilocal_unit() { gui_unit vi-asciilocal asciilocal "VideoInterleaving (Local ASCII GUI)" vi-local; }
+    local_unit() { gui_unit vi-local local "VideoInterleaving (Local GUI)"; }
+    asciilocal_unit() { gui_unit vi-asciilocal asciilocal "VideoInterleaving (Local ASCII GUI)"; }
+    scopelocal_unit() { gui_unit vi-scopelocal scopelocal "VideoInterleaving (Local Scope GUI)"; }
 
     if [ "$DRY_RUN" = true ]; then
         if [ "$WEB_SERVICE_EXISTS" = true ]; then
@@ -1064,6 +1067,9 @@ EOF
         echo "[DRY-RUN] ---"
         echo "[DRY-RUN] vi-asciilocal.service:"
         asciilocal_unit | sed 's/^/[DRY-RUN] /'
+        echo "[DRY-RUN] ---"
+        echo "[DRY-RUN] vi-scopelocal.service:"
+        scopelocal_unit | sed 's/^/[DRY-RUN] /'
         echo "[DRY-RUN] ---"
         echo ""
         echo "[DRY-RUN] Would run: sudo systemctl daemon-reload; systemctl --user daemon-reload (as $USERNAME)"
@@ -1192,7 +1198,8 @@ EOF
             run_as_user mkdir -p "$USER_SERVICE_DIR"
             local_unit | run_as_user tee "$USER_SERVICE_DIR/vi-local.service" > /dev/null
             asciilocal_unit | run_as_user tee "$USER_SERVICE_DIR/vi-asciilocal.service" > /dev/null
-            log_success "User services written: $USER_SERVICE_DIR/vi-local.service, vi-asciilocal.service"
+            scopelocal_unit | run_as_user tee "$USER_SERVICE_DIR/vi-scopelocal.service" > /dev/null
+            log_success "User services written in $USER_SERVICE_DIR: vi-local, vi-asciilocal, vi-scopelocal"
             for unit in $MIGRATE_UNITS; do
                 # What `systemctl --user enable` does, also with the user
                 # logged out (WantedBy=default.target).
@@ -1279,7 +1286,8 @@ sudo systemctl daemon-reload
     echo "   Local window modes (user services, as $USERNAME, without sudo):"
     echo "   👉 Local Mode:    systemctl --user enable --now vi-local"
     echo "   👉 Local ASCII:   systemctl --user enable --now vi-asciilocal"
-    echo "      Enable one of the two: both take the screen, and starting one stops the other."
+    echo "   👉 Local Scope:   systemctl --user enable --now vi-scopelocal"
+    echo "      Enable one of the three: each takes the screen, and starting one stops the others."
 else
     log_step "⚙️  Skipping Systemd Services (not available on this system)"
     if [ "$OS" = "macos" ]; then

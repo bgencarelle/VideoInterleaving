@@ -6297,3 +6297,30 @@ audio is not started. Evidence is in `tmp/deployed_scope_prefix_20261020/` and
 **Handoff:** pull the correction and reload `/scope/` (or `/scope2/`). Preserve
 relative subresource URLs; direct-port-only tests cannot establish proxy-path
 correctness.
+
+---
+
+## Appendix A084 — Local scope mode (`--mode scopelocal`) — 2026-11-24
+
+**Request:** a local mode for the live scope, called like the other modes
+and run as a service: the scope on the sound card and on screen.
+
+`--mode scopelocal` maps in `main.py` to `--mode scope --scope-gui
+--scope-gui-fullscreen`, with `--scope-source images` unless a source or
+`--bake-dir` is given; `--no-scope-gui` / `--no-scope-gui-fullscreen` are
+refused there. Only the process title keeps the name. `scripts/setup_app.sh`
+writes a `vi-scopelocal` user service beside `vi-local` and `vi-asciilocal`
+(each conflicts with the others); `scripts/run_app.sh` takes `--scopelocal`.
+No scope source adapter, trajectory arithmetic, renderer, scheduler, GUI,
+default or closed stage changes: it reuses the existing native preview.
+
+**Checks:** `tests/test_scopelocal_cli.py` (3 tests) runs main's real
+configuration; scope YT CLI, lazy-import and ASCII suites pass. Under Xvfb
+with software GL and `--device null`, a synthetic two-folder image set ran
+fullscreen for 40 s with live-image thumbnails and the raster trace drawn
+(screenshot inspected). NullStream only: no PortAudio route, physical output
+or scope hookup is claimed.
+
+**Handoff:** pull and run `--mode scopelocal` (or enable `vi-scopelocal`) on
+the target with its real output device. Closed stages remain closed.
+

@@ -89,7 +89,8 @@ def configure_runtime():
 
     parser.add_argument(
         "--mode",
-        choices=["web", "ascii", "asciiweb", "local", "asciilocal", "scope", "modem"],
+        choices=["web", "ascii", "asciiweb", "local", "asciilocal", "scope", "scopelocal",
+                 "modem"],
         default="local",
         help="Operating Mode (default: local)"
     )
@@ -504,6 +505,19 @@ def configure_runtime():
     settings.LOCAL_ASCII = args.mode == "asciilocal"
     if settings.LOCAL_ASCII:
         args.mode = "local"
+    # scopelocal is scope mode (XY on the sound card) with its native trace
+    # preview fullscreen and image-only, so the screen shows what the scope
+    # draws. Pictures are decoded at runtime unless --scope-source bake or
+    # --bake-dir asks for a bake. From here on it runs as scope.
+    if args.mode == "scopelocal":
+        if args.scope_gui is False or args.scope_gui_fullscreen is False:
+            parser.error("--mode scopelocal is the fullscreen scope preview; "
+                         "use --mode scope for other views")
+        args.mode = "scope"
+        args.scope_gui = True
+        args.scope_gui_fullscreen = True
+        if args.scope_source is None and not args.bake_dir:
+            args.scope_source = "images"
     settings.LAYER_BAKE_DIR = None
     if args.bake_dir:
         if args.dir or args.xy_dir or args.modem_dir:
