@@ -66,7 +66,7 @@ class ScreenTests(unittest.TestCase):
         rgb[:, 30:] = 255                          # left half black, right half white
         ink = screen_to_ink(rgb, dots=96)
         self.assertEqual(ink.shape, (160, 96))      # portrait kept, 96 dots across
-        self.assertGreater(ink[:, :40].mean(), .95)
+        self.assertAlmostEqual(ink[:, :40].mean(), .85, delta=.03)   # black, capped at 85% of dots
         self.assertLess(ink[:, 56:].mean(), .05)
 
     def test_landscape_prints_across_the_full_width_unless_asked_to_turn(self):
@@ -82,15 +82,25 @@ class ScreenTests(unittest.TestCase):
         ink = screen_to_ink(np.full((50, 50, 3), 128, np.uint8), dots=96)
         self.assertAlmostEqual(ink.mean(), .5, delta=.08)
 
-    def test_raster_is_sent_in_bands_then_cut(self):
+    def test_raster_is_sent_slowly_in_small_bands_then_cut(self):
         ink = np.zeros((300, 576), bool)
         ink[0, 0] = True                           # the very first dot
         data = ink_to_escpos(ink)
-        self.assertTrue(data.startswith(b'\x1b@\x1dv0\x00\x48\x00\x00\x01'))   # 72 bytes x 256 rows
-        self.assertEqual(data[10], 0x80)            # leftmost dot is the high bit
-        self.assertIn(b'\x1dv0\x00\x48\x00\x2c\x00', data)                   # then 44 rows
+        speed = b'\x1d(K\x02\x002\x02'          # GS ( K fn 50: speed level 2
+        self.assertTrue(data.startswith(b'\x1b@' + speed + b'\x1dv0\x00\x48\x00\x20\x00'))  # 72 bytes x 32 rows
+        self.assertEqual(data[2 + 7 + 8], 0x80)     # leftmost dot is the high bit
+        self.assertEqual(data.count(b'\x1dv0\x00\x48\x00'), 10)   # 9 bands of 32 + one of 12
+        self.assertIn(b'\x1dv0\x00\x48\x00\x0c\x00', data)
         self.assertTrue(data.endswith(b'\x1bd\x0a\x1dV\x00'))   # 10 lines, then the cut
-        self.assertEqual(len(data), 2 + 2 * 8 + 300 * 72 + 6)
+        self.assertEqual(len(data), 2 + 7 + 10 * 8 + 300 * 72 + 6)
+
+    def test_speed_can_be_left_to_the_printer(self):
+        self.assertTrue(ink_to_escpos(np.zeros((8, 576), bool), speed=None)
+                        .startswith(b'\x1b@\x1dv0'))
+
+    def test_a_band_lost_to_a_reset_costs_at_most_one_band(self):
+        from thermal_printer import RASTER_BAND
+        self.assertLessEqual(RASTER_BAND * 72, 2304)   # <= 2.3 KB of garbage, then a fresh header
 
 
 class SendTests(unittest.TestCase):
@@ -143,7 +153,7 @@ class SchedulingTests(unittest.TestCase):
     def test_screen_pixels_print_on_their_own_thread(self):
         self.assertTrue(self.printer.print_screen(np.zeros((20, 10, 3), np.uint8)))
         self.assertTrue(self.done.wait(2))
-        self.assertTrue(self.sent[0].startswith(b'\x1b@\x1dv0'))
+        self.assertTrue(self.sent[0].startswith(b'\x1b@\x1d(K'))
 
     def test_one_print_at_a_time(self):
         self.printer._busy.acquire()

@@ -108,14 +108,21 @@ def frame_to_escpos(base, shown, glyphs, palette_size, columns=64, feed_lines=10
 
 
 PAPER_DOTS = 576               # TM-T88V on 80 mm paper
-RASTER_BAND = 256              # raster lines per GS v 0 command
+# Small raster bands: should the printer reset part way through a print (a
+# dense picture draws the most current), only the band it was in can turn
+# to garbage; the next band's GS v 0 header starts a fresh picture command.
+# With 256-line bands the rest of the picture printed as rolls of text.
+RASTER_BAND = 32               # raster lines per GS v 0 command (2.3 KB at 576 dots)
 
 
-def screen_to_ink(rgb, dots=PAPER_DOTS, rotate=None):
+def screen_to_ink(rgb, dots=PAPER_DOTS, rotate=None, ink=.85):
     """A picture (rows top-down, RGB, already upright and cut to the
     picture) as a dithered ink mask ``dots`` wide: True where the printer
     burns a dot, dark as ink, the full width of the paper. ``rotate='auto'``
-    turns a landscape picture to run along the paper instead."""
+    turns a landscape picture to run along the paper instead. ``ink`` caps
+    the share of dots burnt where the picture is black (PRINTER_INK): full
+    black still reads as black on thermal paper, with less heat and
+    current."""
     from PIL import Image, ImageOps
     image = Image.fromarray(np.ascontiguousarray(rgb)).convert('L')
     if rotate == 'auto' and image.width > image.height:
@@ -123,6 +130,9 @@ def screen_to_ink(rgb, dots=PAPER_DOTS, rotate=None):
     height = max(1, round(image.height * dots / image.width))
     image = image.resize((dots, height), Image.LANCZOS)
     image = ImageOps.invert(image)                 # dark -> set bits
+    ink = min(1.0, max(0.0, float(ink)))
+    if ink < 1.0:
+        image = image.point(lambda v: int(v * ink + .5))
     # Floyd-Steinberg dithering to one bit: the set bits are the ink.
     return np.asarray(image.convert('1'), dtype=bool)
 
@@ -132,12 +142,21 @@ def feed_and_cut(lines=10):
     return ESC + b'd' + bytes([max(0, min(255, int(lines)))]) + GS + b'V\x00'
 
 
-def ink_to_escpos(ink, feed_lines=10):
-    """ESC/POS raster (GS v 0) for an ink mask, in bands, then a cut."""
+def print_speed(level):
+    """GS ( K <fn 50>: print speed, 1 (slowest) to 13; None leaves it."""
+    if level is None:
+        return b''
+    return GS + b'(K\x02\x002' + bytes([max(1, min(13, int(level)))])
+
+
+def ink_to_escpos(ink, feed_lines=10, speed=2):
+    """ESC/POS raster (GS v 0) for an ink mask, in small bands, at a low
+    print speed (fewer dots heated at once, so less peak current), then a
+    feed and a cut."""
     rows, width = ink.shape
     packed = np.packbits(ink, axis=1)              # MSB first: the leftmost dot
     row_bytes = packed.shape[1]
-    out = [ESC + b'@']
+    out = [ESC + b'@', print_speed(speed)]
     for top in range(0, rows, RASTER_BAND):
         band = packed[top:top + RASTER_BAND]
         out.append(GS + b'v0\x00' + bytes([row_bytes & 255, row_bytes >> 8,
@@ -174,10 +193,12 @@ class FramePrinter:
 
     def __init__(self, host, port=9100, every=(120.0, 900.0), mode='screen',
                  dots=PAPER_DOTS, rotate=None, columns=64, dark=32, feed_lines=10,
+                 speed=2, ink=.85,
                  respell=None, clock=time.monotonic, rng=None, send=None, random_prints=True):
         self.host, self.port = host, int(port)
         self.mode = mode if mode in ('screen', 'text') else 'screen'
         self.dots, self.rotate, self.feed_lines = int(dots), rotate, int(feed_lines)
+        self.speed, self.ink = speed, ink
         self.columns, self.dark, self.respell = int(columns), int(dark), respell
         low, high = every
         self.every = (max(1.0, float(low)), max(1.0, float(low), float(high)))
@@ -213,7 +234,8 @@ class FramePrinter:
         """The window's pixels (rows top-down, RGB uint8)."""
         size = f"{rgb.shape[1]}x{rgb.shape[0]} px"
         return self._submit(lambda: ink_to_escpos(
-            screen_to_ink(rgb, self.dots, self.rotate), self.feed_lines), size)
+            screen_to_ink(rgb, self.dots, self.rotate, self.ink),
+            self.feed_lines, self.speed), size)
 
     def print_text(self, frame):
         """The ASCII display's characters: (base, shown, glyphs,

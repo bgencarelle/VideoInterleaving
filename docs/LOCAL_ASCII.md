@@ -172,6 +172,16 @@ the picture is wide. Receipts are dithered (Floyd-Steinberg), sent as
 raster lines (GS v 0), then fed `PRINTER_FEED_LINES` (10) blank lines and
 cut.
 
+Dense pictures are the hard case for the TM-T88V: it wants a 24 V supply
+of at least 2 A, and a picture with large dark areas draws the most
+current. A printer that resets part way through loses its place in the
+picture and prints the rest of the data as text (rolls of garbage). So
+pictures print slowly (`PRINTER_SPEED`, 2 of 1-13: fewer dots heated at
+once), black burns at most `PRINTER_INK` (85%) of its dots, and the
+picture goes in 32-line bands, so after a reset at most one band (2.3 KB)
+can turn to garbage before the next band's header starts a fresh picture
+command. If a printer still resets on dark pictures, check its supply.
+
 `--printer text` (asciilocal) prints the characters on screen in the
 printer's own font B instead: 64 columns, a 9 x 18-dot cell (the screen's
 0.5), background left blank, cells too dark to see on screen
@@ -200,6 +210,8 @@ returns at every boot.
 | `PRINTER_DOTS` | 576 | Screen: dots across (80 mm paper) |
 | `PRINTER_ROTATE` | None | Receipts: upright, full width; `'auto'` turns a landscape picture to run along the roll |
 | `PRINTER_FEED_LINES` | 10 | Receipts: blank lines fed before the cut |
+| `PRINTER_SPEED` | 2 | Receipt pictures: print speed 1 (slowest) - 13; None = the printer's own |
+| `PRINTER_INK` | 0.85 | Receipt pictures: share of dots burnt where the picture is black |
 | `PRINTER_COLUMNS` | 64 | Text: font B columns on 80 mm paper |
 | `PRINTER_DARK` | 32 | Text: cells darker than this on screen print blank; 0 prints all |
 | `LOCAL_ASCII_DECODE_ROW_PX` | 4 | JPEG decode keeps at least this many pixels per finest row (1/2-1/8 size); 0 = full size |
@@ -229,3 +241,19 @@ The range is a look decision: set it by eye on the display it runs on.
 OpenGL 3.3 or GLES 3 (it falls back to the images on a legacy GL2 context,
 with a warning), and Pillow able to read WOFF2 (FreeType built with Brotli:
 pip Pillow and Debian's are). Without the font it uses Pillow's default font.
+
+## Running it as a service
+
+`scripts/setup_app.sh` writes `vi-asciilocal` next to `vi-local`: a user
+service (recommended for a GUI) and a system fallback, both running
+`main.py --mode asciilocal --test` with the settings.py defaults (the same
+as `--ascii-grid 160x120 --ascii-glow .8 --ascii-strokes .5`), logging to
+`vi-asciilocal.log` in the project folder.
+
+    systemctl --user enable --now vi-asciilocal
+
+It conflicts with `vi-local`, since both take the screen: enable one of
+them. For receipts, add `--printer` to `ExecStart` in
+`~/.config/systemd/user/vi-asciilocal.service`, then
+`systemctl --user daemon-reload && systemctl --user restart vi-asciilocal`
+(running setup again rewrites the file).

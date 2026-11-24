@@ -120,6 +120,8 @@ PRINTER_EVERY = (120, 900)       # Seconds between random prints (2-15 min); --p
 PRINTER_DOTS = 576               # 'screen': dots across (576 on 80 mm paper).
 PRINTER_ROTATE = None            # Receipts print the picture upright as it stands on screen (R undone), full paper width. 'auto': turn a landscape picture to run along the paper.
 PRINTER_FEED_LINES = 10          # Receipts: blank lines fed after the print, then the cut.
+PRINTER_SPEED = 2                # Receipt pictures: print speed 1 (slowest) - 13. Slow prints heat fewer dots at once: less peak current. None = the printer's own.
+PRINTER_INK = 0.85               # Receipt pictures: share of dots burnt where the picture is black (0-1). Less heat and current; black still reads black.
 PRINTER_PAPER = 'white'          # 'white': the frame is drawn again on white for printing, tones kept (ASCII letters in ink as dark as they are bright on screen, no glow). 'black': exactly as on screen (mostly-black frames print nearly solid).
 PRINTER_COLUMNS = 64             # 'text': 80 mm paper in font B (576 dots / 9).
 PRINTER_DARK = 32                # 'text': cells drawn darker than this on screen (0-255, brightest colour channel) print blank, as the eye barely sees them; 0 prints every character.
