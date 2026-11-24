@@ -255,16 +255,26 @@ pip Pillow and Debian's are). Without the font it uses Pillow's default font.
 
 ## Running it as a service
 
-`scripts/setup_app.sh` writes `vi-asciilocal` next to `vi-local`: a user
-service (recommended for a GUI) and a system fallback, both running
-`main.py --mode asciilocal --test` with the settings.py defaults (the same
-as `--ascii-grid 160x120 --ascii-glow .8 --ascii-strokes .5`), logging to
-`vi-asciilocal.log` in the project folder.
+The local window modes run as user services, written by
+`scripts/setup_app.sh` to `~/.config/systemd/user/`: `vi-local`
+(`--mode local`) and `vi-asciilocal` (`--mode asciilocal` with the
+settings.py defaults, the same as `--ascii-grid 160x120 --ascii-glow .8
+--ascii-strokes .5`). They draw on the logged-in user's desktop, so they
+are user services only, managed as that user without sudo:
 
     systemctl --user enable --now vi-asciilocal
+    systemctl --user status vi-asciilocal
+    tail -f vi-asciilocal.log            # in the project folder
 
-It conflicts with `vi-local`, since both take the screen: enable one of
-them. For receipts, add `--printer` to `ExecStart` in
-`~/.config/systemd/user/vi-asciilocal.service`, then
-`systemctl --user daemon-reload && systemctl --user restart vi-asciilocal`
-(running setup again rewrites the file).
+Both take the screen, so they conflict: starting one stops the other.
+Setup removes any old system units of the same names (backed up under
+`/etc/systemd/system/videointerleaving-backups`), which would otherwise
+start a second window that takes the screen and the keyboard; one that was
+enabled is enabled as a user service instead.
+
+Every service restarts always (`Restart=always`, 3 s apart) and never gives
+up (`StartLimitIntervalSec=0`).
+
+For receipts, set `PRINTER = True` in settings.py rather than adding
+`--printer` to the unit: setup rewrites the unit files, and settings.py
+survives that.

@@ -345,13 +345,13 @@ get_packages_for_platform() {
             pkg_list="python3 python3-pip python3-devel python3-tkinter gcc gcc-c++ make cmake pkgconfig \
 libwebp-devel libjpeg-turbo-devel SDL2-devel alsa-lib-devel portaudio python3-opencv \
 mesa-libGL-devel mesa-libGLU-devel mesa-libEGL-devel mesa-libGLES-devel \
-libglvnd-devel glfw-devel mesa-utils python3-rtmidi \
+libglvnd-devel glfw-devel mesa-utils \
 chrony ninja-build bind-utils certbot python3-certbot-nginx"
             ;;
         arch)
             # Arch Linux equivalents
             pkg_list="python python-pip tk base-devel cmake pkg-config ninja \
-libwebp libjpeg-turbo sdl2 alsa-lib mesa glu glfw portaudio python-opencv ffmpeg python-rtmidi \
+libwebp libjpeg-turbo sdl2 alsa-lib mesa glu glfw portaudio python-opencv ffmpeg \
 chrony bind-tools certbot certbot-nginx"
             ;;
         macos)
@@ -898,7 +898,6 @@ Environment=XAUTHORITY=$XAUTH_PATH"
     WEB_SERVICE_EXISTS=false
     ASCII_SERVICE_EXISTS=false
     ASCIIWEB_SERVICE_EXISTS=false
-    LOCAL_SERVICE_EXISTS=false
 
     if check_systemd_service_exists "vi-web.service"; then
         WEB_SERVICE_EXISTS=true
@@ -912,68 +911,62 @@ Environment=XAUTHORITY=$XAUTH_PATH"
         ASCIIWEB_SERVICE_EXISTS=true
         log_info "Existing vi-asciiweb.service found"
     fi
-    if check_systemd_service_exists "vi-local.service"; then
-        LOCAL_SERVICE_EXISTS=true
-        log_info "Existing vi-local.service found"
-    fi
-    ASCIILOCAL_SERVICE_EXISTS=false
-    if check_systemd_service_exists "vi-asciilocal.service"; then
-        ASCIILOCAL_SERVICE_EXISTS=true
-        log_info "Existing vi-asciilocal.service found"
-    fi
 
-    # Local ASCII (--mode asciilocal): the local window drawn as glyphs, with
-    # the settings.py defaults (160x120 grid, glow .8, strokes .5). Built like
-    # vi-local: a user service (better for a GUI) and a system fallback. Both
-    # take the screen, so each one stops vi-local when it starts.
-    # For receipts, add --printer to ExecStart.
-    asciilocal_user_unit() {
+    # The local window modes (vi-local, vi-asciilocal) are user services
+    # only: they draw on the desktop of the user who is logged in, which a
+    # system service cannot reliably reach. They are managed with
+    # `systemctl --user` as that user, never with sudo. A system unit of the
+    # same name left by an earlier setup would start a second window that
+    # takes the screen and the keyboard, so setup removes it.
+    # vi-asciilocal is --mode asciilocal with the settings.py defaults
+    # (160x120 grid, glow .8, strokes .5). For receipts set PRINTER = True in
+    # settings.py (setup rewrites these files). The two conflict: starting
+    # one stops the other.
+    USER_HOME=$(getent passwd "$USERNAME" 2>/dev/null | cut -d: -f6 || true)
+    USER_HOME=${USER_HOME:-/home/$USERNAME}
+    USER_SERVICE_DIR="$USER_HOME/.config/systemd/user"
+    LOCAL_UNITS="vi-local vi-asciilocal"
+
+    # systemctl --user for the target user, also when this script runs under
+    # sudo (plain `systemctl --user` there would talk to root's manager).
+    user_systemctl() {
+        local uid
+        uid=$(id -u "$USERNAME" 2>/dev/null) || return 1
+        [ -S "/run/user/$uid/bus" ] || return 1   # not logged in: nothing running
+        if [ "$USERNAME" = "$(whoami)" ]; then
+            systemctl --user "$@"
+        else
+            sudo -u "$USERNAME" XDG_RUNTIME_DIR="/run/user/$uid" \
+                DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$uid/bus" systemctl --user "$@"
+        fi
+    }
+
+    # gui_unit NAME MODE DESCRIPTION OTHER
+    gui_unit() {
         cat <<UNIT
 [Unit]
-Description=VideoInterleaving (Local ASCII GUI)
-After=graphical.target
-Conflicts=vi-local.service
+Description=$3
+After=graphical-session.target
+Conflicts=$4.service
+StartLimitIntervalSec=0
 
 [Service]
 WorkingDirectory=$PROJECT_DIR
 Environment=PYTHONUNBUFFERED=1
 $ENV_DISPLAY
 $ENV_BLOCK
-ExecStart=$VENV_DIR/bin/python -O main.py --mode asciilocal --test
+ExecStart=$VENV_DIR/bin/python -O main.py --mode $2 --test
 Restart=always
 RestartSec=3
-StandardOutput=append:$PROJECT_DIR/vi-asciilocal.log
-StandardError=append:$PROJECT_DIR/vi-asciilocal.log
+StandardOutput=append:$PROJECT_DIR/$1.log
+StandardError=append:$PROJECT_DIR/$1.log
 
 [Install]
 WantedBy=default.target
 UNIT
     }
-    asciilocal_system_unit() {
-        cat <<UNIT
-[Unit]
-Description=VideoInterleaving (Local ASCII GUI) - System Service
-After=display-manager.service
-Wants=graphical.target
-Conflicts=vi-local.service
-
-[Service]
-Type=simple
-User=$USERNAME
-WorkingDirectory=$PROJECT_DIR
-Environment=PYTHONUNBUFFERED=1
-$ENV_DISPLAY
-$ENV_BLOCK
-ExecStart=$VENV_DIR/bin/python -O main.py --mode asciilocal --test
-Restart=always
-RestartSec=3
-StandardOutput=append:$PROJECT_DIR/vi-asciilocal.log
-StandardError=append:$PROJECT_DIR/vi-asciilocal.log
-
-[Install]
-WantedBy=graphical.target
-UNIT
-    }
+    local_unit() { gui_unit vi-local local "VideoInterleaving (Local GUI)" vi-asciilocal; }
+    asciilocal_unit() { gui_unit vi-asciilocal asciilocal "VideoInterleaving (Local ASCII GUI)" vi-local; }
 
     if [ "$DRY_RUN" = true ]; then
         if [ "$WEB_SERVICE_EXISTS" = true ]; then
@@ -984,6 +977,7 @@ UNIT
         echo "[DRY-RUN] ---"
         cat <<EOF | sed 's/^/[DRY-RUN] /'
 [Unit]
+StartLimitIntervalSec=0
 Description=VideoInterleaving (Web Stream)
 After=network.target
 
@@ -1011,6 +1005,7 @@ EOF
         echo "[DRY-RUN] ---"
         cat <<EOF | sed 's/^/[DRY-RUN] /'
 [Unit]
+StartLimitIntervalSec=0
 Description=VideoInterleaving (ASCII Telnet)
 After=network.target
 
@@ -1038,6 +1033,7 @@ EOF
         echo "[DRY-RUN] ---"
         cat <<EOF | sed 's/^/[DRY-RUN] /'
 [Unit]
+StartLimitIntervalSec=0
 Description=VideoInterleaving (ASCII WebSocket)
 After=network.target
 
@@ -1057,78 +1053,20 @@ WantedBy=multi-user.target
 EOF
         echo "[DRY-RUN] ---"
         echo ""
-        if [ "$LOCAL_SERVICE_EXISTS" = true ]; then
-            log_info "[DRY-RUN] Would update /etc/systemd/system/vi-local.service"
-        else
-            log_info "[DRY-RUN] Would create /etc/systemd/system/vi-local.service"
-        fi
+        for unit in $LOCAL_UNITS; do
+            if [ -f "/etc/systemd/system/$unit.service" ]; then
+                log_info "[DRY-RUN] Would disable, back up and remove the old system unit /etc/systemd/system/$unit.service"
+            fi
+        done
+        log_info "[DRY-RUN] Would write user services in $USER_SERVICE_DIR:"
+        echo "[DRY-RUN] vi-local.service:"
+        local_unit | sed 's/^/[DRY-RUN] /'
         echo "[DRY-RUN] ---"
-        USER_HOME=$(eval echo ~"$USERNAME" 2>/dev/null || getent passwd "$USERNAME" 2>/dev/null | cut -d: -f6 || echo "/home/$USERNAME")
-        log_info "[DRY-RUN] Would create user service at: $USER_HOME/.config/systemd/user/vi-local.service"
-        log_info "[DRY-RUN] Would create system service at: /etc/systemd/system/vi-local.service"
-        echo "[DRY-RUN] User service:"
-        cat <<EOF | sed 's/^/[DRY-RUN] /'
-[Unit]
-Description=VideoInterleaving (Local GUI)
-After=graphical.target
-Type=simple
-
-[Service]
-WorkingDirectory=$PROJECT_DIR
-Environment=PYTHONUNBUFFERED=1
-$ENV_DISPLAY
-$ENV_BLOCK
-ExecStart=$VENV_DIR/bin/python -O main.py --mode local --test
-Restart=always
-RestartSec=3
-StandardOutput=append:$PROJECT_DIR/vi-local.log
-StandardError=append:$PROJECT_DIR/vi-local.log
-
-[Install]
-WantedBy=default.target
-EOF
+        echo "[DRY-RUN] vi-asciilocal.service:"
+        asciilocal_unit | sed 's/^/[DRY-RUN] /'
         echo "[DRY-RUN] ---"
         echo ""
-        echo "[DRY-RUN] System service:"
-        cat <<EOF | sed 's/^/[DRY-RUN] /'
-[Unit]
-Description=VideoInterleaving (Local GUI) - System Service
-After=display-manager.service
-Wants=graphical.target
-Type=simple
-
-[Service]
-Type=simple
-User=$USERNAME
-WorkingDirectory=$PROJECT_DIR
-Environment=PYTHONUNBUFFERED=1
-$ENV_DISPLAY
-$ENV_BLOCK
-ExecStart=$VENV_DIR/bin/python -O main.py --mode local --test
-Restart=always
-RestartSec=3
-StandardOutput=append:$PROJECT_DIR/vi-local.log
-StandardError=append:$PROJECT_DIR/vi-local.log
-
-[Install]
-WantedBy=graphical.target
-EOF
-        echo "[DRY-RUN] ---"
-        echo ""
-        if [ "$ASCIILOCAL_SERVICE_EXISTS" = true ]; then
-            log_info "[DRY-RUN] Would update /etc/systemd/system/vi-asciilocal.service"
-        else
-            log_info "[DRY-RUN] Would create /etc/systemd/system/vi-asciilocal.service"
-        fi
-        log_info "[DRY-RUN] Would create user service at: $USER_HOME/.config/systemd/user/vi-asciilocal.service"
-        echo "[DRY-RUN] User service:"
-        asciilocal_user_unit | sed 's/^/[DRY-RUN] /'
-        echo "[DRY-RUN] ---"
-        echo "[DRY-RUN] System service:"
-        asciilocal_system_unit | sed 's/^/[DRY-RUN] /'
-        echo "[DRY-RUN] ---"
-        echo ""
-        echo "[DRY-RUN] Would run: sudo systemctl daemon-reload"
+        echo "[DRY-RUN] Would run: sudo systemctl daemon-reload; systemctl --user daemon-reload (as $USERNAME)"
     else
         # Backup existing services
         if [ "$WEB_SERVICE_EXISTS" = true ]; then
@@ -1140,17 +1078,11 @@ EOF
         if [ "$ASCIIWEB_SERVICE_EXISTS" = true ]; then
             backup_systemd_service "vi-asciiweb.service"
         fi
-        if [ "$LOCAL_SERVICE_EXISTS" = true ]; then
-            backup_systemd_service "vi-local.service"
-        fi
-        if [ "$ASCIILOCAL_SERVICE_EXISTS" = true ]; then
-            backup_systemd_service "vi-asciilocal.service"
-        fi
 
         # Stop services before rewriting (good practice)
         # Only stop if services are actually running to avoid errors on low-end systems
         log_info "Stopping existing services before update..."
-        for service in vi-web vi-ascii vi-asciiweb vi-local vi-asciilocal; do
+        for service in vi-web vi-ascii vi-asciiweb; do
             # Check if service is active (with sudo for permissions) and stop if running
             if sudo systemctl is-active --quiet "$service.service" 2>/dev/null; then
                 sudo systemctl stop "$service.service" 2>/dev/null || true
@@ -1165,6 +1097,7 @@ EOF
         fi
         sudo tee "/etc/systemd/system/vi-web.service" > /dev/null <<EOF
 [Unit]
+StartLimitIntervalSec=0
 Description=VideoInterleaving (Web Stream)
 After=network.target
 
@@ -1191,6 +1124,7 @@ EOF
         fi
         sudo tee "/etc/systemd/system/vi-ascii.service" > /dev/null <<EOF
 [Unit]
+StartLimitIntervalSec=0
 Description=VideoInterleaving (ASCII Telnet)
 After=network.target
 
@@ -1217,6 +1151,7 @@ EOF
         fi
         sudo tee "/etc/systemd/system/vi-asciiweb.service" > /dev/null <<EOF
 [Unit]
+StartLimitIntervalSec=0
 Description=VideoInterleaving (ASCII WebSocket)
 After=network.target
 
@@ -1236,95 +1171,43 @@ WantedBy=multi-user.target
 EOF
         log_success "vi-asciiweb.service created/updated"
 
-        if [ "$LOCAL_SERVICE_EXISTS" = true ]; then
-            log_info "Updating vi-local.service..."
-        else
-            log_info "Creating vi-local.service..."
-        fi
-        # Local mode service - use user service for better GUI compatibility
-        # Systemd user services work better for GUI applications
-        USER_HOME=$(eval echo ~"$USERNAME" 2>/dev/null || getent passwd "$USERNAME" 2>/dev/null | cut -d: -f6 || echo "")
-        if [ -z "$USER_HOME" ]; then
-            USER_HOME="/home/$USERNAME"  # Fallback to default
-        fi
-        USER_SERVICE_DIR="$USER_HOME/.config/systemd/user"
-        if [ "$DRY_RUN" = false ] && [ -d "$USER_HOME" ]; then
-            log_info "Creating user service for local mode (better GUI compatibility)..."
+        # Local window modes: user services. An old system unit of the same
+        # name is stopped, disabled, backed up and removed; if it was
+        # enabled, the user service is enabled in its place.
+        MIGRATE_UNITS=""
+        for unit in $LOCAL_UNITS; do
+            if [ -f "/etc/systemd/system/$unit.service" ]; then
+                log_info "Removing the old system unit $unit.service (now a user service)..."
+                if sudo systemctl is-enabled --quiet "$unit.service" 2>/dev/null; then
+                    MIGRATE_UNITS="$MIGRATE_UNITS $unit"
+                fi
+                sudo systemctl disable --now "$unit.service" 2>/dev/null || true
+                backup_systemd_service "$unit.service"
+                sudo rm -f "/etc/systemd/system/$unit.service"
+            fi
+        done
+        if [ -d "$USER_HOME" ]; then
             # As the user: a root-owned ~/.config/systemd/user stops
             # `systemctl --user enable` from creating its .wants links.
             run_as_user mkdir -p "$USER_SERVICE_DIR"
-
-            # Create user service
-            cat <<EOF > "$USER_SERVICE_DIR/vi-local.service"
-[Unit]
-Description=VideoInterleaving (Local GUI)
-After=graphical.target
-Type=simple
-
-[Service]
-WorkingDirectory=$PROJECT_DIR
-Environment=PYTHONUNBUFFERED=1
-$ENV_DISPLAY
-$ENV_BLOCK
-ExecStart=$VENV_DIR/bin/python -O main.py --mode local --test
-Restart=always
-RestartSec=3
-StandardOutput=append:$PROJECT_DIR/vi-local.log
-StandardError=append:$PROJECT_DIR/vi-local.log
-
-[Install]
-WantedBy=default.target
-EOF
-            chown -R "$USERNAME:$USERNAME" "$USER_SERVICE_DIR/vi-local.service" 2>/dev/null || true
-            log_success "User service created at $USER_SERVICE_DIR/vi-local.service"
-            log_info "Enable with: systemctl --user enable --now vi-local.service"
-        fi
-
-        # Also create system service as fallback (but note it may not work for GUI)
-        log_info "Creating system service for local mode (fallback)..."
-        sudo tee "/etc/systemd/system/vi-local.service" > /dev/null <<EOF
-[Unit]
-Description=VideoInterleaving (Local GUI) - System Service
-After=display-manager.service
-Wants=graphical.target
-Type=simple
-
-[Service]
-Type=simple
-User=$USERNAME
-WorkingDirectory=$PROJECT_DIR
-Environment=PYTHONUNBUFFERED=1
-$ENV_DISPLAY
-$ENV_BLOCK
-ExecStart=$VENV_DIR/bin/python -O main.py --mode local --test
-Restart=always
-RestartSec=3
-StandardOutput=append:$PROJECT_DIR/vi-local.log
-StandardError=append:$PROJECT_DIR/vi-local.log
-
-[Install]
-WantedBy=graphical.target
-EOF
-        log_success "vi-local.service created/updated (system service)"
-        log_warning "Note: For GUI applications, user service is recommended. Use: systemctl --user enable --now vi-local.service"
-
-        if [ "$ASCIILOCAL_SERVICE_EXISTS" = true ]; then
-            log_info "Updating vi-asciilocal.service..."
+            local_unit | run_as_user tee "$USER_SERVICE_DIR/vi-local.service" > /dev/null
+            asciilocal_unit | run_as_user tee "$USER_SERVICE_DIR/vi-asciilocal.service" > /dev/null
+            log_success "User services written: $USER_SERVICE_DIR/vi-local.service, vi-asciilocal.service"
+            for unit in $MIGRATE_UNITS; do
+                # What `systemctl --user enable` does, also with the user
+                # logged out (WantedBy=default.target).
+                run_as_user mkdir -p "$USER_SERVICE_DIR/default.target.wants"
+                run_as_user ln -sf "$USER_SERVICE_DIR/$unit.service" \
+                    "$USER_SERVICE_DIR/default.target.wants/$unit.service"
+                log_success "$unit.service was enabled as a system service: enabled as a user service instead"
+            done
         else
-            log_info "Creating vi-asciilocal.service..."
+            log_warning "No home directory for $USERNAME; local user services not written"
         fi
-        if [ -d "$USER_HOME" ]; then
-            run_as_user mkdir -p "$USER_SERVICE_DIR"
-            asciilocal_user_unit > "$USER_SERVICE_DIR/vi-asciilocal.service"
-            chown "$USERNAME:$USERNAME" "$USER_SERVICE_DIR/vi-asciilocal.service" 2>/dev/null || true
-            log_success "User service created at $USER_SERVICE_DIR/vi-asciilocal.service"
-            log_info "Enable with: systemctl --user enable --now vi-asciilocal.service"
-        fi
-        asciilocal_system_unit | sudo tee "/etc/systemd/system/vi-asciilocal.service" > /dev/null
-        log_success "vi-asciilocal.service created/updated (system service)"
 
         log_info "Reloading systemd daemon..."
 sudo systemctl daemon-reload
+        user_systemctl daemon-reload 2>/dev/null || true
         log_success "Systemd daemon reloaded"
 
         # Restart services that existed before (they were updated)
@@ -1368,43 +1251,17 @@ sudo systemctl daemon-reload
             fi
         fi
 
-        if [ "$LOCAL_SERVICE_EXISTS" = true ]; then
-            if sudo systemctl is-enabled --quiet vi-local.service 2>/dev/null; then
-                log_info "Restarting vi-local.service (system service)..."
-                if sudo systemctl restart vi-local.service 2>/dev/null; then
-                    log_success "vi-local.service (system) restarted"
+        for unit in $LOCAL_UNITS; do
+            if user_systemctl is-enabled --quiet "$unit.service" 2>/dev/null; then
+                log_info "Restarting user service $unit.service..."
+                if user_systemctl restart "$unit.service" 2>/dev/null; then
+                    log_success "$unit.service (user) restarted"
                     services_restarted=$((services_restarted + 1))
                 else
-                    log_warning "Failed to restart vi-local.service (system) (may not be running)"
+                    log_warning "Failed to restart $unit.service (user)"
                 fi
             fi
-
-            # Also restart user service for local mode if it exists
-            USER_HOME=$(eval echo ~"$USERNAME" 2>/dev/null || getent passwd "$USERNAME" 2>/dev/null | cut -d: -f6 || echo "")
-            if [ -n "$USER_HOME" ] && [ -f "$USER_HOME/.config/systemd/user/vi-local.service" ]; then
-                log_info "Restarting user service vi-local.service..."
-                if systemctl --user is-enabled --quiet vi-local.service 2>/dev/null; then
-                    systemctl --user restart vi-local.service 2>/dev/null && log_success "User vi-local.service restarted" || log_warning "Failed to restart user vi-local.service"
-                fi
-            fi
-        fi
-
-        if [ "$ASCIILOCAL_SERVICE_EXISTS" = true ]; then
-            if sudo systemctl is-enabled --quiet vi-asciilocal.service 2>/dev/null; then
-                log_info "Restarting vi-asciilocal.service (system service)..."
-                if sudo systemctl restart vi-asciilocal.service 2>/dev/null; then
-                    log_success "vi-asciilocal.service (system) restarted"
-                    services_restarted=$((services_restarted + 1))
-                else
-                    log_warning "Failed to restart vi-asciilocal.service (system) (may not be running)"
-                fi
-            fi
-            if [ -n "$USER_HOME" ] && [ -f "$USER_HOME/.config/systemd/user/vi-asciilocal.service" ]; then
-                if systemctl --user is-enabled --quiet vi-asciilocal.service 2>/dev/null; then
-                    systemctl --user restart vi-asciilocal.service 2>/dev/null && log_success "User vi-asciilocal.service restarted" || log_warning "Failed to restart user vi-asciilocal.service"
-                fi
-            fi
-        fi
+        done
 
         if [ "$services_restarted" -gt 0 ]; then
             log_success "Restarted $services_restarted service(s)"
@@ -1415,16 +1272,14 @@ sudo systemctl daemon-reload
 
     echo ""
     log_info "To enable and start services, run:"
-    echo "   👉 Web Mode:   systemctl enable --now vi-web"
-    echo "   👉 ASCII Mode: systemctl enable --now vi-ascii"
-    echo "   👉 ASCIIWEB Mode: systemctl enable --now vi-asciiweb"
-    echo "   👉 Local Mode (recommended): systemctl --user enable --now vi-local"
-    echo "   👉 Local Mode (fallback):    systemctl enable --now vi-local"
-    echo "   👉 Local ASCII (recommended): systemctl --user enable --now vi-asciilocal"
-    echo "   👉 Local ASCII (fallback):    systemctl enable --now vi-asciilocal"
-    echo "      Enable only one of vi-local and vi-asciilocal: both take the screen."
-    echo ""
-    log_info "For local mode, the user service is recommended for better GUI compatibility."
+    echo "   Server modes (system services, with sudo):"
+    echo "   👉 Web Mode:      sudo systemctl enable --now vi-web"
+    echo "   👉 ASCII Mode:    sudo systemctl enable --now vi-ascii"
+    echo "   👉 ASCIIWEB Mode: sudo systemctl enable --now vi-asciiweb"
+    echo "   Local window modes (user services, as $USERNAME, without sudo):"
+    echo "   👉 Local Mode:    systemctl --user enable --now vi-local"
+    echo "   👉 Local ASCII:   systemctl --user enable --now vi-asciilocal"
+    echo "      Enable one of the two: both take the screen, and starting one stops the other."
 else
     log_step "⚙️  Skipping Systemd Services (not available on this system)"
     if [ "$OS" = "macos" ]; then
@@ -1505,7 +1360,7 @@ else
     fi
 
     if [[ "$OSTYPE" == "linux-gnu"* ]] && command -v systemctl >/dev/null 2>&1; then
-        if [ "$WEB_SERVICE_EXISTS" = true ] || [ "$ASCII_SERVICE_EXISTS" = true ] || [ "$ASCIIWEB_SERVICE_EXISTS" = true ] || [ "$LOCAL_SERVICE_EXISTS" = true ] || [ "$ASCIILOCAL_SERVICE_EXISTS" = true ]; then
+        if [ "$WEB_SERVICE_EXISTS" = true ] || [ "$ASCII_SERVICE_EXISTS" = true ] || [ "$ASCIIWEB_SERVICE_EXISTS" = true ]; then
             echo "   ✅ Updated systemd services"
         else
             echo "   ✅ Created systemd services"

@@ -5,10 +5,6 @@
 moderngl  # Full-app renderer; also checked by setup on macOS
 #webp
 mido
-# Live MIDI ports for mido (MIDI clock). Linux gets it from the system package
-# (python3-rtmidi / python-rtmidi, see setup_app.sh), which avoids compiling
-# it on boards with no prebuilt wheel; macOS and Windows have wheels.
-python-rtmidi; sys_platform != "linux"
 glfw  # Python bindings; libglfw3 and Mesa runtime are installed via system-requirements.txt
 PyTurboJPEG==1.8.2
 SimpleWebsocketServer
