@@ -53,6 +53,25 @@ class SmallLetterTests(unittest.TestCase):
         self.assertEqual(kept[-1][0, 0], 255)
 
 
+class PictureRectTests(unittest.TestCase):
+    def rect(self, area):
+        display = local_ascii.LocalAsciiDisplay.__new__(local_ascii.LocalAsciiDisplay)
+        display.picture_area = area
+        return display.picture_rect()
+
+    def test_unturned_picture_is_where_it_was_drawn(self):
+        self.assertEqual(self.rect((100, 50, 600, 800, 800, 900, 0)), (100, 50, 600, 800, 0))
+
+    def test_turned_pictures_map_onto_the_screen(self):
+        # canvas 900 x 800 (screen 800 x 900 at a quarter turn)
+        area = (100, 50, 600, 300, 900, 800, 1)
+        self.assertEqual(self.rect(area), (50, 900 - 100 - 600, 300, 600, 1))
+        area = (100, 50, 600, 300, 900, 800, 3)
+        self.assertEqual(self.rect(area), (800 - 50 - 300, 100, 300, 600, 3))
+        area = (100, 50, 600, 300, 900, 800, 2)
+        self.assertEqual(self.rect(area), (900 - 100 - 600, 800 - 50 - 300, 600, 300, 2))
+
+
 class DecodeScaleTests(unittest.TestCase):
     def scale(self, size, **values):
         defaults = dict(LOCAL_ASCII_DECODE_ROW_PX=4, LOCAL_ASCII_GRID=None,

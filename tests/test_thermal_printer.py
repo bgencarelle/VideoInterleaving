@@ -57,7 +57,7 @@ class PaperTests(unittest.TestCase):
         self.assertIn(b'\x1b3\x90', data)                      # 18 dots x 8: 3 columns, 8x size
         self.assertIn(b'\x1d!\x77', data)
         self.assertIn(b'MMM\nMMM\n', data)
-        self.assertTrue(data.endswith(b'\x1dVA\x03'))
+        self.assertTrue(data.endswith(b'\x1bd\x0a\x1dV\x00'))   # 10 lines, then the cut
 
 
 class ScreenTests(unittest.TestCase):
@@ -69,15 +69,14 @@ class ScreenTests(unittest.TestCase):
         self.assertGreater(ink[:, :40].mean(), .95)
         self.assertLess(ink[:, 56:].mean(), .05)
 
-    def test_invert_flips_tones(self):
-        rgb = np.zeros((40, 20, 3), np.uint8)
-        self.assertLess(screen_to_ink(rgb, dots=32, invert=True).mean(), .05)
-
-    def test_landscape_runs_along_the_paper(self):
-        ink = screen_to_ink(np.zeros((60, 100, 3), np.uint8), dots=96)
-        self.assertEqual(ink.shape, (160, 96))
-        across = screen_to_ink(np.zeros((60, 100, 3), np.uint8), dots=96, rotate=None)
+    def test_landscape_prints_across_the_full_width_unless_asked_to_turn(self):
+        across = screen_to_ink(np.zeros((60, 100, 3), np.uint8), dots=96)
         self.assertEqual(across.shape, (58, 96))
+        along = screen_to_ink(np.zeros((60, 100, 3), np.uint8), dots=96, rotate='auto')
+        self.assertEqual(along.shape, (160, 96))
+
+    def test_white_stays_paper(self):
+        self.assertLess(screen_to_ink(np.full((40, 20, 3), 255, np.uint8), dots=32).mean(), .01)
 
     def test_greys_dither(self):
         ink = screen_to_ink(np.full((50, 50, 3), 128, np.uint8), dots=96)
@@ -90,8 +89,22 @@ class ScreenTests(unittest.TestCase):
         self.assertTrue(data.startswith(b'\x1b@\x1dv0\x00\x48\x00\x00\x01'))   # 72 bytes x 256 rows
         self.assertEqual(data[10], 0x80)            # leftmost dot is the high bit
         self.assertIn(b'\x1dv0\x00\x48\x00\x2c\x00', data)                   # then 44 rows
-        self.assertTrue(data.endswith(b'\x1dVA\x03'))
-        self.assertEqual(len(data), 2 + 2 * 8 + 300 * 72 + 4)
+        self.assertTrue(data.endswith(b'\x1bd\x0a\x1dV\x00'))   # 10 lines, then the cut
+        self.assertEqual(len(data), 2 + 2 * 8 + 300 * 72 + 6)
+
+
+class SendTests(unittest.TestCase):
+    def test_a_slow_printer_is_never_given_up_on_mid_picture(self):
+        from unittest import mock
+        import thermal_printer
+        sock = mock.MagicMock()
+        sock.__enter__.return_value = sock
+        with mock.patch.object(thermal_printer.socket, 'create_connection',
+                               return_value=sock) as connect:
+            FramePrinter('printer')._send_tcp(b'data')
+        self.assertEqual(connect.call_args.kwargs['timeout'], 5)     # connecting: short
+        sock.settimeout.assert_called_once_with(300)                 # sending: long
+        sock.sendall.assert_called_once_with(b'data')
 
 
 class SchedulingTests(unittest.TestCase):

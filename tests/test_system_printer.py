@@ -50,19 +50,20 @@ class DefaultPrinterTests(unittest.TestCase):
 
 
 class FrameImageTests(unittest.TestCase):
-    def test_white_paper_is_greyscale_with_the_black_background_as_paper(self):
-        image = sp.frame_image(np.zeros((40, 30, 3), np.uint8))
-        self.assertEqual((image.mode, image.getpixel((0, 0))), ('L', 255))
-
-    def test_black_paper_is_the_screen_in_colour(self):
+    def test_the_picture_prints_as_handed_over(self):
         rgb = np.zeros((40, 30, 3), np.uint8)
         rgb[..., 0] = 200
-        image = sp.frame_image(rgb, paper='black')
-        self.assertEqual((image.mode, image.getpixel((0, 0))), ('RGB', (200, 0, 0)))
+        image = sp.frame_image(rgb)
+        self.assertEqual((image.mode, image.size, image.getpixel((0, 0))), ('RGB', (30, 40), (200, 0, 0)))
 
-    def test_landscape_turns_to_run_down_the_page(self):
-        self.assertEqual(sp.frame_image(np.zeros((30, 50, 3), np.uint8)).size, (30, 50))
-        self.assertEqual(sp.frame_image(np.zeros((30, 50, 3), np.uint8), rotate=None).size, (50, 30))
+    def test_a_wide_picture_goes_on_a_landscape_page(self):
+        calls = []
+        with mock.patch.object(sp.sys, 'platform', 'linux'), \
+                mock.patch.object(sp.subprocess, 'run', lambda cmd, **kw: calls.append(cmd)):
+            sp.print_frame(np.zeros((30, 50, 3), np.uint8), printer='P')
+            sp.print_frame(np.zeros((50, 30, 3), np.uint8), printer='P')
+        self.assertIn('orientation-requested=4', calls[0])
+        self.assertNotIn('orientation-requested=4', calls[1])
 
 
 if __name__ == '__main__':

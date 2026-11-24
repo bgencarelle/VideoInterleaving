@@ -74,7 +74,7 @@ def fit_to_paper(indices, columns):
     return indices, max(1, min(8, columns // max(1, indices.shape[1])))
 
 
-def frame_to_escpos(base, shown, glyphs, palette_size, columns=64, cut_feed=3, invert=False,
+def frame_to_escpos(base, shown, glyphs, palette_size, columns=64, feed_lines=10, invert=False,
                     colours=None, dark=32, respell=None):
     """ESC/POS bytes that print one frame and cut the paper.
 
@@ -103,7 +103,7 @@ def frame_to_escpos(base, shown, glyphs, palette_size, columns=64, cut_feed=3, i
         GS + b'!' + bytes([size]),
         text, b'\n',
         GS + b'!\x00', ESC + b'2',                     # back to normal size and spacing
-        GS + b'VA' + bytes([cut_feed]),                # feed past the cutter, then cut
+        feed_and_cut(feed_lines),
     ])
 
 
@@ -111,27 +111,28 @@ PAPER_DOTS = 576               # TM-T88V on 80 mm paper
 RASTER_BAND = 256              # raster lines per GS v 0 command
 
 
-def screen_to_ink(rgb, dots=PAPER_DOTS, rotate='auto', invert=False):
-    """Screen pixels (rows top-down, RGB) as a dithered ink mask: True where
-    the printer burns a dot, ``dots`` wide.
-
-    ``invert`` (PRINTER_PAPER 'white', the default): the screen's black
-    background is the white paper, so what is bright on screen prints as
-    ink: a greyscale image on paper. Without it, dark on screen is ink, as
-    on screen, and a black background prints black."""
+def screen_to_ink(rgb, dots=PAPER_DOTS, rotate=None):
+    """A picture (rows top-down, RGB, already upright and cut to the
+    picture) as a dithered ink mask ``dots`` wide: True where the printer
+    burns a dot, dark as ink, the full width of the paper. ``rotate='auto'``
+    turns a landscape picture to run along the paper instead."""
     from PIL import Image, ImageOps
     image = Image.fromarray(np.ascontiguousarray(rgb)).convert('L')
     if rotate == 'auto' and image.width > image.height:
-        image = image.rotate(90, expand=True)      # run a landscape window along the paper
+        image = image.rotate(90, expand=True)
     height = max(1, round(image.height * dots / image.width))
     image = image.resize((dots, height), Image.LANCZOS)
-    if not invert:
-        image = ImageOps.invert(image)             # dark on screen -> ink
-    # Floyd-Steinberg dithering to one bit: light pixels (now ink) are set.
+    image = ImageOps.invert(image)                 # dark -> set bits
+    # Floyd-Steinberg dithering to one bit: the set bits are the ink.
     return np.asarray(image.convert('1'), dtype=bool)
 
 
-def ink_to_escpos(ink, cut_feed=3):
+def feed_and_cut(lines=10):
+    """Feed ``lines`` blank lines past the print, then cut there."""
+    return ESC + b'd' + bytes([max(0, min(255, int(lines)))]) + GS + b'V\x00'
+
+
+def ink_to_escpos(ink, feed_lines=10):
     """ESC/POS raster (GS v 0) for an ink mask, in bands, then a cut."""
     rows, width = ink.shape
     packed = np.packbits(ink, axis=1)              # MSB first: the leftmost dot
@@ -142,7 +143,7 @@ def ink_to_escpos(ink, cut_feed=3):
         out.append(GS + b'v0\x00' + bytes([row_bytes & 255, row_bytes >> 8,
                                            len(band) & 255, len(band) >> 8]))
         out.append(band.tobytes())
-    out.append(GS + b'VA' + bytes([cut_feed]))
+    out.append(feed_and_cut(feed_lines))
     return b''.join(out)
 
 
@@ -172,11 +173,11 @@ class FramePrinter:
     the display never waits on the printer."""
 
     def __init__(self, host, port=9100, every=(120.0, 900.0), mode='screen',
-                 dots=PAPER_DOTS, rotate='auto', invert=False, columns=64, dark=32,
+                 dots=PAPER_DOTS, rotate=None, columns=64, dark=32, feed_lines=10,
                  respell=None, clock=time.monotonic, rng=None, send=None, random_prints=True):
         self.host, self.port = host, int(port)
         self.mode = mode if mode in ('screen', 'text') else 'screen'
-        self.dots, self.rotate, self.invert = int(dots), rotate, bool(invert)
+        self.dots, self.rotate, self.feed_lines = int(dots), rotate, int(feed_lines)
         self.columns, self.dark, self.respell = int(columns), int(dark), respell
         low, high = every
         self.every = (max(1.0, float(low)), max(1.0, float(low), float(high)))
@@ -212,7 +213,7 @@ class FramePrinter:
         """The window's pixels (rows top-down, RGB uint8)."""
         size = f"{rgb.shape[1]}x{rgb.shape[0]} px"
         return self._submit(lambda: ink_to_escpos(
-            screen_to_ink(rgb, self.dots, self.rotate, self.invert)), size)
+            screen_to_ink(rgb, self.dots, self.rotate), self.feed_lines), size)
 
     def print_text(self, frame):
         """The ASCII display's characters: (base, shown, glyphs,
@@ -225,7 +226,7 @@ class FramePrinter:
         colours = None if colours is None else colours.copy()
         size = f"{base.shape[1]}x{base.shape[0]} characters"
         return self._submit(lambda: frame_to_escpos(
-            base, shown, glyphs, palette_size, self.columns,
+            base, shown, glyphs, palette_size, self.columns, self.feed_lines,
             colours=colours, dark=self.dark, respell=self.respell), size)
 
     def _submit(self, build, size):
@@ -248,5 +249,10 @@ class FramePrinter:
         return True
 
     def _send_tcp(self, data):
-        with socket.create_connection((self.host, self.port), timeout=10) as sock:
+        # A short wait to connect, then a long one to send: a dark picture
+        # makes the printer slow itself down, and giving up mid-picture
+        # leaves it waiting for the rest, so it prints the next job as
+        # garbage. Only a printer gone for minutes is given up on.
+        with socket.create_connection((self.host, self.port), timeout=5) as sock:
+            sock.settimeout(300)
             sock.sendall(data)

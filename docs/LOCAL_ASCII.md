@@ -144,9 +144,7 @@ What is drawn in the window can be printed, in `--mode local` and
   CUPS has as its default on Linux and macOS (`lpstat -d`, sent with `lp
   -o fit-to-page`), the default printer on Windows. With no system printer
   it goes to the receipt printer when `--printer` is on; otherwise P is
-  ignored. On paper the screen's black background is the white page and
-  the frame prints in greyscale (`PRINTER_PAPER = 'black'`: in colour, as
-  on screen); a landscape window turns to run down the page.
+  ignored.
 - `--printer` drives the register's Epson TM-T88V (MICROS-branded,
   Ethernet interface, raw ESC/POS on port 9100): random prints
   `PRINTER_EVERY` apart (2-15 min; `--print-every 2-15` in minutes) and a
@@ -159,19 +157,20 @@ python main.py --mode asciilocal --printer --print-every 2-15
 python main.py --mode asciilocal --printer text
 ```
 
-It is a thermal printer, so it prints dots. By default (`--printer`,
-`screen`) the window itself is printed: right after a frame is drawn the
-loop reads the window's pixels back, and the printer thread turns them
-grey, fits them to the paper's 576 dots (a landscape window turns to run
-along the paper, `PRINTER_ROTATE`), dithers them (Floyd-Steinberg) and
-sends them as raster lines, then cuts. Whatever is drawn prints: photos,
-the ASCII picture, a rotated or mirrored window.
-
-`PRINTER_PAPER = 'white'` (default) treats the screen's black background as
-the white paper, so the picture prints like a greyscale image on paper:
-what is bright on screen becomes ink. On these frames that is 2-9% ink.
-`'black'` prints exactly as on screen, dark as ink, and a mostly-black
-frame comes out 94-98% solid.
+What prints is the picture as it stands on screen. With `PRINTER_PAPER =
+'white'` (default) the frame is drawn again off screen on white: the
+background is the paper and the picture keeps its tones (a photo prints
+positive; ASCII letters print in ink as dark as they are bright on screen,
+so the near-black background letters fade away; no glow). `'black'` reads
+the window exactly as shown, which for these mostly-black frames is nearly
+solid ink. The print is cut to the picture's own rectangle (no letterbox
+bars) and turned back by the R rotation, so it stands upright as the
+picture does, then fills the paper: the receipt's full 576-dot width
+(`PRINTER_ROTATE = 'auto'` instead turns a landscape picture to run along
+the roll), or the page, fitted without cropping, on a landscape page when
+the picture is wide. Receipts are dithered (Floyd-Steinberg), sent as
+raster lines (GS v 0), then fed `PRINTER_FEED_LINES` (10) blank lines and
+cut.
 
 `--printer text` (asciilocal) prints the characters on screen in the
 printer's own font B instead: 64 columns, a 9 x 18-dot cell (the screen's
@@ -181,7 +180,9 @@ any shrinking so words stay whole, narrow frames magnified to fill the
 width.
 
 Converting and sending run on their own thread, one print at a time; a
-printer that is off or unreachable only logs a warning. The register
+printer that is off or unreachable only logs a warning. A print is never
+abandoned half sent (the printer would read the next job as the rest of
+the picture and print garbage): only connecting has a short time limit. The register
 reaches it at `PRINTER_HOST` (172.18.35.171, the address it kept from the
 restaurant) through the NetworkManager connection `printer`: `enp1s0`,
 172.18.35.180/27, no gateway, so internet stays on Wi-Fi. That connection
@@ -195,9 +196,10 @@ returns at every boot.
 | `PRINTER_MODE` | `'screen'` | `'screen'`: the window's pixels; `'text'`: the ASCII characters (`--printer text`) |
 | `PRINTER_HOST` / `PRINTER_PORT` | `172.18.35.171` / 9100 | The receipt printer's address |
 | `PRINTER_EVERY` | `(120, 900)` | Seconds between random prints; `--print-every` in minutes |
-| `PRINTER_PAPER` | `'white'` | Black background is the paper (bright prints as ink, greyscale); `'black'`: as on screen |
+| `PRINTER_PAPER` | `'white'` | Draw the frame again on white for paper, tones kept; `'black'`: as on screen |
 | `PRINTER_DOTS` | 576 | Screen: dots across (80 mm paper) |
-| `PRINTER_ROTATE` | `'auto'` | Screen: turn a landscape window to run along the paper; None prints it across |
+| `PRINTER_ROTATE` | None | Receipts: upright, full width; `'auto'` turns a landscape picture to run along the roll |
+| `PRINTER_FEED_LINES` | 10 | Receipts: blank lines fed before the cut |
 | `PRINTER_COLUMNS` | 64 | Text: font B columns on 80 mm paper |
 | `PRINTER_DARK` | 32 | Text: cells darker than this on screen print blank; 0 prints all |
 | `LOCAL_ASCII_DECODE_ROW_PX` | 4 | JPEG decode keeps at least this many pixels per finest row (1/2-1/8 size); 0 = full size |

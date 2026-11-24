@@ -5,11 +5,10 @@ on Linux and macOS, the default printer on Windows. The frame is saved as a
 PNG and handed to the print system, fitted to the page. With no default
 printer there is nothing to print to and the request is dropped.
 
-The picture is prepared as for the receipt printer: PRINTER_PAPER 'white'
-(default) treats the screen's black background as the white paper, so the
-frame prints as a greyscale image on paper; 'black' prints it in colour,
-exactly as on screen. PRINTER_ROTATE 'auto' turns a landscape window to run
-down the page.
+The display loop hands over the picture ready for paper: drawn on white
+(PRINTER_PAPER 'white') or as on screen, cut to the picture, upright. Here
+it is printed as it stands, fitted to the page without cropping; a picture
+wider than tall goes on a landscape page so it stays upright and fills it.
 """
 import os
 import shutil
@@ -43,28 +42,25 @@ def default_printer():
     return name or None
 
 
-def frame_image(rgb, paper='white', rotate='auto'):
-    """The frame as a PIL image for paper: greyscale with the screen's
-    black as white paper ('white'), or in colour as on screen ('black')."""
-    from PIL import Image, ImageOps
-    image = Image.fromarray(np.ascontiguousarray(rgb))
-    if paper == 'white':
-        image = ImageOps.invert(image.convert('L'))
-    if rotate == 'auto' and image.width > image.height:
-        image = image.rotate(90, expand=True)
-    return image
+def frame_image(rgb):
+    """The picture as a PIL image, as handed over."""
+    from PIL import Image
+    return Image.fromarray(np.ascontiguousarray(rgb))
 
 
-def print_file(path, printer, title='VideoInterleaving frame'):
-    """Hand an image file to the print system's ``printer``."""
+def print_file(path, printer, landscape=False, title='VideoInterleaving frame'):
+    """Hand an image file to the print system's ``printer``, fitted to the
+    page without cropping, on a landscape page if asked."""
     if sys.platform.startswith('win'):
         os.startfile(path, 'print')            # the default printer
         return
-    subprocess.run(['lp', '-d', printer, '-t', title, '-o', 'fit-to-page', path],
-                   check=True, capture_output=True, timeout=30)
+    command = ['lp', '-d', printer, '-t', title, '-o', 'fit-to-page']
+    if landscape:
+        command += ['-o', 'orientation-requested=4']
+    subprocess.run(command + [path], check=True, capture_output=True, timeout=30)
 
 
-def print_frame(rgb, paper='white', rotate='auto', printer=None):
+def print_frame(rgb, printer=None):
     """Print one frame to ``printer`` (default: the system's). False when
     there is no printer to print to."""
     printer = printer or default_printer()
@@ -73,8 +69,9 @@ def print_frame(rgb, paper='white', rotate='auto', printer=None):
     fd, path = tempfile.mkstemp(prefix='vi_frame_', suffix='.png')
     os.close(fd)
     try:
-        frame_image(rgb, paper, rotate).save(path)
-        print_file(path, printer)
+        image = frame_image(rgb)
+        image.save(path)
+        print_file(path, printer, landscape=image.width > image.height)
     finally:
         if not sys.platform.startswith('win'):  # lp has spooled its own copy
             try:

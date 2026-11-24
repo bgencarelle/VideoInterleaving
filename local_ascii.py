@@ -534,8 +534,10 @@ class LocalAsciiDisplay:
         self.glyphs = None
         self.colours = None
         self.dirty = True
-        # What draw() last showed, for --printer text.
+        # What draw() last showed, for --printer text, and where its picture
+        # sits (picture_rect), for printing just the picture.
         self.on_screen = None
+        self.picture_area = None
         print(f"[ASCII-LOCAL] Master grid {self.master[0] if not self.fill else 'N'}x"
               f"{self.master[1]}, shaped to the {self.shape}; "
               f"rows {self.zoom.low}-{self.zoom.high}, home {self.zoom.home}; "
@@ -669,7 +671,11 @@ class LocalAsciiDisplay:
                         np.full(grid.shape, 0xe6, np.uint8))
         self.dirty = True
 
-    def draw(self, framebuffer_size, background=(0, 0, 0), framebuffer=None):
+    def draw(self, framebuffer_size, background=(0, 0, 0), framebuffer=None, ink=False):
+        """Draw the frame. ``ink`` draws the print version, for white paper:
+        no glow, each letter in grey ink as dark as it is bright on screen,
+        so what shows on screen shows on paper and the near-black background
+        letters fade away."""
         width, height = framebuffer_size
         (framebuffer or self.ctx.screen).use()
         self.ctx.viewport = (0, 0, width, height)
@@ -688,6 +694,7 @@ class LocalAsciiDisplay:
                   else master_w * self.font_ratio / master_h)
         area_w, area_h = self._area(width, height, aspect)
         origin = ((width - area_w) / 2, (height - area_h) / 2)
+        self.picture_area = (origin[0], origin[1], area_w, area_h, width, height, quarter)
 
         import moderngl
         self.atlas.use(0)
@@ -715,7 +722,8 @@ class LocalAsciiDisplay:
                         g_glyphs = self.glyphs[np.ix_(g_ys, g_xs)]
                         g_colours = self.colours[np.ix_(g_ys, g_xs)]
                         g_cell_h = area_h / (1 + (g_rows - 1) * self.line_spacing)
-                    strength = glow_strength(g_cell_h, self.glow, self.glow_from, self.glow_full)
+                    strength = (0.0 if ink else
+                                glow_strength(g_cell_h, self.glow, self.glow_from, self.glow_full))
                     if strength > 0:
                         self._draw_glow(g_glyphs, g_colours, (width, height), (area_w, area_h),
                                         g_cell_h, strength, quarter)
@@ -729,7 +737,11 @@ class LocalAsciiDisplay:
                     # The frame as it is on screen, for --printer text.
                     self.on_screen = (base, shown, ascii_converter.GLYPHS,
                                       len(ascii_converter.CHARS), colours)
-                data['colour'] = colours.reshape(-1, 3)
+                if ink:
+                    seen = colours.max(axis=-1, keepdims=True)
+                    data['colour'] = np.repeat(255 - seen, 3, axis=-1).reshape(-1, 3)
+                else:
+                    data['colour'] = colours.reshape(-1, 3)
                 self.instances.write(data.tobytes())
                 self.program['viewport'].value = (float(width), float(height))
                 self.program['quarter'].value = float(quarter)
@@ -742,6 +754,20 @@ class LocalAsciiDisplay:
                 self.vao.render(mode=moderngl.TRIANGLE_STRIP, instances=rows * cols)
         finally:
             self.ctx.disable(moderngl.BLEND)
+
+    def picture_rect(self):
+        """The picture's rectangle in the window as last drawn, rows counted
+        from the top: (x, y, w, h, quarter turns it is shown with)."""
+        if self.picture_area is None:
+            return None
+        x, y, w, h, cw, ch, quarter = self.picture_area
+        if quarter == 1:                   # see on_screen() in the shaders
+            x, y, w, h = y, cw - x - w, h, w
+        elif quarter == 2:
+            x, y = cw - x - w, ch - y - h
+        elif quarter == 3:
+            x, y, w, h = ch - y - h, x, h, w
+        return x, y, w, h, quarter
 
     def _draw_glow(self, glyphs, colours, viewport, area, cell_h, strength, quarter=0):
         """Under the letters: each cell's colour at its own brightness (what

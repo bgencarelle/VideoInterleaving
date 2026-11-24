@@ -550,8 +550,8 @@ def run_display(clock_source=CLOCK_MODE):
             getattr(settings, 'PRINTER_EVERY', (120, 900)),
             mode=printer_mode,
             dots=getattr(settings, 'PRINTER_DOTS', 576),
-            rotate=getattr(settings, 'PRINTER_ROTATE', 'auto'),
-            invert=getattr(settings, 'PRINTER_PAPER', 'white') == 'white',
+            rotate=getattr(settings, 'PRINTER_ROTATE', None),
+            feed_lines=getattr(settings, 'PRINTER_FEED_LINES', 10),
             columns=getattr(settings, 'PRINTER_COLUMNS', 64),
             dark=getattr(settings, 'PRINTER_DARK', 32),
             respell=ascii_converter.apply_bio)
@@ -570,17 +570,59 @@ def run_display(clock_source=CLOCK_MODE):
         attach_printer(window)
 
     def read_window():
+        """The frame for paper: just the picture, upright, rows top-down.
+
+        PRINTER_PAPER 'white' (default) draws the frame again off screen on
+        white, so the background is the paper and the picture keeps its
+        tones (the ASCII letters in black ink, without the glow); 'black'
+        reads the window exactly as shown. Either way it is cut to the
+        picture's own rectangle (no letterbox bars) and turned back by the
+        R rotation, so it prints the way the picture stands.
+        """
         fb_w, fb_h = glfw.get_framebuffer_size(window)
-        pixels = renderer.ctx.screen.read(viewport=(0, 0, fb_w, fb_h),
-                                          components=3, alignment=1)
-        return np.frombuffer(pixels, np.uint8).reshape(fb_h, fb_w, 3)[::-1]
+        if getattr(settings, 'PRINTER_PAPER', 'white') == 'white':
+            target = renderer.ctx.simple_framebuffer((fb_w, fb_h), components=3)
+            try:
+                if local_ascii is not None:
+                    local_ascii.draw((fb_w, fb_h), (255, 255, 255), framebuffer=target,
+                                     ink=True)
+                else:
+                    target.use()
+                    renderer.overlay_images_single_pass(
+                        main_texture, float_texture, (255, 255, 255),
+                        main_is_sbs=cur_m_sbs, float_is_sbs=cur_f_sbs)
+                pixels = target.read(components=3, alignment=1)
+            finally:
+                renderer.ctx.screen.use()
+                renderer.ctx.viewport = (0, 0, fb_w, fb_h)
+                target.release()
+        else:
+            pixels = renderer.ctx.screen.read(viewport=(0, 0, fb_w, fb_h),
+                                              components=3, alignment=1)
+        rgb = np.frombuffer(pixels, np.uint8).reshape(fb_h, fb_w, 3)[::-1]
+        if local_ascii is not None:
+            rect = local_ascii.picture_rect()
+            x, y, w, h, quarter = rect if rect else (0, 0, fb_w, fb_h, 0)
+        else:
+            # Where display_manager placed the picture (pixels, y up).
+            img_w, img_h = renderer._image_size
+            w, h = img_w * renderer._fs_scale, img_h * renderer._fs_scale
+            quarter = int(round(renderer._rotation_angle)) % 360 // 90
+            if quarter % 2:
+                w, h = h, w
+            x, y = renderer._fs_offset_x, fb_h - (renderer._fs_offset_y + h)
+        x0, y0 = max(0, int(round(x))), max(0, int(round(y)))
+        x1, y1 = min(fb_w, int(round(x + w))), min(fb_h, int(round(y + h)))
+        if x1 > x0 and y1 > y0:
+            rgb = rgb[y0:y1, x0:x1]
+        # The picture is shown turned counter-clockwise by the rotation.
+        return np.ascontiguousarray(np.rot90(rgb, -quarter))
 
     def print_key_frame(rgb, text_frame):
         """P: the system's default printer, else the receipt printer."""
         try:
             from system_printer import print_frame
-            printed = print_frame(rgb, paper=getattr(settings, 'PRINTER_PAPER', 'white'),
-                                  rotate=getattr(settings, 'PRINTER_ROTATE', 'auto'))
+            printed = print_frame(rgb)
             if printed:
                 print(f"[PRINTER] Frame sent to the system printer '{printed}'")
             elif frame_printer is not None:
